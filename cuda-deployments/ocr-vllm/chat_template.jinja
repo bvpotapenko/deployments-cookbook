@@ -1,0 +1,22 @@
+{%- for message in messages -%}
+  {%- if message['role'] == 'user' -%}
+    {%- if message['content'] is string -%}
+      {{- message['content'] -}}
+    {%- else -%}
+      {#- vLLM's openai content format hands image parts to the template as
+          {"type": "image"}; the raw OpenAI wire form is "image_url". Both are
+          accepted here, the placeholder emitted first, text after - the same
+          shape the score path builds. -#}
+      {%- for part in message['content'] -%}
+        {%- if part['type'] == 'image' or part['type'] == 'image_url' -%}
+          {{- '<image>\n' -}}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- for part in message['content'] -%}
+        {%- if part['type'] == 'text' -%}
+          {{- part['text'] -}}
+        {%- endif -%}
+      {%- endfor -%}
+    {%- endif -%}
+  {%- endif -%}
+{%- endfor -%}

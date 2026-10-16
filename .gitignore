@@ -1,0 +1,11 @@
+.scratch/
+.smoke-info.json
+.smoke-server.log
+.venv-smoke/
+collection-settings.md
+
+__pycache__/
+
+# wheel closures: multi-GB, rebuilt with make_wheels.sh, never committed
+cuda-deployments/*/wheels/
+npu-deployments/*/wheels/

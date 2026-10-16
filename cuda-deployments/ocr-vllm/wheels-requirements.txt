@@ -1,0 +1,7 @@
+# The offline wheel closure for this deployment, exact pins.
+#
+# REGENERATE from a verified provisioned venv (the pins below are the known
+# top-level ones; the full closure is pip freeze after the first successful
+# provision + smoke):
+#   /root/kotvenv-vllm-ocr/bin/pip freeze > wheels-requirements.txt
+vllm==0.30.0
