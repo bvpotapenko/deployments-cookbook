@@ -5,8 +5,10 @@ part and the document as an image data URI) and a full-vocabulary
 log-probability surface, same port. The environment, the venv and the
 launcher pattern are llm-sglang's; the same patch layer
 (`sitecustomize.py`) stashes full-vocabulary float32 log-softmax rows at
-engine-internal entry points, and it travels with one extra module, the
-no-repeat ngram rule.
+engine-internal entry points, it pins the per-image token count so the
+engine keeps the request ids verbatim (the engine's own fallback
+retokenizes, and the retokenized prompt drifts), and it travels with one
+extra module, the no-repeat ngram rule.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
@@ -65,6 +67,9 @@ placeholder, then `\n` + instruction. The chat surface builds it: the text
 part is the instruction alone, and the tokenizer is a LlamaTokenizerFast
 read from the weights. The processor expands the placeholder into 257
 tokens for a <=768px image, 144 more per crop tile; one image per request.
+The score path refuses a request whose consumed length disagrees with the
+ids plus the recorded image token counts: a retokenized request fails
+loudly at the request, not silently in the rows.
 
 Generation applies a no-repeat ngram rule through a per-request custom
 logits processor (`kot_ocr_ngram.py`): ngram 30, window 90, the two table
