@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir --break-system-packages \
 
 # platform-ascend-910b.txt: torch-npu 2.10.0.post2 pulls the CUDA-free torch
 # 2.10.0; torchvision is pinned beside it because the two must match.
+# The engine venv overlays its own torch_npu (post4) on these at first
+# start; see wheels-requirements.txt for the two layers.
 RUN pip install --no-cache-dir --break-system-packages \
     /wheels/torch-2.10.0-cp312-cp312-manylinux_2_28_aarch64.whl \
     /wheels/torch_npu-2.10.0.post2-cp312-cp312-manylinux_2_28_aarch64.whl \
