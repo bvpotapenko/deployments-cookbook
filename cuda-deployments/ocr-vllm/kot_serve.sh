@@ -52,8 +52,16 @@ find_python() {
     mkdir -p "$venv"
   fi
   if [ ! -x "$venv/bin/python" ]; then
-    echo "[kot-vllm-ocr] creating venv at $venv" >&2
-    python3 -m venv "$venv"
+    echo "[kot-vllm-ocr] creating venv at $venv with CPython 3.12 (the wheel set is cp312)" >&2
+    if command -v uv >/dev/null 2>&1; then
+      uv python install 3.12 && uv venv --seed --python 3.12 "$venv"
+    elif command -v python3.12 >/dev/null 2>&1; then
+      python3.12 -m venv "$venv"
+    else
+      echo "[kot-vllm-ocr] no CPython 3.12 on this host: the offline wheels install on no" \
+           "other interpreter. Install uv, or point KOT_PYTHON at a 3.12 interpreter with vllm." >&2
+      exit 1
+    fi
   fi
   if ! "$venv/bin/python" -c "import vllm" >/dev/null 2>&1; then
     echo "[kot-vllm-ocr] installing vllm $VLLM_PIN offline from $DIR/wheels" >&2
