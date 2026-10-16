@@ -41,8 +41,9 @@ Numerics of the score path, in one place:
   accepts what the sampler emitted before EOS, at most that many. Rows are
   stashed at the sampler's entry -- the raw pre-sampling distributions, one
   per emitted token, before any penalty or temperature touches the logits.
-  ``input_ids.npy`` stores the expanded template plus the generated ids, so a
-  replay prefill teacher-forces over exactly what was consumed.
+  ``input_ids.npy`` stores the raw template plus the generated ids, so a
+  replay prefill teacher-forces over exactly what the request carried: the
+  pre-expansion sequence, with its single image placeholder.
 
 Rows land on disk through ``open_memmap`` at the final shape, filled block by
 block as the engine's stash arrives: the full-vocabulary log-softmax of a
@@ -230,6 +231,38 @@ def _decode_data_uri(uri: str):
     return Image.open(BytesIO(base64.b64decode(uri[comma + 1:]))).convert("RGB")
 
 
+def _consumed_guard(done: dict, ids: list[int], engine) -> None:
+    """The engine must consume the request ids verbatim, plus the image blocks.
+
+    The patch layer records the per-image token counts the engine just used
+    (``last_counts.json`` in the stash dir). The reply's ``prompt_tokens``
+    must equal the request ids, minus the placeholders, plus one block per
+    image. A mismatch means the engine retokenized the request or changed the
+    expansion; the self-agreement would read that only as numbers.
+    """
+    meta = done.get("meta_info", {}) if isinstance(done, dict) else {}
+    prompt_tokens = int(meta.get("prompt_tokens", 0) or 0)
+    if not prompt_tokens:
+        return
+    note_path = Path(os.environ["KOT_SGLANG_STASH_DIR"]) / "last_counts.json"
+    try:
+        counts = json.loads(note_path.read_text(encoding="utf-8")).get("counts", [])
+    except Exception:
+        raise ScoreFailure(
+            "the count note is missing: the patch layer recorded no image token counts; "
+            "the engine may have taken the retokenize fallback again"
+        )
+    placeholder = engine.tokenizer.convert_tokens_to_ids(IMAGE_TAG)
+    placeholders = sum(1 for token in ids if int(token) == placeholder)
+    expected = len(ids) - placeholders + sum(counts)
+    if prompt_tokens != expected:
+        raise ScoreFailure(
+            f"the engine consumed {prompt_tokens} tokens for {len(ids)} ids with "
+            f"{placeholders} placeholder(s) and counts {counts}; expected {expected}: "
+            "the request did not stay verbatim"
+        )
+
+
 async def _score_prefill(engine, body: dict) -> dict:
     """Teacher forced over the ids the request carried, verbatim.
 
@@ -260,13 +293,14 @@ async def _score_prefill(engine, body: dict) -> dict:
     ids = list(transcript)
 
     _clean_stash()
-    await engine.async_generate(
+    done = await engine.async_generate(
         input_ids=ids,
         image_data=image,
         sampling_params=_sampling_params(0, seed, NEUTRAL_SAMPLING, True),
         return_logprob=True,
         logprob_start_len=0,
     )
+    _consumed_guard(done, ids, engine)
     blocks = await _collect_stash("prefill")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
@@ -332,6 +366,7 @@ async def _score_decode(engine, body: dict) -> dict:
         logprob_start_len=-1,
         custom_logit_processor=engine.ngram_processor,
     )
+    _consumed_guard(done, ids, engine)
     output_ids = [int(token) for token in done["output_ids"]]
     # The decode's own sampler rows: the probe below would pollute the stash
     # with prefill rows, so collect before probing.
