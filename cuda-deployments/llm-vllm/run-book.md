@@ -1,35 +1,47 @@
 # Run Book: llm-vllm
 
-vLLM 0.11.0 V1 engine behind one process: the OpenAI chat surface and a
-full-vocabulary log-probability surface, same port. The server carries a
-version-pinned engine patch: it refuses to start on any other vllm version.
+This deployment serves text models with vLLM 0.33. One process serves the
+OpenAI chat surface and the full-vocabulary log-probability surface on one
+port. The full-vocabulary tap is version-pinned, so the server refuses to
+start on any other vllm version.
+
+## Model parameters
+
+The table holds the launch parameters per model. Every value not named stays
+at the deployment default. Read a model's row against the same row in the
+other engine run books. A mismatch between engines is the first suspect when
+a comparison fails.
+
+| model | revision | cards | `KOT_VLLM_GPU_MEM` | `KOT_VLLM_MAX_BATCHED_TOKENS` | `KOT_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
+|---|---|---|---|---|---|---|---|
+| Qwen/Qwen3-0.6B | `c1899de289a04d12100db370d81485cdf75e47ca` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.6, top_p 0.95, top_k 20 |
+| deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.70 | 1024 | unset | bfloat16 | temperature 0.3, top_p 0.95 |
+| state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
+
+One stack serves every model: CPython 3.12, vLLM 0.33, the torch build that
+carries sm_120, and the transformers line the vLLM 0.33 resolver takes. The
+seed arrives with the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
 ### Environment
 
-CPython 3.11. The wheel closure is cp311; on a 3.12 host the offline install
-fails with `no versions found`, which does not name the real cause.
+CPython 3.12.
 
 ```bash
-# networked host: install the exact closure (147 pins)
-uv venv /scratch/kot-vllm-venv --python 3.11
-uv pip install --python /scratch/kot-vllm-venv/bin/python \
-  -r <(grep -E '^[a-zA-Z0-9].*==' wheels-requirements.txt)
+# networked host
+uv venv /scratch/kot-vllm-venv --python 3.12
+uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.33"
 
 # offline host: rebuild the closure, then install from it
-./make_wheels.sh          # builds wheels/ (not committed, 4.7 GB)
-uv venv --seed /scratch/kot-vllm-venv --python 3.11
+./make_wheels.sh
 /scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.11.0"
+  --find-links ./wheels "vllm==0.33"
 ```
 
-Pins that must not float:
-
-- `torch==2.8.0` cu128. The 2.7-era inductor breaks on sm_120: the
-  flex_attention fallback dies at the first prefill.
-- `transformers==4.56.2`. 5.x breaks this vllm; the resolver will not pick
-  4.56.2 on its own.
+The torch build must carry sm_120. The vLLM 0.33 resolver pairs one on its
+own. A torch without Blackwell support dies at the first prefill on these
+cards.
 
 ### Layout
 
@@ -45,7 +57,7 @@ KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
   ./kot_serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
 ```
 
-Prefix caching is disabled in the server: a cache hit would leave the
+Prefix caching is disabled in the server. A cache hit would leave the
 requested rows of the cached prefix never computed.
 
 ### Parameters
@@ -64,36 +76,28 @@ requested rows of the cached prefix never computed.
 
 ### Qwen/Qwen3-0.6B
 
-Revision `c1899de289a04d12100db370d81485cdf75e47ca`. One card, default
-parameters. Sampling: temperature 0.6, top_p 0.95, top_k 20.
+One card. The default parameters need nothing.
 
 ### deepseek-ai/DeepSeek-V2-Lite
 
-Revision `604d5664dddd88a0433dbae533b7fe9472482de0`. bf16, 29.3 GB: both
-cards (the engine opens tensor parallel over every visible card).
+bf16, 29.3 GB. It needs both cards; the engine opens tensor parallel over
+every visible card.
 
 ```bash
 KOT_VLLM_GPU_MEM=0.70 KOT_VLLM_MAX_BATCHED_TOKENS=1024
 ```
 
-The memory window is narrow and the failure modes sit on both sides: above
-0.70 the full-vocabulary pass exhausts the card on long prompts; below 0.66
-the engine refuses to start, because its KV floor wants one request at
-`max_seq_len` (163,840 tokens, 4.75 GB MLA). Set
-`KOT_VLLM_MAX_MODEL_LEN=16384` when every workload stays under 16k tokens;
-that reopens a wide window.
-
-Sampling: temperature 0.3, top_p 0.95.
+Both directions fail. A higher memory setting exhausts the card during the
+full-vocabulary pass on long prompts. A lower setting fails the engine's KV
+floor, which wants one request at `max_seq_len` (163,840 tokens, 4.75 GB of
+MLA cache). Set `KOT_VLLM_MAX_MODEL_LEN=16384` when every workload stays
+under 16k tokens; that shrinks the floor and widens the working window.
 
 ### state-spaces/mamba-2.8b-hf
 
-Revision `96c48e0292b63f5346b6d30061af2551f7101e26`. One card.
-
-The mamba-1 backend stops a decode at about 2046 total tokens (prompt plus
-generated), whatever `max_model_len` says. Keep prompt plus generation under
-2040.
-
-Sampling: temperature 0.7, top_p 0.9, repetition_penalty 1.2.
+One card. The mamba backend caps the total context of a decode; the
+measured limit is about 2046 tokens (prompt plus generated), whatever
+`max_model_len` says. Keep prompt plus generation under 2040.
 
 ## Check
 
@@ -104,5 +108,5 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-The `model` field must equal the identity the server prints in its log; the
-server derives it from the checkpoint.
+The `model` field must equal the identity the server prints in its log. The
+server derives that identity from the checkpoint.

@@ -1,19 +1,41 @@
 # Run Book: ocr-sglang
 
-SGLang 0.5.21 behind one process: the multimodal OpenAI chat surface (a text
-part and the document as an image data URI) and a full-vocabulary
-log-probability surface, same port. The environment, the venv and the
-launcher pattern are llm-sglang's; the same patch layer
-(`sitecustomize.py`) stashes full-vocabulary float32 log-softmax rows at
-engine-internal entry points, and it travels with one extra module, the
-no-repeat ngram rule.
+This deployment serves one vision-language model with SGLang 0.5.22. One
+process serves the multimodal OpenAI chat surface and the full-vocabulary
+log-probability surface on one port. A chat request carries a text part and
+the document as an image data URI. The environment and the launcher are
+llm-sglang's. The patch layer is llm-sglang's. It stashes the
+full-vocabulary float32 log-softmax rows of the raw logits at engine-internal
+entry points, so the reported rows are pre-sampler. It also pins the
+per-image token count, and the no-repeat ngram rule travels with it as
+`kot_ocr_ngram.py`.
+
+## Model parameters
+
+The table holds the launch parameters per model. The memory fraction and the
+prefill window are fixed in `kot_server.py`, and this deployment has no
+override for them.
+
+| model | cards | memory fraction | prefill window | sampling (recommended) |
+|---|---|---|---|---|
+| deepseek-ai/DeepSeek-OCR-2 | 1 | 0.45 | 8192 | temperature 0.0001, top_p 1.0 |
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
 ### Environment
 
-Same venv, same install and same pins as llm-sglang:
-`/root/kotvenv-sglang-ocr`, CPython 3.12, sglang 0.5.21, torch 2.13.0.
+The environment is llm-sglang's. Both deployments share one venv,
+/root/kotvenv-sglang-ocr, on CPython 3.12 with sglang 0.5.22, torch 2.14.1
+and flashinfer-python 0.7.1. The llm-sglang run book holds the install.
+
+### Layout
+
+```text
+/opt/engines/ocr-sglang       this directory
+/models/<model>               weights; the engine reads the tokenizer and the processor from here
+/root/kotvenv-sglang-ocr      the engine venv, shared with llm-sglang
+<venv>/site-packages          the launcher refreshes the patch layer and kot_ocr_ngram.py here on every start
+```
 
 ### Start
 
@@ -23,55 +45,58 @@ KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
   ./kot_serve.sh --port 8798 --model /models/DeepSeek-OCR-2 --device cuda
 ```
 
-The launcher behaves like llm-sglang's: it installs the patch layer into the
-venv's site-packages (module plus `.pth`), sets the DeepGEMM and offline
-variables, raises the file-descriptor limit and picks the stash dir; see the
-llm-sglang run book. Two additions. It also copies `kot_ocr_ngram.py` into
-site-packages: the scheduler deserializes the per-request custom logits
-processor by name, in workers whose environment carries no `PYTHONPATH`.
-And the server sets `trust_remote_code=True` and
-`enable_custom_logit_processor=True`: the checkpoint ships its own modeling
+The launcher behaves like llm-sglang's. It installs the patch layer into the
+venv's site-packages as a module plus a `.pth` import line, sets the DeepGEMM,
+offline and file-descriptor variables, and picks the stash dir. The
+llm-sglang run book holds the details. It also copies `kot_ocr_ngram.py`
+into site-packages. The scheduler deserializes the per-request custom logits
+processor by name, in workers whose environment carries no PYTHONPATH.
+
+The server sets `trust_remote_code=True` and
+`enable_custom_logit_processor=True`. The checkpoint ships its own modeling
 and processor code, and the engine accepts custom processors only with the
 flag on.
 
-The engine opens tensor parallel over every visible card; expose one card
-(`CUDA_VISIBLE_DEVICES=0`) on a two-card host, because one image per request
+The patch layer also pins the per-image token count. The engine resolves the
+count through a method this processor lacks, and its fallback retokenizes the
+request. The retokenized prompt drifts by a few tokens. The patch attaches the
+missing method. The count comes from a blank image of the given size through
+the processor's own pixel path, cached by size. The request ids stay verbatim.
+The server refuses a request whose consumed length disagrees with the ids
+plus the recorded image token counts. A retokenized request fails loudly.
+
+The engine opens tensor parallel over every visible card. Expose one card,
+`CUDA_VISIBLE_DEVICES=0`, on a two-card host, because one image per request
 is the whole load. The server binds 127.0.0.1 only. One tiny image-driven
-generation runs before the server listens, so the first real request does
-not pay compile and graph costs.
+generation runs before the server listens, so the first real request pays no
+compile and graph costs.
 
 ### Parameters
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang; the launcher picks the first one that imports it. |
+| `KOT_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang. The launcher tries it first, then a PATH python3. |
 | `KOT_SGLANG_STASH_DIR` | `/scratch/kot-sglang-ocr-stash`, else `/tmp/kot-sglang-ocr-stash` | where the patch layer writes the full-vocabulary float32 rows. The name differs from llm-sglang's, so both servers can share one host. |
-| `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived from the weights | override the reported identity; a flat weights directory reports its basename. |
-
-The memory fraction (0.45) and the prefill window (8192) are fixed in
-`kot_server.py`; this deployment has no override for them.
+| `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived from the weights | override the reported identity. A flat weights directory reports its basename. |
 
 ## Models
 
 ### deepseek-ai/DeepSeek-OCR-2
 
-One card. sglang 0.5.21 is the first line with DeepSeek-OCR-2 support: the
-checkpoint loads through its own remote code, and no native architecture
-exists in this line. Revision: the server reports the `_commit_hash` the
-weights' `config.json` carries.
+This model runs on one card. The checkpoint loads through its own remote code,
+and this sglang line carries no native architecture for it. The server reports
+the `_commit_hash` that the weights' `config.json` carries.
 
-The prompt is the checkpoint's own plain format -- BOS, one `<image>`
-placeholder, then `\n` + instruction. The chat surface builds it: the text
-part is the instruction alone, and the tokenizer is a LlamaTokenizerFast
-read from the weights. The processor expands the placeholder into 257
-tokens for a <=768px image, 144 more per crop tile; one image per request.
+The prompt is the checkpoint's plain format. BOS comes first, then one
+`<image>` placeholder, then a newline and the instruction. Each request
+carries one image. The processor expands the placeholder into 257 tokens for
+a 620x620 image. A larger image adds crop tiles, and the block grows.
 
-Generation applies a no-repeat ngram rule through a per-request custom
-logits processor (`kot_ocr_ngram.py`): ngram 30, window 90, the two table
-tokens (`<td>`, `</td>`) whitelisted. The rule changes which token is
-sampled, never the reported distributions.
-
-Sampling: temperature 0.0001, top_p 1.0.
+Generation applies a no-repeat ngram rule through a per-request custom logits
+processor, `kot_ocr_ngram.py`. The rule bans a token that would complete a
+30-gram already seen within a 90-token window. The table tokens `<td>` and
+`</td>` stay allowed. The rule changes which token the sampler picks. It
+never changes the reported log-probability rows.
 
 ## Check
 
@@ -86,6 +111,14 @@ curl -s http://127.0.0.1:8798/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-The image part must be a data URI: the server decodes it itself and fetches
-no URLs. The text part is the instruction alone; the server adds BOS, the
+The image part must be a data URI. The server decodes it itself and fetches no
+URLs. The text part is the instruction alone, and the server adds BOS, the
 image placeholder and the newline itself.
+
+```bash
+./smoke.sh /models/DeepSeek-OCR-2
+```
+
+The smoke drives the whole surface: a prefill twice, a decode under each EOS
+gate, the chat surface, and a decode-then-prefill round trip over the ids the
+decode wrote. It fails when the server log holds a token-drift line.
