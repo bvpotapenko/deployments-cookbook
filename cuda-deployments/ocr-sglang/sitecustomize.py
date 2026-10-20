@@ -159,6 +159,7 @@ class _PatchOnLoadFinder:
         "sglang.srt.layers.logits_processor",
         "sglang.srt.layers.logprob_processor",
         "sglang.srt.layers.sampler",
+        "sglang.srt.multimodal.processors.deepseek_ocr",
     }
 
     def __init__(self) -> None:
@@ -219,6 +220,8 @@ def _apply_patch(fullname: str) -> None:
             _patch_input_logprob(torch, module)
         elif fullname == "sglang.srt.layers.sampler":
             _patch_sampler(torch, module)
+        elif fullname == "sglang.srt.multimodal.processors.deepseek_ocr":
+            _patch_ocr_processor(module)
         _patch_log(f"applied: {fullname}")
     except Exception as failure:
         _patch_log(f"FAILED: {fullname}: {type(failure).__name__}: {failure}")
@@ -326,6 +329,98 @@ def _patch_sampler(torch, module) -> None:
 
     forward_with_stash._kot_patched = True
     module.Sampler.forward = forward_with_stash
+
+
+def _trace(message: str) -> None:
+    """Forensics for the count path: /tmp, because the stash dir does not
+    exist while modules load and the patch log swallows write errors."""
+    try:
+        with open("/tmp/kot_patch_trace.log", "a", encoding="utf-8") as trace:
+            trace.write(message + "\n")
+    except Exception:
+        pass
+
+
+class _MultimodalTokenCounts:
+    """The structure the base reads: ``.num_image_tokens``, one per image."""
+
+    def __init__(self, counts):
+        self.num_image_tokens = counts
+
+
+def _make_count_fn(processor):
+    """Per-image token counts from the processor's own pixel path.
+
+    The base calls ``_get_num_multimodal_tokens(image_sizes=...)`` with sizes
+    only. The count of a size comes from a blank image of that size sent
+    through the same processor the engine uses, cached by size. The output's
+    image-token occurrences are the count.
+    """
+    from PIL import Image
+
+    image_token_id = processor.image_token_id
+    cache = {}
+
+    def count_for(size):
+        height, width = int(size[0]), int(size[1])
+        if (height, width) in cache:
+            return cache[(height, width)]
+        blank = Image.new("RGB", (width, height))
+        out = processor(images=[blank], text=["<image>"], add_special_tokens=False)
+        ids = out["input_ids"]
+        if hasattr(ids, "tolist"):
+            ids = ids.tolist()
+        flat = ids[0] if ids and isinstance(ids[0], (list, tuple)) else ids
+        count = sum(1 for token in flat if int(token) == int(image_token_id))
+        cache[(height, width)] = count
+        _trace(f"count for {height}x{width}: {count}")
+        return count
+
+    def num_multimodal_tokens(image_sizes=None, **kwargs):
+        try:
+            counts = [count_for(size) for size in (image_sizes or [])]
+            try:
+                with open(
+                    os.path.join(STASH_DIR, "last_counts.json"), "w", encoding="utf-8"
+                ) as note:
+                    json.dump({"counts": counts, "sizes": [list(s) for s in (image_sizes or [])]}, note)
+            except Exception:
+                pass
+            return _MultimodalTokenCounts(counts)
+        except Exception as failure:
+            _trace(f"count fn FAILED: {type(failure).__name__}: {failure}")
+            raise
+
+    return num_multimodal_tokens
+
+
+def _patch_ocr_processor(module) -> None:
+    """Give the engine's processor the count method the fast path needs.
+
+    The stock base resolves the per-image token count through
+    ``_get_num_multimodal_tokens`` on the processor the engine holds. The
+    flattened DeepseekOCRProcessor does not carry the method, so every request
+    fell back to decode-plus-retokenize, and the retokenized prompt drifted by
+    a few tokens (the engine logs it as token drift). A decode and its replay
+    then consumed different sequences for the same image. The wrapper's
+    ``__init__`` attaches the method to the processor instance the engine
+    holds, built from the processor's own pixel path; the engine then takes
+    the id-preserving path and the request's ids stay verbatim.
+    """
+    if getattr(module.DeepseekOCRProcessor.__init__, "_kot_count_patched", False):
+        return
+    original_init = module.DeepseekOCRProcessor.__init__
+
+    def init_with_count(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        try:
+            self._processor._get_num_multimodal_tokens = _make_count_fn(self._processor)
+            _trace(f"count method attached to {type(self._processor).__name__}")
+        except Exception as failure:
+            _trace(f"count method FAILED at init: {type(failure).__name__}: {failure}")
+
+    init_with_count._kot_count_patched = True
+    module.DeepseekOCRProcessor.__init__ = init_with_count
 
 
 _stub_sgl_kernel_finder()

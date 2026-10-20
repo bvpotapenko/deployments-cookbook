@@ -242,3 +242,14 @@ print(f"stream: {chunks} chunks, {len(text)} chars:",
       "PASS" if chunks > 1 and len(text) > 20 else "FAIL")
 print("transcribed head:", repr(text[:120]))
 EOF
+
+# The engine must never retokenize a score request: the id-preserving path
+# keeps the prompt verbatim; the fallback logs "token drift" and makes a
+# decode and its replay consume different sequences for the same image.
+if grep -q "token drift" "$RUN/serve.log"; then
+  echo "token drift: FAIL - the engine retokenized a request"
+  grep -m2 "token drift" "$RUN/serve.log"
+  exit 1
+fi
+echo "token drift guard: PASS"
+echo "SMOKE DONE"

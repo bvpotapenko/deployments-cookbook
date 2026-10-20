@@ -1,10 +1,21 @@
-# Exact closure for the llm-vllm deployment: the pip resolution of
-# vllm==0.23.0 + vllm-ascend==0.23.0 inside the graded image's python
-# 3.12 against its system site packages, verified on ascend-910b.
-# The three platform wheels are for the Dockerfile image build.
+# Two stacks, two layers; this file holds both.
+#
+# Layer 1, the image platform stack (the three pins directly below): the
+# Dockerfile installs them into the image. torch_npu 2.10.0.post2 is the
+# image pin; it serves the platform stack and the harness client.
+#
+# Layer 2, the engine closure (the compiled list that follows): the pip
+# resolution of vllm==0.23.0 + vllm-ascend==0.23.0 inside the graded
+# image's python 3.12 against its system site packages, verified on
+# ascend-910b. kot_serve.sh builds the engine venv with
+# --system-site-packages and installs this closure over the image copies;
+# its pin batch excludes the layer-1 torch_npu pin by name, so the venv
+# carries the closure's torch_npu 2.10.0.post4. The server imports the
+# venv copy.
 torch==2.10.0
 torch_npu==2.10.0.post2
 torchvision==0.25.0
+# --- layer 2: the engine closure, installed over the image copies ---
 agent-detector==2.0.0
 aiofiles==25.1.0
 anthropic==1.5.0

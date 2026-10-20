@@ -44,7 +44,7 @@ score() { # tag mode max_new n_rows
     -H 'Content-Type: application/json' \
     -d "{\"prompt_id\": \"$1\", \"input_ids\": $IDS, \"mode\": \"$2\", \"max_new_tokens\": $3,
          \"allow_eos\": true, \"n_rows\": $4, \"out_dir\": \"$RUN/$1\", \"seed\": 42,
-         \"sampling\": {\"temperature\": 0.7, \"top_p\": 0.8, \"top_k\": 20, \"min_p\": 0.0, \"presence_penalty\": 1.5}}" \
+         \"sampling\": {\"temperature\": 0.7, \"top_p\": 0.8, \"top_k\": 20, \"min_p\": 0.0}}" \
     >"$RUN/$1.json"
 }
 score d1 decode 32 0
