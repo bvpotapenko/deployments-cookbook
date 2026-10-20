@@ -1,37 +1,50 @@
 # Run Book: mllm-transformers
 
-A transformers reference-path server for `Qwen/Qwen3.8-27B` (the
-`qwen3_5` architecture): one process, bfloat16, both cards. The server
-pins every media-processing parameter and reports the full set in one
-line at startup. Text is served; image and video are work in progress.
+This deployment serves Qwen/Qwen3.8-27B with transformers 5.20.2. The model
+runs the `qwen3_5` architecture and takes text, image and video input. One
+process holds the model in bfloat16 over both cards. The server pins every
+media-processing parameter and reports the full set in one line at startup.
+It serves text; the image and video paths land with the mllm porting work.
+
+## Model parameters
+
+The request body carries the sampling parameters. The table holds the card
+count, the compute dtype and the recommended instruct-mode sampling.
+
+| model | cards | dtype | sampling (recommended) |
+|---|---|---|---|
+| Qwen/Qwen3.8-27B | 2 | bfloat16 | temperature 0.7, top_p 0.80, top_k 20, presence_penalty 1.5, repetition_penalty 1.0 |
+
+One stack serves the model: CPython 3.12, transformers 5.20.2, and the torch
+and torchvision builds from the cu128 index. The seed arrives with the
+request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
 ### Environment
 
-CPython 3.12, venv `/root/kotvenv-mllm`; the launcher checks this exact
-path.
+The venv runs CPython 3.12. Build it at `/root/kotvenv-mllm`; the launcher
+checks that path.
 
 ```bash
 uv venv /root/kotvenv-mllm --python 3.12
 uv pip install --python /root/kotvenv-mllm/bin/python \
-  torch==2.8.0 torchvision==0.23.0 \
-  --index-url https://download.pytorch.org/whl/cu128
+  torch torchvision --index-url https://download.pytorch.org/whl/cu128
 uv pip install --python /root/kotvenv-mllm/bin/python \
-  transformers==5.12.1 numpy accelerate pydantic pyyaml
+  transformers==5.20.2 numpy accelerate pydantic pyyaml
 ```
 
-Pins that must not float:
+torch and torchvision come from the cu128 index. That build carries the
+sm_120 kernels; a torch without them stalls silently on these cards.
+torchvision pairs with the torch build from the same index. transformers
+5.20.2 ships the `qwen3_5` architecture.
 
-- `transformers==5.12.1`. The first line that carries the `qwen3_5`
-  architecture. A newer 5.x silently replaces it, and the class
-  `Qwen3_5ForConditionalGeneration` disappears.
-- `torch==2.8.0` from the cu128 index: the sm_120 build.
-  `torchvision==0.23.0` is its version pair; install both from the same
-  index.
+### Layout
 
-`numpy`, `accelerate`, `pydantic` and `pyyaml` complete the server's
-imports; `accelerate` carries `device_map=auto`.
+```text
+/opt/engines/mllm-transformers   this directory
+/models/<model>                 weights; a checkpoint directory
+```
 
 ### Start
 
@@ -39,45 +52,45 @@ imports; `accelerate` carries `device_map=auto`.
 ./kot_serve.sh --port 8090 --model /models/Qwen3.8-27B --device cuda
 ```
 
-The model needs both cards. Leave `CUDA_VISIBLE_DEVICES` unset;
-`device_map=auto` shards the weights over every visible card.
+The model needs both cards. Leave CUDA_VISIBLE_DEVICES unset;
+`device_map="auto"` spreads the layers over every visible card. The server
+binds every interface and answers one request at a time.
 
 The launcher checks `KOT_MLLM_PYTHON`, then
-`/root/kotvenv-mllm/bin/python`, then `/root/kotvenv/bin/python`, then
-the PATH. `KOT_PYTHON` does not reach this launcher. A missing venv
-falls through to the shared llm venv, whose transformers carries no
-`qwen3_5`; the load fails there.
+`/root/kotvenv-mllm/bin/python`, then `/root/kotvenv/bin/python`, then the
+PATH. `KOT_PYTHON` does not reach this launcher. The mllm venv carries
+torchvision. The shared llm venv does not; a fall-through load dies at the
+processor import.
 
-The server binds `0.0.0.0`, every interface, and answers one request at
-a time.
+The server ignores `--device`; it loads bfloat16 with `device_map="auto"` on
+every value.
 
 ### Parameters
 
-The launcher reads one variable; the request body carries the sampling
+The launcher reads one variable. The request body carries the sampling
 parameters.
 
-| parameter | default | effect |
-|---|---|---|
-| `KOT_MLLM_PYTHON` | `/root/kotvenv-mllm/bin/python` | the interpreter the launcher execs. |
-| `sampling.temperature` | `0.7` | decode sampling; the instruct-mode value. |
-| `sampling.top_p` | `0.8` | decode sampling. |
-| `sampling.top_k` | `20` | decode sampling. |
-| `seed` | `42` | planted before each decode; same seed, same output. |
-| `sampling.presence_penalty` | `0.0` | neutral values pass; any non-zero value is an error that names it. The parameter belongs to the OpenAI surface. |
+| variable | effect |
+|---|---|
+| `KOT_MLLM_PYTHON` | the interpreter the launcher execs |
 
-A `0.0` value for temperature, top_p or top_k reads as unset: the
-server falls back to the default.
+| argument | effect |
+|---|---|
+| `--port` | listen port |
+| `--model` | the checkpoint directory |
+| `--device` | accepted and unused |
 
 ## Models
 
 ### Qwen/Qwen3.8-27B
 
-The `qwen3_5` architecture, class `Qwen3_5ForConditionalGeneration`;
-text, image and video input; bfloat16 over both cards.
+The architecture is `qwen3_5`, class `Qwen3_5ForConditionalGeneration`. The
+model takes text, image and video input and loads in bfloat16 over both
+cards.
 
-The pinned media preprocessing, as the server reports it. The values
-reproduce the model's own preprocessing and must not float: a changed
-value changes the pixels the model sees.
+The table holds the pinned media preprocessing, as the server reports it at
+startup. The values reproduce the model's own preprocessing. A changed value
+changes the pixels the model sees.
 
 | parameter | value | source |
 |---|---|---|
@@ -87,25 +100,26 @@ value changes the pixels the model sees.
 | patch geometry | patch 16, temporal patch 2, merge size 2 | the checkpoint's configs |
 | instruct mode | `enable_thinking` false in the chat-template rendering | the model's non-thinking mode |
 
-The pixel budgets and the patch geometry are read from the checkpoint at
-startup; the frame sampling is pinned in `serve.py`.
+The server reads the pixel budgets and the patch geometry from the checkpoint
+at startup. The frame sampling is pinned in serve.py.
 
 Instruct mode samples at temperature 0.7, top_p 0.80, top_k 20,
-presence_penalty 1.5, repetition_penalty 1.0. This engine applies
-temperature, top_p and top_k. It refuses a non-zero `presence_penalty`:
-the parameter belongs to the OpenAI surface, where vllm and sglang
-apply it. A `repetition_penalty` field is not read; generation runs at
-the neutral 1.0.
+presence_penalty 1.5, repetition_penalty 1.0. The engine applies temperature,
+top_p and top_k. It has no presence_penalty parameter; the server refuses a
+request that sets it above zero, with an error that names the field. A
+repetition_penalty field is not read; generation runs at the neutral 1.0. A
+value of 0.0 for temperature, top_p or top_k reads as unset; the server then
+generates with the instruct-mode value.
 
-Current support: the server starts, reports its settings and serves
-text; the image and video paths are work in progress.
+The server plants the request's seed before each decode. The same seed gives
+the same output.
 
 ## Check
 
-This server has no OpenAI chat surface. Its only request path takes
-token ids, not text.
+This server has no OpenAI chat surface. Its only request path takes token
+ids.
 
-The startup line is the first check: it proves the model loaded, and it
+The startup line is the first check. It proves the model loaded, and it
 records every pinned parameter.
 
 ```bash

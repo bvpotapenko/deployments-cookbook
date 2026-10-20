@@ -1,51 +1,53 @@
 # Run Book: ocr-transformers
 
-Stock `transformers` serving of DeepSeek-OCR-2, one resident model, one
-request at a time (`http.server`). The trap sits in the weights: the model
-directory is a hub snapshot with two files replaced, and the server refuses
-to start from anything else.
+This deployment serves DeepSeek-OCR-2 with transformers 5.20.2. One process
+serves the full-vocabulary log-probability surface on one port, one request
+at a time. The checkpoint loads through the native DeepseekOCR2 architecture
+that transformers 5.20.2 ships. The remote code is not used. Generation
+applies the checkpoint's own no-repeat n-gram rule.
+
+## Model parameters
+
+The table holds the launch parameters per model. Every value not named stays
+at the deployment default. Read a model's row against the same row in the
+other engine run books. A mismatch between engines is the first suspect when
+a comparison fails.
+
+| model | revision | cards | dtype | sampling (recommended) |
+|---|---|---|---|---|
+| deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | bfloat16 | temperature 0.0001, top_p 1.0 |
+
+One stack serves every model: CPython 3.12, transformers 5.20.2, and the
+torch build from the cu128 index that carries sm_120. The seed arrives with
+the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
 ### Environment
 
-CPython 3.12. `provision.sh` builds `/root/kotvenv-ocr` and ends with an
-import self-check. It takes the interpreter as an argument, else it uses the
-host python3; the reference host ran 3.12.
+The stack runs on CPython 3.12.
 
 ```bash
 uv venv /root/kotvenv-ocr --python 3.12
 uv pip install --python /root/kotvenv-ocr/bin/python \
-  torch==2.8.0 torchvision==0.23.0 \
-  --index-url https://download.pytorch.org/whl/cu128
+  torch torchvision --index-url https://download.pytorch.org/whl/cu128
 uv pip install --python /root/kotvenv-ocr/bin/python \
-  transformers==4.46.3 "numpy<2.2" accelerate safetensors \
-  addict einops pillow requests tqdm "huggingface_hub[hf_transfer]"
+  transformers==5.20.2 numpy addict einops pillow accelerate huggingface_hub \
+  pydantic pyyaml
 ```
 
-`provision.sh` groups these commands and installs uv when it is missing. When
-the pytorch index stalls mid-wheel, PyPI carries the same cu128 build: drop
-the `--index-url`.
+`provision.sh` groups these commands, installs uv when it is missing, and
+ends with an import self-check. Transformers 5.20.2 ships the configuration,
+the image processing, the processing and the modeling for this checkpoint.
 
-Pins that must not float:
-
-- `transformers==4.46.3`. The checkpoint's remote code breaks on 5.x. This
-  is a requirement, not a preference.
-- `torch==2.8.0` and `torchvision==0.23.0` from the cu128 index. sm_120
-  (RTX 5090) needs the CUDA 12.8 kernels; this index is where that build
-  lives.
-- `addict` and `torchvision` are load-time requirements of the checkpoint's
-  remote code, not of `transformers`. A plain venv dies at load with an error
-  that names them.
-
-The reference venv resolved tokenizers 0.20.3, accelerate 1.15.0, einops
-0.8.2, pillow 12.3.0, addict 2.4.0.
+The torch build must carry sm_120. The cu128 index is where that build
+lives. A torch without Blackwell kernels does not run on these cards.
 
 ### Layout
 
 ```text
 /opt/engines/ocr-transformers   this directory
-/models/DeepSeek-OCR-2          the hub snapshot directory with two files replaced (see Models)
+/models/DeepSeek-OCR-2          the weights directory; a hub snapshot plus two patched files
 ```
 
 ### Start
@@ -55,11 +57,10 @@ The reference venv resolved tokenizers 0.20.3, accelerate 1.15.0, einops
 ```
 
 The process listens on 127.0.0.1 only. The launcher resolves its interpreter
-itself: KOT_OCR_PY, else `/root/kotvenv-ocr/bin/python`, else
-`/root/kotvenv/bin/python`, else the PATH python3. It then changes directory
-into the model, because the checkpoint's remote code imports modules from its
-own directory. The server loads one checkpoint directory: the model path must
-hold `config.json`, and a hub cache layout does not load here.
+itself. It picks `KOT_OCR_PY`, else `/root/kotvenv-ocr/bin/python`, else
+`/root/kotvenv/bin/python`, else the ambient python3. The server loads one
+checkpoint directory. The model path must hold `config.json`. A hub cache
+layout does not load here.
 
 ### Parameters
 
@@ -67,51 +68,53 @@ hold `config.json`, and a hub cache layout does not load here.
 |---|---|---|
 | `KOT_OCR_PY` | unset | interpreter that carries the pinned stack. Set it when the venv is not at `/root/kotvenv-ocr`. |
 
-The script takes `--port`, `--model` and `--device`; `cuda` runs bfloat16
-under sdpa, `cpu` runs float32 under eager.
+The script takes `--port`, `--model` and `--device`. `cuda` runs bfloat16
+under sdpa. `cpu` runs float32 under eager.
 
 ## Models
 
 ### deepseek-ai/DeepSeek-OCR-2
 
-Hub revision `aaa02f38`. One card.
+The model runs on one card.
 
-Download the snapshot, then replace two files in it with the patched copies
-(sha256 below). The vanilla files do not serve:
+The weights directory is a hub snapshot of `deepseek-ai/DeepSeek-OCR-2` at
+revision `aaa02f3811945a91062062994c5c4a3f4c0af2b0`, plus two patched files
+over the snapshot. Take the whole directory. Never refresh single files
+from the hub.
 
 - `config.json`, sha256
-  `6e26957be7ef11041dce309baac46766e30f0fb45f4af6233307de2c0099de77`. It
-  duplicates the language model's settings at the top level of the file; the
-  vanilla file carries them only under `language_config`.
+  `6e26957be7ef11041dce309baac46766e30f0fb45f4af6233307de2c0099de77`. The
+  patch lifts the language model's settings from the `language_config` block
+  to the top level. The vanilla file carries them only under
+  `language_config`.
 - `modeling_deepseekv2.py`, sha256
-  `41ae3cf974208667f2e89a6392c7d65ffdd38d002a68fbf5063838cc9eb664a7`. It adds
-  an `mha_sdpa` entry to the checkpoint's `ATTENTION_CLASSES` and sets
-  `_supports_sdpa = True`. The vanilla file offers eager and
-  flash-attention-2 only, and `transformers` 4.46.3 refuses the explicit sdpa
-  request this server makes on cuda.
+  `41ae3cf974208667f2e89a6392c7d65ffdd38d002a68fbf5063838cc9eb664a7`. The
+  native path loads no remote modeling file, so this file sits unused.
 
-```bash
-hf download deepseek-ai/DeepSeek-OCR-2 --revision aaa02f38
-```
+The native loader reads `config.json`. Check the lifted top-level block
+against what the native DeepseekOCR2 configuration expects.
 
-Generation applies DeepSeek's own no-repeat rule: a token that would complete
-a 30-gram already seen inside a 90-token lookback window is banned from
-sampling, except the table delimiters `<td>` (128821) and `</td>` (128822).
-`repetition_penalty` stays 1.0; the no-repeat rule carries the
-anti-repetition behaviour.
+Generation applies the checkpoint's own no-repeat n-gram rule. The rule
+blocks every token that would complete a 30-gram already seen inside a
+90-token lookback window. The table delimiters `<td>` (128821) and `</td>`
+(128822) stay exempt, so table structure may repeat. `repetition_penalty`
+stays 1.0. The no-repeat rule carries the anti-repetition behaviour. The
+rule changes which token is sampled, never a stored row. The stored rows
+are the log-softmax of the raw logits, taken before the rule runs.
 
-Sampling: temperature 0.0001, top_p 1.0.
+The sampling temperature 0.0001 is near-greedy by design. Generation runs
+it through the real sampler path.
 
 ## Check
 
-This deployment serves no OpenAI-style route. The by-hand check is the smoke:
-it teacher-forces one transcript over one image twice, decodes under both
-stop gates, and prints PASS/FAIL lines for shape, dtype and byte-identity.
+This deployment serves no chat route. The by-hand check is the smoke. It
+teacher-forces one transcript over one image twice, decodes under both stop
+gates, and prints PASS/FAIL lines for shape, dtype and byte-identity.
 
 ```bash
 IMAGE=/path/to/document.png ./smoke.sh /models/DeepSeek-OCR-2 cuda
 ```
 
 Any image serves. An image with one side above 768 px exercises the crop
-path: the model reads a grid of 768x768 tiles beside the padded global view,
-and the image block grows by 144 tokens per tile.
+path. The model reads a grid of 768x768 tiles beside the padded global
+view. The image block grows by 144 tokens per tile.

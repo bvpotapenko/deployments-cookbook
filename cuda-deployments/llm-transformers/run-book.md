@@ -1,40 +1,55 @@
 # Run Book: llm-transformers
 
-Stock `transformers` behind one process: an OpenAI-compatible chat and
-completions surface, one resident model, one generation at a time. The trap
-sits in the launcher: it execs `/root/kotvenv/bin/python` by a fixed path, so
-a venv built anywhere else means editing that line.
+This deployment serves text models with transformers 5.20.2. One process
+serves the OpenAI chat and completions routes and the full-vocabulary
+log-probability surface on one port. The model thread runs one generation at
+a time, whatever many connections are held open.
+
+The launcher execs `/root/kotvenv/bin/python serve.py` on a fixed path. A
+reader who builds the venv elsewhere edits that line.
+
+## Model parameters
+
+The table holds what differs per model. This deployment exposes no per-model
+environment knobs; only the `--model` path changes between launches. Read a
+model's row against the same row in the other engine run books. A mismatch
+between engines is the first suspect when a comparison fails.
+
+| model | revision | cards | dtype | sampling (recommended) |
+|---|---|---|---|---|
+| Qwen/Qwen3-0.6B | `c1899de289a04d12100db370d81485cdf75e47ca` | 1 | bfloat16 | temperature 0.6, top_p 0.95, top_k 20 |
+| deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | bfloat16 | temperature 0.3, top_p 0.95 |
+| state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
+
+One stack serves every model: CPython 3.12, transformers 5.20.2, and the
+torch build from the cu128 index that carries sm_120. The seed arrives with
+the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
 ### Environment
 
-CPython 3.12. Build the venv at `/root/kotvenv` or edit the launcher's last
-line.
+The venv runs CPython 3.12. Build it at `/root/kotvenv`, or edit the
+launcher's last line.
 
 ```bash
 uv venv /root/kotvenv --python 3.12
 uv pip install --python /root/kotvenv/bin/python \
-  torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+  torch --index-url https://download.pytorch.org/whl/cu128
 uv pip install --python /root/kotvenv/bin/python \
-  transformers==4.56.2 numpy accelerate pydantic pyyaml
+  transformers==5.20.2 accelerate numpy pydantic pyyaml
 ```
 
-Pins that must not float:
-
-- `torch==2.8.0` from the cu128 index. sm_120 (RTX 5090) needs the CUDA 12.8
-  kernels; this index is where that build lives.
-- `transformers==4.56.2`. The reference outputs come from this version, and
-  the load fallbacks below are verified on it; a newer version can change the
-  attention kernels and with them the numbers.
-
-The reference venv resolved numpy 2.5.4, accelerate 1.15.0, tokenizers 0.22.2.
+torch must come from the cu128 index. That build carries the sm_120 kernels;
+a torch without them stalls silently on these cards. The venv pins
+transformers 5.20.2. A different transformers line runs different attention
+kernels and computes different outputs.
 
 ### Layout
 
 ```text
 /opt/engines/llm-transformers   this directory
-/models/<model>                 weights: a checkpoint directory, or an HF home holding hub/
+/models/<model>                 weights; a checkpoint directory, or an HF home holding hub/
 ```
 
 ### Start
@@ -46,19 +61,20 @@ The reference venv resolved numpy 2.5.4, accelerate 1.15.0, tokenizers 0.22.2.
 The process listens on 127.0.0.1 only.
 
 When the model path holds a `hub/` directory, the launcher exports HF_HOME to
-that path and the server resolves the one snapshot under it; two or more
-repositories there stop the start with an error that names them. The model
-identity comes from the directory or snapshot name, never from a request.
+that path and sets HF_HUB_OFFLINE=1. The server resolves the one snapshot
+under it. Two or more repositories there stop the start with an error that
+names them. The model identity comes from the directory or snapshot name,
+never from a request.
 
-The load path: a native architecture first, without `trust_remote_code`. A
-ValueError that names trust_remote_code retries with the checkpoint's own
-code. A ValueError about an attention implementation retries with
-`attn_implementation="eager"`; that is the path an SSM takes. On cuda the
-weights run bfloat16 under sdpa, and `device_map="auto"` spreads them over
-every visible card. Set CUDA_VISIBLE_DEVICES to pin the card set.
+The loader keeps a three-step ladder. It loads the native architecture first,
+without `trust_remote_code`. A ValueError that names trust_remote_code retries
+with the checkpoint's own code. A ValueError about an attention implementation
+retries with `attn_implementation="eager"`. On cuda the weights run bfloat16
+under sdpa, and `device_map="auto"` spreads the layers over every visible
+card. Set CUDA_VISIBLE_DEVICES to pin the card set.
 
-`smoke.sh` accepts KOT_PYTHON to name its interpreter; `kot_serve.sh` does
-not, which is the trap above.
+`smoke.sh` accepts KOT_PYTHON to name its interpreter. `kot_serve.sh` does
+not; its exec line is the fixed path above.
 
 ### Parameters
 
@@ -66,39 +82,31 @@ not, which is the trap above.
 |---|---|
 | `--port` | listen port on 127.0.0.1 |
 | `--model` | checkpoint directory, or an HF home holding `hub/` |
-| `--device` | `cuda`: bf16, sdpa, device_map auto. `cpu`: float32, eager, one device. |
+| `--device` | `cuda` runs bfloat16, sdpa, device_map auto; `cpu` runs float32, eager, one device |
 
 ## Models
 
 ### Qwen/Qwen3-0.6B
 
-Revision `c1899de289a04d12100db370d81485cdf75e47ca`. One card; export
-CUDA_VISIBLE_DEVICES when this model runs alone, or `device_map="auto"`
-spreads it over every visible card. Sampling: temperature 0.6, top_p 0.95,
-top_k 20.
+This model runs on one card. Export CUDA_VISIBLE_DEVICES when it runs alone,
+or `device_map="auto"` spreads the layers over every visible card.
 
 ### deepseek-ai/DeepSeek-V2-Lite
 
-Revision `604d5664dddd88a0433dbae533b7fe9472482de0`. bfloat16, 29.3 GB: it
-needs both 32 GB cards. Sampling: temperature 0.3, top_p 0.95.
+The weights take 29.3 GB in bfloat16. The model needs both cards.
 
-The server restores YaRN's mscale^2 on every DeepseekV2 attention layer
-after load. Transformers 4.54 through 5.14 never apply the constant in the
-native port, so the scale runs at 0.0722 where the checkpoint's own
-reference code and every serving engine use 0.1147. The restoration is
-gated on the bug being present; it disables itself on transformers 5.15+.
+transformers 5.20.2 applies YaRN's mscale^2 natively. The server carries a
+restoration that disables itself on a transformers that has the fix.
 
 ### state-spaces/mamba-2.8b-hf
 
-Revision `96c48e0292b63f5346b6d30061af2551f7101e26`. One card. It loads
-through the eager fallback: this architecture dispatches no attention, so the
-first load attempt fails and the retry runs eager.
+This model runs on one card. It loads through the eager retry. The
+architecture dispatches no attention, so the first load attempt fails and the
+retry runs eager.
 
-The engine has no presence_penalty. `generate()` implements none, and the
-server refuses a request that sets it above zero with an error that names the
-field; the OpenAI routes do not read the field at all.
-
-Sampling: temperature 0.7, top_p 0.9, repetition_penalty 1.2.
+The engine has no presence_penalty; generate() implements none. The
+log-probability request path refuses a presence_penalty above zero with an
+error that names the field. The OpenAI routes do not read the field.
 
 ## Check
 

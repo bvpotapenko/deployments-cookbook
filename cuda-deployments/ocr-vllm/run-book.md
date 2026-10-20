@@ -1,51 +1,54 @@
 # Run Book: ocr-vllm
 
-vLLM 0.30.0 V1 engine behind one process: the OpenAI chat surface and a
-full-vocabulary log-probability surface, same port. vLLM 0.30.0 is the
-first stable line with native DeepSeek-OCR-2 support
-(`DeepseekOCR2ForCausalLM`); the server refuses any other vllm version.
-The engine applies DeepSeek's own no-repeat n-gram rule for OCR output
-at engine level.
+This deployment serves DeepSeek-OCR-2 with vLLM 0.33. One process serves the
+OpenAI chat surface and the full-vocabulary log-probability surface on one
+port. The full-vocabulary tap is version-pinned, so the server refuses to
+start on any other vllm version. The engine applies the checkpoint's own
+no-repeat n-gram rule at engine level.
+
+## Model parameters
+
+The table holds the launch parameters per model. Every value not named stays
+at the deployment default. Read a model's row against the same row in the
+other engine run books. A mismatch between engines is the first suspect when
+a comparison fails.
+
+| model | revision | cards | `KOT_VLLM_GPU_MEM` | `KOT_VLLM_MAX_BATCHED_TOKENS` | `KOT_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
+|---|---|---|---|---|---|---|---|
+| deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.0001, top_p 1.0 |
+
+One stack serves every model: CPython 3.12, vLLM 0.33, the torch build that
+carries sm_120, and the transformers line the vLLM 0.33 resolver takes. The
+seed arrives with the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
 ### Environment
 
-CPython 3.12. The closure carries networkx 3.7, which refuses 3.11: on
-a 3.11 host the install fails with a resolver error, and the error does
-not name the real cause.
+The stack runs on CPython 3.12.
 
 ```bash
-# networked host: provision the venv the launcher is pointed at
+# networked host
 uv venv /root/kotvenv-vllm-ocr --python 3.12
-uv pip install --python /root/kotvenv-vllm-ocr/bin/python vllm==0.30.0
+uv pip install --python /root/kotvenv-vllm-ocr/bin/python "vllm==0.33"
 
-# offline host: build the closure once, then install from it with no network
-./make_wheels.sh       # builds ./wheels: the vllm 0.30.0 closure (not
-                      # committed; linux x86_64, cp312)
+# offline host: build the closure, then install from it
+./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-ocr-venv --python 3.12
 /scratch/kot-vllm-ocr-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.30.0"
+  --find-links ./wheels "vllm==0.33"
 ```
 
-Pins that must not float:
+The torch build must carry sm_120. The vLLM 0.33 resolver pairs one on its
+own. A torch without Blackwell support dies at the first prefill on these
+cards.
 
-- `vllm==0.30.0`. The server asserts this exact version at boot; its
-  log-probability surface patches V1 internals, so no other version is
-  safe.
-- `torch==2.13.0`. Its triton refuses the non-constexpr globals that
-  vllm 0.30 kernels read; the server sets triton's documented escape
-  hatch itself.
-- `transformers==5.19.0`, `tokenizers==0.23.3`. Members of the verified
-  closure. The tokenizer loads as `LlamaTokenizerFast` directly, with
-  no remote-code path.
-- The complete pin list is `wheels-requirements.txt`, regenerated as
-  `pip freeze` of a venv that passed `smoke.sh`.
-
-`make_wheels.sh` groups the downloads: one `pip download` per pin, eight
-in parallel, each with `--no-deps`. Files already present are skipped,
-so a rerun resumes; rerun until the two counts it prints match (transient
-pypi timeouts).
+`make_wheels.sh` builds the vllm 0.33 closure into `wheels/` for linux
+x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the pip
+freeze of a venv that passed `smoke.sh`. The script downloads one wheel per
+pin, eight in parallel, each with `--no-deps`. Files already present are
+skipped, so a rerun resumes. Rerun the script until the two counts it
+prints match. The repository does not carry `wheels/`.
 
 Without `KOT_PYTHON`, and with no ambient vllm, the launcher runs the
 offline install itself, into `KOT_VENV`.
@@ -67,29 +70,29 @@ CUDA_VISIBLE_DEVICES=0 KOT_PYTHON=/root/kotvenv-vllm-ocr/bin/python \
   ./kot_serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device cuda
 ```
 
-The engine opens tensor parallel over every visible card. This model
-fits on one card; pin one with `CUDA_VISIBLE_DEVICES`.
+The engine opens tensor parallel over every visible card. This model fits
+on one card. Pin one with `CUDA_VISIBLE_DEVICES`.
 
 At every start the launcher copies `kot_ngram.py` into the venv's
-site-packages and registers `kot_ngram:KotNoRepeatNGramLogitsProcessor`
-with the engine's `--logits-processors` mechanism. The rule runs at
-engine level, so the module must resolve inside every worker; the copy
-is what makes it resolve.
+site-packages and passes `--logits-processors
+kot_ngram:KotNoRepeatNGramLogitsProcessor` to the engine. The rule runs at
+engine level, so the module must resolve inside every worker. The copy is
+what makes it resolve.
 
-The launcher raises the file-descriptor limit to the hard cap itself.
-The stock 1024 limit kills the engine core under many concurrent
-connections with `Too many open files`.
+The launcher raises the file-descriptor limit to the hard cap itself. The
+stock 1024 limit kills the engine core under many concurrent connections
+with `Too many open files`.
 
-Prefix caching stays off: a cache hit would leave the requested rows of
-a cached prefix never computed.
+Prefix caching is disabled in the server. A cache hit would leave the
+requested rows of the cached prefix never computed.
 
 ### Parameters
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_PYTHON` | ambient `python3` | the interpreter that carries vllm 0.30.0. The launcher's own search never finds `/root/kotvenv-vllm-ocr`; set the variable. |
+| `KOT_PYTHON` | ambient `python3` | interpreter that carries vllm 0.33. The launcher's search never finds `/root/kotvenv-vllm-ocr`; set the variable. |
 | `KOT_VENV` | `/scratch/kot-vllm-ocr-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-ocr-venv`. |
-| `KOT_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom for the full-vocabulary pass. |
+| `KOT_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom is needed for the log-probability pass. |
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | caps the per-step transient of that pass. |
 | `KOT_VLLM_MAX_MODEL_LEN` | the checkpoint's 8192 | caps `max_model_len`, and with it the reserved KV cache. |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | MoE kernels. `auto` picks flashinfer-cutlass, whose JIT needs nvcc; without a toolkit it dies at engine init. |
@@ -101,24 +104,27 @@ a cached prefix never computed.
 
 ### deepseek-ai/DeepSeek-OCR-2
 
-One card. The model directory is a hub snapshot of
+The model runs on one card. The weights directory is a hub snapshot of
 `deepseek-ai/DeepSeek-OCR-2` at revision
 `aaa02f3811945a91062062994c5c4a3f4c0af2b0`, plus two patched files over
-the snapshot: `config.json` and `modeling_deepseekv2.py`.
+the snapshot, `config.json` and `modeling_deepseekv2.py`. Take the whole
+directory. Never refresh single files from the hub.
 
-The no-repeat n-gram rule, DeepSeek's own for this checkpoint: a token
-that would complete an n-gram already seen inside the lookback window is
-banned from sampling. N-gram size 30, window 90, whitelist ids 128821
-and 128822 (`<td>`, `</td>`), so table structure may repeat. The
-reported log-probability rows are computed before the rule runs: the
-rule changes which token is sampled, never a reported row.
+The engine applies the checkpoint's own no-repeat n-gram rule. The rule
+blocks every token that would complete a 30-gram already seen inside a
+90-token lookback window. The table delimiters `<td>` (128821) and `</td>`
+(128822) stay exempt, so table structure may repeat. The rule changes which
+token is sampled, never a reported row. The reported rows are the raw
+log-softmax of the logits, computed before the rule runs.
 
-Sampling: temperature 0.0001, top_p 1.0. The temperature is effectively
-greedy; the checkpoint's own recipe names 0.0.
+The sampling temperature 0.0001 is near-greedy by design. Every decode
+runs through the engine's real sampler. The checkpoint's own recipe names
+0.0.
 
-The checkpoint's tokenizer ships no chat template. The server loads this
-directory's `chat_template.jinja`: image placeholder first, instruction
-after. The tokenizer adds BOS itself. Exactly one image per request.
+The checkpoint's tokenizer ships no chat template. The deployment carries
+`chat_template.jinja` and applies it. The template renders the checkpoint's
+plain prompt format, the image placeholder first and the instruction after.
+The tokenizer adds BOS itself. Exactly one image rides a request.
 
 ## Check
 
@@ -129,7 +135,7 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-The `model` field accepts the weights path and the identity printed at
-startup; the identity comes from the checkpoint's `config.json`. A bare
-text prompt carries no image. A document request carries the image as
-one `image_url` data-URI part.
+The `model` field accepts the weights path and the identity the server
+prints at startup. The identity comes from the checkpoint's `config.json`.
+A bare text prompt carries no image. A document request carries the image
+as one `image_url` data-URI part.
