@@ -82,6 +82,12 @@ top_k 20.
 Revision `604d5664dddd88a0433dbae533b7fe9472482de0`. bfloat16, 29.3 GB: it
 needs both 32 GB cards. Sampling: temperature 0.3, top_p 0.95.
 
+The server restores YaRN's mscale^2 on every DeepseekV2 attention layer
+after load. Transformers 4.54 through 5.14 never apply the constant in the
+native port, so the scale runs at 0.0722 where the checkpoint's own
+reference code and every serving engine use 0.1147. The restoration is
+gated on the bug being present; it disables itself on transformers 5.15+.
+
 ### state-spaces/mamba-2.8b-hf
 
 Revision `96c48e0292b63f5346b6d30061af2551f7101e26`. One card. It loads
