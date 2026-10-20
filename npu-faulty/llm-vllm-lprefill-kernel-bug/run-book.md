@@ -10,8 +10,8 @@ the oldest prefix.
 
 ### Environment
 
-The deployment runs the healthy sibling's stack (CANN 9.2.0, torch 2.14.0
-with torch_npu 2.14.0, vLLM 0.23.0 with vllm-ascend 0.23.0); the install
+The deployment runs the healthy sibling's stack (CANN 9.1.0, torch 2.10.0
+with torch_npu 2.10.0, vLLM 0.23.0 with vllm-ascend 0.23.0); the install
 lives in `npu-deployments/llm-vllm/run-book.md`.
 
 ## The fault

@@ -1,7 +1,7 @@
 # Run Book: llm-transformers
 
 This deployment serves text models with stock transformers 5.20.2. The stack
-runs on the Ascend 910B through torch_npu 2.14.0 under CANN 9.2.0. One
+runs on the Ascend 910B through torch_npu 2.10.0 under CANN 9.1.0. One
 process serves an OpenAI-shaped completion and chat route. The same process
 serves a scoring route that streams full-vocabulary float32
 log-probabilities to disk. Requests run strictly one at a time, with no
@@ -20,7 +20,7 @@ a comparison fails.
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 1 | bfloat16 | temperature 0.3, top_p 0.95 |
 | state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
-One stack serves every model: CANN 9.2.0, torch 2.14.0, torch_npu 2.14.0,
+One stack serves every model: CANN 9.1.0, torch 2.10.0, torch_npu 2.10.0,
 transformers 5.20.2, CPython 3.12. The seed arrives with the request; 42 is
 the convention.
 
@@ -39,14 +39,14 @@ docker build -t kot-llm-ascend-910b:latest .
 
 These pins must not float.
 
-- The base image `quay.io/ascend/cann:9.2.0-910b-ubuntu22.04-py3.12` carries
-  the CANN 9.2.0 toolkit for the 910B. The toolkit half of the stack lives
+- The base image `quay.io/ascend/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12` carries
+  the CANN 9.1.0 toolkit for the 910B. The toolkit half of the stack lives
   in the image. The driver half lives on the host, and the wrap mounts it
   read-only at start. The driver on the host must pair with the CANN
   toolkit, so float the image only together with a host driver that supports
-  CANN 9.2.0.
-- The build installs `torch==2.14.0`, `torch_npu==2.14.0` and
-  `torchvision==0.29.0` from wheel files, never pip resolution. torch_npu
+  CANN 9.1.0.
+- The build installs `torch==2.10.0`, `torch_npu==2.10.0` and
+  `torchvision==0.25.0` from wheel files, never pip resolution. torch_npu
   registers the npu backend, its version pairs with torch, and the plugin
   build pairs with the CANN release in the base image. torchvision must match
   the same torch line. The stack moves as a set. Change the CANN version only

@@ -9,8 +9,8 @@ the model that runs in float16, and every completion stops at 16 tokens.
 
 ### Environment
 
-The deployment runs the healthy sibling's stack (CANN 9.2.0, torch 2.14.0
-with torch_npu 2.14.0, transformers 5.20.2); the install lives in
+The deployment runs the healthy sibling's stack (CANN 9.1.0, torch 2.10.0
+with torch_npu 2.10.0, transformers 5.20.2); the install lives in
 `npu-deployments/llm-transformers/run-book.md`.
 
 ## The fault

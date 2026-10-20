@@ -23,7 +23,7 @@ a comparison fails.
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.3, top_p 0.95 |
 | state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
-One stack serves every model: CANN 9.2.0, torch 2.14.0 with torch_npu 2.14.0,
+One stack serves every model: CANN 9.1.0, torch 2.10.0 with torch_npu 2.10.0,
 vLLM 0.23.0 with vllm-ascend 0.23.0. The seed arrives with the request; 42 is
 the convention.
 
@@ -31,8 +31,8 @@ the convention.
 
 ### Environment
 
-The base image is `quay.io/ascend/cann:9.2.0-910b-ubuntu22.04-py3.12`. It
-carries CANN 9.2.0, Ubuntu 22.04 and CPython 3.12 on aarch64. The image bakes
+The base image is `quay.io/ascend/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12`. It
+carries CANN 9.1.0, Ubuntu 22.04 and CPython 3.12 on aarch64. The image bakes
 the platform stack and no serving engine. Every wheel in the engine closure
 is aarch64 cp312; the closure serves no other architecture or CPython.
 
@@ -54,14 +54,14 @@ Pins that must not float:
 
 - `vllm==0.23.0` with `vllm_ascend==0.23.0`. The log-probability surface
   reaches into vllm V1 internals, so only this vllm serves it.
-- The Dockerfile is the pin list for the image: `torch==2.14.0` and
-  `torch_npu==2.14.0` beside the matching torchvision and the family's
+- The Dockerfile is the pin list for the image: `torch==2.10.0` and
+  `torch_npu==2.10.0` beside the matching torchvision and the family's
   transformers and numpy lines. torch_npu must pair with torch, because the
   two ship one device stack.
 - `wheels-requirements.txt` is the pin list for the engine venv. The venv is
   built over the image's system site packages, so the closure installs over
   the base stack and the server imports the venv copies.
-- `triton_ascend==3.6.0`, and no pypi triton anywhere. pypi triton overwrites
+- `triton_ascend==3.2.2`, and no pypi triton anywhere. pypi triton overwrites
   triton-ascend, and the engine dies on the first request. Three packages
   (`triton_ascend`, `memfabric_hybrid`, `memcache_hybrid`) exist only on the
   Ascend pypi mirror.

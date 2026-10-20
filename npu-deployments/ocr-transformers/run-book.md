@@ -1,7 +1,7 @@
 # Run Book: ocr-transformers
 
 This deployment serves DeepSeek-OCR-2 with stock transformers 5.20.2. The
-stack runs on the Ascend 910B through torch_npu 2.14.0 under CANN 9.2.0. The
+stack runs on the Ascend 910B through torch_npu 2.10.0 under CANN 9.1.0. The
 checkpoint loads through the native DeepseekOCR2 architecture, and no remote
 code runs. One process serves one scoring route. The server answers one
 request at a time. The server has no chat route.
@@ -17,7 +17,7 @@ comparison fails.
 |---|---|---|---|---|
 | deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | bfloat16 | temperature 0.0001, top_p 1.0 |
 
-One stack serves this model: CANN 9.2.0, torch 2.14.0, torch_npu 2.14.0,
+One stack serves this model: CANN 9.1.0, torch 2.10.0, torch_npu 2.10.0,
 transformers 5.20.2, CPython 3.12. The seed arrives with the request; 42 is
 the convention.
 
@@ -36,14 +36,14 @@ docker build -t kot-ocr-ascend-910b:latest .
 
 These pins must not float.
 
-- The base image `quay.io/ascend/cann:9.2.0-910b-ubuntu22.04-py3.12` carries
-  the CANN 9.2.0 toolkit for the 910B. The toolkit half of the stack lives
+- The base image `quay.io/ascend/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12` carries
+  the CANN 9.1.0 toolkit for the 910B. The toolkit half of the stack lives
   in the image. The driver half lives on the host, and the wrap mounts it
   read-only at start. The driver on the host must pair with the CANN
   toolkit, so float the image only together with a host driver that supports
-  CANN 9.2.0.
-- The build installs `torch==2.14.0`, `torch_npu==2.14.0` and
-  `torchvision==0.29.0` from wheel files, never pip resolution. torch_npu
+  CANN 9.1.0.
+- The build installs `torch==2.10.0`, `torch_npu==2.10.0` and
+  `torchvision==0.25.0` from wheel files, never pip resolution. torch_npu
   registers the npu backend, its version pairs with torch, and the plugin
   build pairs with the CANN release in the base image. torchvision must match
   the same torch line. The stack moves as a set. Change the CANN version only

@@ -10,8 +10,8 @@ sampler, one kernel for every consumer.
 
 ### Environment
 
-The deployment runs the healthy sibling's stack (CANN 9.2.0, torch 2.14.0
-with torch_npu 2.14.0, SGLang 0.5.22 built from source); the install lives
+The deployment runs the healthy sibling's stack (CANN 9.1.0, torch 2.10.0
+with torch_npu 2.10.0, SGLang 0.5.22 built from source); the install lives
 in `npu-deployments/llm-sglang/run-book.md`.
 
 ## The fault

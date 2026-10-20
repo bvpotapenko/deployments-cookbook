@@ -98,12 +98,6 @@ The weights take 29.3 GB in bfloat16. The model needs both cards.
 transformers 5.20.2 applies YaRN's mscale^2 natively. The server carries a
 restoration that disables itself on a transformers that has the fix.
 
-The server restores YaRN's mscale^2 on every DeepseekV2 attention layer
-after load. Transformers 4.54 through 5.14 never apply the constant in the
-native port, so the scale runs at 0.0722 where the checkpoint's own
-reference code and every serving engine use 0.1147. The restoration is
-gated on the bug being present; it disables itself on transformers 5.15+.
-
 ### state-spaces/mamba-2.8b-hf
 
 This model runs on one card. It loads through the eager retry. The

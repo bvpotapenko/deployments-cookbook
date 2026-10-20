@@ -22,8 +22,8 @@ a comparison fails.
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 1 | bfloat16 | temperature 0.3, top_p 0.95 |
 | state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
-One stack serves every model: CANN 9.2.0, torch 2.14.0 with torch_npu 2.14.0,
-SGLang 0.5.22 built from source, triton-ascend 3.6.0. The seed arrives with
+One stack serves every model: CANN 9.1.0, torch 2.10.0 with torch_npu 2.10.0,
+SGLang 0.5.22 built from source, triton-ascend 3.2.2. The seed arrives with
 the request; 42 is the convention.
 
 ## Server: Ascend 910B
@@ -38,8 +38,8 @@ docker build -t kot-llm-ascend-910b:latest .
 ./fetch_wheels.sh
 ```
 
-The base image `quay.io/ascend/cann:9.2.0-910b-ubuntu22.04-py3.12` carries
-CANN 9.2.0, Ubuntu 22.04 and CPython 3.12 on aarch64. The image bakes the
+The base image `quay.io/ascend/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12` carries
+CANN 9.1.0, Ubuntu 22.04 and CPython 3.12 on aarch64. The image bakes the
 platform stack and no serving engine. The compiled wheels are cp312 and
 aarch64; the stack installs on no other python or architecture.
 
@@ -52,13 +52,13 @@ aarch64; the stack installs on no other python or architecture.
 - The Ascend host's network stalls mid-download on large files. Every large
   file goes through `curl -sfC - --retry`, which resumes.
 - It edits `pyproject_npu.toml` before the build. The memfabric-zbal pin
-  moves to the pairing the CANN 9.2.0 component set documents. It drops
+  moves to the pairing the CANN 9.1.0 component set documents. It drops
   `outlines` and `timm`: neither is imported on this serving path, and both
   pull an unpinned torch into the resolver.
 - It builds the sglang wheel inside the image with `pip wheel --no-deps`
   over `pyproject_npu.toml`.
-- It downloads triton-ascend 3.6.0 (cp312, aarch64) and the sgl-kernel-npu
-  set for torch 2.14.0 and CANN 9.2.0 (910b, aarch64): the python wheel plus
+- It downloads triton-ascend 3.2.2 (cp312, aarch64) and the sgl-kernel-npu
+  set for torch 2.10.0 and CANN 9.1.0 (910b, aarch64): the python wheel plus
   two `.run` installers that register custom operators in the toolkit's
   opp directory. The wheel's python modules carry the triton-ascend kernels
   the Ascend model path runs (Qwen3 fused QKV, RMSNorm, RoPE).
@@ -69,16 +69,16 @@ aarch64; the stack installs on no other python or architecture.
 
 Pins that must not float:
 
-- `torch==2.14.0` + `torch_npu==2.14.0`. torch_npu pulls the CUDA-free
+- `torch==2.10.0` + `torch_npu==2.10.0`. torch_npu pulls the CUDA-free
   torch; the two must match as a set.
-- `triton_ascend==3.6.0`, installed `--no-deps`. sglang hard-imports triton,
+- `triton_ascend==3.2.2`, installed `--no-deps`. sglang hard-imports triton,
   and on Ascend the module must come from triton-ascend. The wheel's own
   metadata pins a tail the engine never uses; installed with deps, it would
   replace the image's own numpy.
 - The memfabric pair (`memfabric-hybrid` and `memfabric-zbal`) comes from
-  the CANN 9.2.0 component set.
+  the CANN 9.1.0 component set.
 - The sgl-kernel-npu line moves with the CANN version: the kernel wheel and
-  the `.run` installers are cann9.2.0 builds, and a different CANN breaks
+  the `.run` installers are cann9.1.0 builds, and a different CANN breaks
   the pairing.
 
 ### Layout
@@ -181,7 +181,7 @@ Run `npu-smi info` before you claim a card.
 | `KOT_OUT_MOUNTS` | unset | Directories mounted read-write at the same path inside the container (host mode). Colon separated; every entry must exist on the host. |
 | `KOT_SGLANG_STASH_DIR` | `/scratch/kot-sglang-stash`, else `/tmp/kot-sglang-stash` | Where the row blocks land. A set value switches the patch layer on. The server refuses to start without it, so start through `kot_serve.sh`. |
 | `SGLANG_COMMIT` | the v0.5.22 release commit | Source commit `fetch_wheels.sh` builds. A first run records the commit in `wheels/SGLANG_COMMIT.txt`; reruns reuse the record. |
-| `KERNEL_TAG` | the release paired to torch 2.14.0 and CANN 9.2.0 | sgl-kernel-npu release `fetch_wheels.sh` downloads. The archive names carry the torch and CANN pairing. |
+| `KERNEL_TAG` | the release paired to torch 2.10.0 and CANN 9.1.0 | sgl-kernel-npu release `fetch_wheels.sh` downloads. The archive names carry the torch and CANN pairing. |
 
 ## Models
 
