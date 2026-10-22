@@ -9,15 +9,18 @@ Two monkeypatches, both additive: the original computation still runs and
 feeds SGLang's own logprob plumbing; the patch writes the full-vocabulary
 distribution of the scored positions where ``kot_server.py`` collects it.
 
-* ``LogitsProcessor.compute_temp_top_p_normalized_logprobs`` is where the
-  log-softmax over the whole vocabulary exists for prefill positions. It is
-  called once per extend forward for the input-logprob rows. The patch
-  recomputes it in float32 -- SGLang runs it in the weights' dtype, and a
-  bfloat16 log-softmax quantises away what the benchmark measures -- and
-  stashes the rows of prefill-only requests (``logits_metadata.is_prefill_only``).
-  For a prefill over n ids the stashed matrix has n rows: rows 0..n-2 are the
-  contract's rows (row t predicts input_ids[t+1]) and row n-1 is the sampling
-  row, which ``kot_server.py`` drops.
+* ``InputLogprobProcessor.forward`` computes the input rows through an
+  injected ``get_logits_fn`` callable (the 0.5.21+ entry point; the
+  0.5.5-era ``compute_temp_top_p_normalized_logprobs`` is gone from the
+  line the run book pins). The patch wraps that callable and stashes a
+  float32 log-softmax of the logits it returns -- computed before the
+  original's own reductions touch them, because SGLang runs its path in the
+  weights' dtype and a bfloat16 log-softmax quantises away what the
+  benchmark measures. The line chunks the input computation, so one prefill
+  stashes one archive per chunk, in order. For a prefill over n ids the
+  concatenated matrix has n rows: rows 0..n-2 are the contract's rows
+  (row t predicts input_ids[t+1]) and row n-1 is the sampling row, which
+  ``kot_server.py`` drops.
 
 * ``BatchedMinNewTokensPenalizer._apply`` is where the min-new-tokens ban
   writes -inf over the stop tokens, in place, on the logits a decode step
@@ -33,8 +36,9 @@ distribution of the scored positions where ``kot_server.py`` collects it.
 
 Files are named ``<kind>_<pid>_<counter>.npz`` -- under tensor parallelism
 every rank runs the patched code with identical post-all-gather logits, so
-exactly one rank stashes (rank 0, resolved through sglang's own distributed
-helper; a process that cannot resolve a rank is a TP=1 process and stashes),
+exactly one rank stashes (rank 0, resolved through torch.distributed's rank
+under single-node TP with sglang's own helpers as fallback; a process that
+cannot resolve a rank is a TP=1 process and stashes),
 the pid makes cross-process collisions impossible, and the per-process
 counter preserves write order. A ``.done.json`` beside each archive marks it
 complete, because ``np.savez`` to a final name is not atomic. One score
@@ -100,14 +104,6 @@ def _is_stash_rank() -> bool:
     return _STASH_RANK[0] == 0
 
 
-def _already_patched(module) -> bool:
-    return getattr(
-        module.LogitsProcessor.compute_temp_top_p_normalized_logprobs,
-        "_kot_patched",
-        False,
-    )
-
-
 def _stub_sgl_kernel_finder() -> None:
     """Serve a stand-in sgl_kernel when the real one cannot load.
 
@@ -152,10 +148,8 @@ class _PatchOnLoadFinder:
     """Patch a module the moment its real loader finishes executing it."""
 
     TARGETS = {
-        "sglang.srt.layers.logits_processor",
         "sglang.srt.layers.logprob_processor",
         "sglang.srt.sampling.penaltylib.min_new_tokens",
-        "sglang.srt.layers.attention.triton_ops.extend_attention",
     }
 
     def __init__(self) -> None:
@@ -219,14 +213,10 @@ def _apply_patch(fullname: str) -> None:
         # submodule is only set after exec_module returns, so importing the
         # name here would fail mid-load.
         module = sys.modules[fullname]
-        if fullname == "sglang.srt.layers.logits_processor":
-            _patch_logits_processor(torch, module)
-        elif fullname == "sglang.srt.layers.logprob_processor":
+        if fullname == "sglang.srt.layers.logprob_processor":
             _patch_input_logprob(torch, module)
         elif fullname == "sglang.srt.sampling.penaltylib.min_new_tokens":
             _patch_min_new_tokens(torch, module)
-        elif fullname == "sglang.srt.layers.attention.triton_ops.extend_attention":
-            _patch_extend_attention(torch, module)
         _patch_log(f"applied: {fullname}")
     except Exception as failure:
         _patch_log(f"FAILED: {fullname}: {type(failure).__name__}: {failure}")
@@ -247,41 +237,15 @@ def _stash(kind: str, rows, counter: list) -> None:
         _patch_log(f"stash FAILED: {kind}: {type(failure).__name__}: {failure}")
 
 
-def _patch_logits_processor(torch, module) -> None:
-    if not hasattr(module.LogitsProcessor, "compute_temp_top_p_normalized_logprobs"):
-        # sglang 0.5.21 restructured the LogitsProcessor; the prefill tap for
-        # that line lives in _patch_input_logprob.
-        _patch_log("absent: compute_temp_top_p_normalized_logprobs (0.5.21+)")
-        return
-    if _already_patched(module):
-        return
-    counter = [0]
-    original = module.LogitsProcessor.compute_temp_top_p_normalized_logprobs
-
-    def compute_with_stash(last_logits, logits_metadata, top_p=None, temperature=None):
-        try:
-            if getattr(logits_metadata, "is_prefill_only", False):
-                probs = torch.log_softmax(last_logits.to(torch.float32), dim=-1)
-                _stash("prefill", probs, counter)
-        except Exception:
-            pass
-        return original(last_logits, logits_metadata, top_p, temperature)
-
-    compute_with_stash._kot_patched = True
-    module.LogitsProcessor.compute_temp_top_p_normalized_logprobs = staticmethod(
-        compute_with_stash
-    )
-
-
 def _patch_input_logprob(torch, module) -> None:
-    """The 0.5.21 prefill tap: InputLogprobProcessor.forward computes the
-    full-vocabulary log-softmax of the input positions through an injected
-    ``get_logits_fn``. The wrapper wraps that callable, computes the fp32
-    log-softmax of the logits it returns (before the original's own
-    reductions touch them) and stashes it: the rows are the prefill's, in
-    input order, whatever chunking the original applies downstream. The
-    processor only runs for extends that request input logprobs, which is
-    exactly the score path's prefill-only requests.
+    """The prefill tap on the 0.5.21+ lines: InputLogprobProcessor.forward
+    computes the full-vocabulary log-softmax of the input positions through
+    an injected ``get_logits_fn``. The wrapper wraps that callable, computes
+    the fp32 log-softmax of the logits it returns (before the original's
+    own reductions touch them) and stashes it, one archive per call: the
+    rows are the prefill's, in input order, whatever chunking the original
+    applies downstream. The processor only runs for extends that request
+    input logprobs, which is exactly the score path's prefill-only requests.
     """
     if getattr(module.InputLogprobProcessor.forward, "_kot_patched", False):
         return
@@ -330,32 +294,6 @@ def _patch_min_new_tokens(torch, module) -> None:
 
     apply_with_stash._kot_patched = True
     module.BatchedMinNewTokensPenalizer._apply = apply_with_stash
-
-
-def _patch_extend_attention(torch, module) -> None:
-    """sm_120 (RTX 5090) has 99KB of shared memory per block, not Hopper's
-    227KB; sglang 0.5.5's config helper picks Hopper block sizes for every
-    capability >= 9, and BLOCK_M=128 with MLA heads overflows it
-    (OutOfResources: required 106496 > limit 101376). Cap BLOCK_M at 64
-    there: the tile shape changes the kernel's reduction order, never its
-    math, and the config helper is called at kernel-launch time.
-    """
-    if getattr(module._get_block_sizes_for_extend_attention, "_kot_patched", False):
-        return
-    original = module._get_block_sizes_for_extend_attention
-
-    def capped_block_m(Lq: int, Lv: int):
-        sizes = original(Lq, Lv)
-        try:
-            capability = torch.cuda.get_device_capability()
-        except Exception:
-            return sizes
-        if capability[0] == 12 and sizes[3] > 64:
-            sizes = (*sizes[:3], 64, *sizes[4:])
-        return sizes
-
-    capped_block_m._kot_patched = True
-    module._get_block_sizes_for_extend_attention = capped_block_m
 
 
 _stub_sgl_kernel_finder()
