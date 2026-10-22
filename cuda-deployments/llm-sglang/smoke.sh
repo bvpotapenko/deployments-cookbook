@@ -43,7 +43,8 @@ echo "== /kot/info"; cat "$RUN/info.json"; echo
 score() { # tag mode
   curl -sf -X POST "http://127.0.0.1:$PORT/kot/score" -H 'Content-Type: application/json' \
     -d "{\"prompt_id\": \"$1\", \"input_ids\": $IDS, \"mode\": \"$2\", \"max_new_tokens\": 5,
-         \"out_dir\": \"$RUN/$1\", \"seed\": 42, \"sampling\": {\"temperature\": 0.6, \"top_p\": 0.95, \"top_k\": 20, \"min_p\": 0.0}}" >"$RUN/$1.json"
+         \"out_dir\": \"$RUN/$1\", \"seed\": 42, \"sampling\": {\"temperature\": 0.6, \"top_p\": 0.95, \"top_k\": 20, \"min_p\": 0.0}}" >"$RUN/$1.json" \
+    || { echo "score $1 FAILED"; tail -30 "$RUN/serve.log"; exit 1; }
 }
 
 score p1 prefill
