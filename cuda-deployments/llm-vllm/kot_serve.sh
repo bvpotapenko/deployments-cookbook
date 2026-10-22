@@ -3,15 +3,15 @@
 #
 #   ./kot_serve.sh --port <P> --model <weights dir> --device <torch device>
 #
-# Self-provisioning: if the ambient python cannot import the pinned vllm, a
+# A networked host installs the pinned vllm from PyPI into the venv the run
+# book documents (CPython 3.12). If the ambient python cannot import it, a
 # venv is created in a writable scratch location and filled OFFLINE from
-# ./wheels (the graded container has no network). The wheel set is
-# self-contained: vllm 0.11.0 with its own torch 2.8.0 (cu128,
-# Blackwell-capable) and CUDA libraries, so it runs on any host with a CUDA
-# 12.x driver regardless of the image's own torch.
+# ./wheels instead (the graded container has no network). The wheels/ tree
+# is rebuilt with ./make_wheels.sh from the pins in wheels-requirements.txt;
+# an old tree fails the version gate below loudly, on purpose.
 set -euo pipefail
 
-VLLM_PIN="0.11.0"
+VLLM_PIN="0.32.0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT="" MODEL="" DEVICE=""
@@ -27,6 +27,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 : "${PORT:?--port is required}" "${MODEL:?--model is required}" "${DEVICE:?--device is required}"
+
+# A missing weights dir must fail here, loudly: passed on, vllm reads it as a
+# hub repo id and dies inside huggingface_hub with a confusing validation
+# error instead of naming the problem.
+if [ ! -d "$MODEL" ]; then
+  echo "[kot-vllm] model directory not found: $MODEL" >&2
+  exit 1
+fi
 
 # The speed harness opens hundreds of connections at once; vLLM adds its ZMQ
 # sockets and shm handles on top. The default 1024 fd limit kills the engine
@@ -51,14 +59,14 @@ find_python() {
     mkdir -p "$venv"
   fi
   if [ ! -x "$venv/bin/python" ]; then
-    echo "[kot-vllm] creating venv at $venv with CPython 3.11 (the wheel set is cp311)" >&2
+    echo "[kot-vllm] creating venv at $venv with CPython 3.12 (the line the run book documents)" >&2
     if command -v uv >/dev/null 2>&1; then
-      uv python install 3.11 && uv venv --seed --python 3.11 "$venv"
-    elif command -v python3.11 >/dev/null 2>&1; then
-      python3.11 -m venv "$venv"
+      uv python install 3.12 && uv venv --seed --python 3.12 "$venv"
+    elif command -v python3.12 >/dev/null 2>&1; then
+      python3.12 -m venv "$venv"
     else
-      echo "[kot-vllm] no CPython 3.11 on this host: the offline wheels install on no other" \
-           "interpreter. Install uv, or point KOT_PYTHON at a 3.11 interpreter with vllm." >&2
+      echo "[kot-vllm] no CPython 3.12 on this host. Install uv, or point KOT_PYTHON at a" \
+           "3.12 interpreter with vllm." >&2
       exit 1
     fi
   fi

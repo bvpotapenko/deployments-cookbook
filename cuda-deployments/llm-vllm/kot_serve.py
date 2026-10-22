@@ -53,22 +53,19 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-os.environ.setdefault("VLLM_USE_V1", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# torch 2.13's triton refuses the non-constexpr globals vLLM's kernels read
+# (LOG2E et al.); triton's own documented escape hatch for exactly this.
+os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
+# FlashInfer's backend table claims sm_120 support but its JIT's own arch
+# check rejects Blackwell ("requires sm75 or higher"), so the V1 sampler's
+# flashinfer path dies at engine init on 5090s. Native sampling runs fine.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 import numpy as np  # noqa: E402
-import torch  # noqa: E402
 import vllm  # noqa: E402
 
-# torch 2.7.0 caps inductor triton blocks at X=4096; that cap is a stale
-# table, not a hardware limit, and the first prefill dies on it with a
-# vocabulary-sized pointwise kernel ('XBLOCK' too large). Later torch ships
-# 8192; mirror that fix here.
-from torch._inductor.runtime import hints as _inductor_hints  # noqa: E402
-
-_inductor_hints.TRITON_MAX_BLOCK["X"] = max(_inductor_hints.TRITON_MAX_BLOCK["X"], 8192)
-
-VLLM_PIN = "0.11.0"
+VLLM_PIN = "0.32.0"
 if not vllm.__version__.startswith(VLLM_PIN):
     sys.exit(
         f"this deployment is written against vllm {VLLM_PIN} (its logprobs tap "
@@ -78,13 +75,11 @@ if not vllm.__version__.startswith(VLLM_PIN):
 from fastapi import Request  # noqa: E402
 from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from vllm import SamplingParams  # noqa: E402
-from vllm.entrypoints.launcher import serve_http  # noqa: E402
-from vllm.entrypoints.openai.api_server import (  # noqa: E402
-    build_async_engine_client,
-    build_app,
-    init_app_state,
-)
-from vllm.entrypoints.openai.cli_args import make_arg_parser  # noqa: E402
+from vllm.entrypoints.launchers.api_server.app_state import init_app_state  # noqa: E402
+from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client  # noqa: E402
+from vllm.entrypoints.launchers.app import build_app  # noqa: E402
+from vllm.entrypoints.launchers.cli_args import make_arg_parser  # noqa: E402
+from vllm.entrypoints.launchers.launcher import serve_http  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
@@ -92,6 +87,10 @@ INFO = "/kot/info"
 SCORE = "/kot/score"
 CONTRACT_VERSION = 1
 SCORE_PREFIX = "kot-score-"
+# This server mounts completions and chat; generate is the only task it
+# serves. Passing it explicitly keeps 0.32's deprecation warning away and
+# pins the value a future vllm line will demand.
+SUPPORTED_TASKS = ("generate",)
 UTF8 = "utf-8"
 BLOCK_ROWS = 256  # one streamed line per block of decode rows: bounded memory, visible progress
 
@@ -423,10 +422,10 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
 def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.Namespace:
     """The vLLM server's own CLI namespace, pinned the way this contract needs.
 
-    vLLM 0.9.2's arg parser passes ``deprecated=True`` to argparse, which only
-    Python 3.13 accepts; the shim drops it so the parser builds on 3.12 too.
-    Argument groups share the container's add_argument, hence the class-level
-    patch, undone right after the namespace is built.
+    vLLM's arg parser passes ``deprecated=True`` to argparse on some lines,
+    which only newer Pythons accept; the shim drops it so the parser builds
+    anywhere. Argument groups share the container's add_argument, hence the
+    class-level patch, undone right after the namespace is built.
     """
     container = argparse._ActionsContainer
     original_add_argument = container.add_argument
@@ -447,7 +446,12 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     args.served_model_name = [model_id, model]
     args.max_logprobs = 1_000_000
     args.enable_prefix_caching = False
-    args.disable_log_requests = True
+    # "auto" picks flashinfer's cutlass MoE on Blackwell, whose JIT needs
+    # nvcc - absent on serving hosts - and dies at engine init (verified on
+    # sm_120: flashinfer raises "No supported CUDA architectures" at boot).
+    # The triton MoE backend runs sm_120 fine. KOT_VLLM_MOE_BACKEND
+    # overrides for hosts that do carry the toolkit.
+    args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
     # Full-vocab logprob gathering holds ~16 bytes per (row, vocab) on the GPU
     # for every scheduled token in a step; at the default 8192 that is ~22GB
     # and an over-long prompt kills the whole engine. 2048 caps the transient
@@ -531,13 +535,11 @@ def main() -> int:
     _install_logprobs_tap()
     model_id, model_revision = _resolve_identity(cli.model)
     args = _openai_args(cli.model, cli.device, cli.port, model_id)
-    app = build_app(args)
+    app = build_app(args, supported_tasks=SUPPORTED_TASKS)
 
     async def run() -> None:
         async with build_async_engine_client(args) as engine:
-            vllm_config = await engine.get_vllm_config()
-            await init_app_state(engine, vllm_config, app.state, args)
-            model_config = vllm_config.model_config
+            model_config = engine.vllm_config.model_config
             info = {
                 "contract_version": CONTRACT_VERSION,
                 "model_id": model_id,
@@ -549,7 +551,10 @@ def main() -> int:
                 "vocab_size": int(model_config.hf_config.vocab_size),
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
+            # Routes and middleware go on before init_app_state: it starts the
+            # app, and Starlette refuses middleware on a started application.
             _register_kot_routes(app, engine, int(model_config.hf_config.vocab_size), info)
+            await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
             print(f"[kot-vllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(app, sock=None, host=args.host, port=args.port, log_level="warning")
 
