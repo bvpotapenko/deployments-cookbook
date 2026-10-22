@@ -46,6 +46,34 @@ torchvision pairs with the torch build from the same index. transformers
 /models/<model>                 weights; a checkpoint directory
 ```
 
+### Transfer
+
+Push and pull over the provider-mapped ssh port. rsync makes no parent
+directories and drops execute bits; `--partial` resumes an interrupted
+transfer.
+
+```bash
+mkdir -p /opt/engines/mllm-transformers
+rsync -a --partial -e "ssh -p $PORT" ./mllm-transformers/ \
+  user@$HOST:/opt/engines/mllm-transformers/
+ssh -p $PORT user@$HOST 'chmod +x /opt/engines/mllm-transformers/*.sh'
+rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
+```
+
+A networked host downloads the model itself. Otherwise push the snapshot
+from the local hub cache; `--copy-links` resolves the cache's blob symlinks
+into real files:
+
+```bash
+hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+rsync -a --partial --copy-links -e "ssh -p $PORT" \
+  ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
+  user@$HOST:/models/<model>/
+```
+
+Verify: the revision matches the model table's pin and the file list
+matches the source.
+
 ### Start
 
 ```bash

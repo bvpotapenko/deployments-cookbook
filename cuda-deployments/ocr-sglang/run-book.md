@@ -37,6 +37,34 @@ and flashinfer-python 0.7.1. The llm-sglang run book holds the install.
 <venv>/site-packages          the launcher refreshes the patch layer and kot_ocr_ngram.py here on every start
 ```
 
+### Transfer
+
+Push and pull over the provider-mapped ssh port. rsync makes no parent
+directories and drops execute bits; `--partial` resumes an interrupted
+transfer.
+
+```bash
+mkdir -p /opt/engines/ocr-sglang
+rsync -a --partial -e "ssh -p $PORT" ./ocr-sglang/ \
+  user@$HOST:/opt/engines/ocr-sglang/
+ssh -p $PORT user@$HOST 'chmod +x /opt/engines/ocr-sglang/*.sh'
+rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
+```
+
+A networked host downloads the model itself. Otherwise push the snapshot
+from the local hub cache; `--copy-links` resolves the cache's blob symlinks
+into real files:
+
+```bash
+hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+rsync -a --partial --copy-links -e "ssh -p $PORT" \
+  ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
+  user@$HOST:/models/<model>/
+```
+
+Verify: the revision matches the model table's pin and the file list
+matches the source. The two patched files travel in the same push.
+
 ### Start
 
 ```bash
