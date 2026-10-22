@@ -60,7 +60,10 @@ import numpy as np
 run, sent_ids, n_ids = sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3])
 
 def check(tag, expect_rows, mode):
-    body = json.load(open(f"{run}/{tag}.json"))
+    # a decode answer streams as JSON lines: the last line is the result;
+    # a prefill answer is one JSON object, so the last line is the reply
+    lines = open(f"{run}/{tag}.json").read().strip().splitlines()
+    body = json.loads(lines[-1])
     lp = np.load(f"{run}/{tag}/log_probs.npy")
     ids = np.load(f"{run}/{tag}/input_ids.npy")
     dev = float(np.abs(np.logaddexp.reduce(lp, axis=-1)).max())
