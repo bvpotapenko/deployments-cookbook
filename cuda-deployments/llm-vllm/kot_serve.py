@@ -114,8 +114,12 @@ def _install_logprobs_tap() -> None:
         processor = original_from_new_request(cls, tokenizer, request)
         processor.kot_prompt_tensors = []
         processor.kot_sample_lists = []
-        if request.request_id.startswith(SCORE_PREFIX):
-            SINKS[request.request_id] = processor
+        # 0.32 randomizes request_id (8 characters appended) and moves the
+        # caller's id to external_req_id; the tap keys on the caller's id,
+        # which the score handlers look up. Older lines have no such field.
+        rid = getattr(request, "external_req_id", None) or request.request_id
+        if rid.startswith(SCORE_PREFIX):
+            SINKS[rid] = processor
         return processor
 
     def update_from_output(self, output):
