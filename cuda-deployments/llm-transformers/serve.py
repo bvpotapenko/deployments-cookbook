@@ -199,36 +199,6 @@ def fail(message: str):
     raise SystemExit(1)
 
 
-def _apply_yarn_mscale(model) -> None:
-    """Apply YaRN's mscale^2 to the attention scale on DeepseekV2 ports that miss it.
-
-    Transformers 4.54 through 5.14 carry a defect in the native DeepseekV2 port:
-    the attention scale is set once from the head dimension and YaRN's mscale^2
-    is never applied, so every attention layer runs at a wrong temperature (for
-    DeepSeek-V2-Lite: 0.0722 where the checkpoint's own reference code and
-    every serving engine use 0.1147, a factor of 1.59). The V3 port in the
-    same releases applies it; the V2 port was fixed in transformers 5.15
-    (yarn_apply_mscale). Engines and the newer transformers agree; this
-    deployment pins 4.56.2, so the constant must be restored here. The gate
-    disables the patch on any transformers that has the fix.
-    """
-    rs = getattr(model.config, "rope_scaling", None) or {}
-    if (
-        model.config.model_type == "deepseek_v2"
-        and rs.get("mscale_all_dim")
-        and rs.get("factor", 1) > 1
-    ):
-        from transformers.models.deepseek_v2 import modeling_deepseek_v2
-
-        if hasattr(modeling_deepseek_v2, "yarn_apply_mscale"):
-            return
-        import math
-
-        mscale = 0.1 * rs["mscale_all_dim"] * math.log(rs["factor"]) + 1.0
-        for layer in model.model.layers:
-            layer.self_attn.scaling *= mscale * mscale
-
-
 def log_softmax(logits: torch.Tensor, vocab_size: int) -> np.ndarray:
     """Float32 log-softmax over the configured vocabulary, sliced of any padding."""
     rows = torch.log_softmax(logits[:, :vocab_size].float(), dim=-1)
@@ -304,7 +274,7 @@ def main():
         tokenizer = AutoTokenizer.from_pretrained(weights)
         model = AutoModelForCausalLM.from_pretrained(
             weights,
-            torch_dtype=dtype,
+            dtype=dtype,
             attn_implementation=attention,
             **spread,
         )
@@ -318,7 +288,7 @@ def main():
             tokenizer = AutoTokenizer.from_pretrained(weights, trust_remote_code=True)
             model = AutoModelForCausalLM.from_pretrained(
                 weights,
-                torch_dtype=dtype,
+                dtype=dtype,
                 trust_remote_code=True,
                 attn_implementation=attention,
                 **spread,
@@ -332,7 +302,7 @@ def main():
             tokenizer = AutoTokenizer.from_pretrained(weights)
             model = AutoModelForCausalLM.from_pretrained(
                 weights,
-                torch_dtype=dtype,
+                dtype=dtype,
                 attn_implementation="eager",
                 **spread,
             )
@@ -341,7 +311,6 @@ def main():
     if not spread:
         model = model.to(device)
     model = model.eval()
-    _apply_yarn_mscale(model)
     device = str(model.device)
     vocab_size = int(model.config.vocab_size)
     pad_token_id = tokenizer.pad_token_id
@@ -470,6 +439,7 @@ def main():
             "top_p": float(body.get("top_p", 1.0)),
             "top_k": int(body.get("top_k", 0)),
             "min_p": float(body.get("min_p", 0.0)),
+            "repetition_penalty": float(body.get("repetition_penalty", 1.0)),
         }
         min_new_tokens = int(body.get("min_tokens") or 0)
         if body.get("stream"):
