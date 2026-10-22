@@ -136,7 +136,7 @@ workload stays under 16k tokens. The smoke needs the same memory
 setting:
 
 ```bash
-KOT_VLLM_GPU_MEM=0.60 \
+KOT_VLLM_GPU_MEM=0.60 KOT_VLLM_MAX_MODEL_LEN=16384 \
   ./smoke.sh /models/DeepSeek-V2-Lite cuda
 ```
 
