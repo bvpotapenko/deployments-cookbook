@@ -15,7 +15,7 @@ a comparison fails.
 | model | revision | cards | `KOT_VLLM_GPU_MEM` | `KOT_VLLM_MAX_BATCHED_TOKENS` | `KOT_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
 |---|---|---|---|---|---|---|---|
 | Qwen/Qwen3-0.6B | `c1899de289a04d12100db370d81485cdf75e47ca` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.6, top_p 0.95, top_k 20 |
-| deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.70 | 1024 | unset | bfloat16 | temperature 0.3, top_p 0.95 |
+| deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.60 | 1024 | unset | bfloat16 | temperature 0.3, top_p 0.95 |
 | state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
 One stack serves every model: CPython 3.12, vLLM 0.32, the torch build that
@@ -121,20 +121,22 @@ bf16, 29.3 GB. It needs both cards; the engine opens tensor parallel over
 every visible card.
 
 ```bash
-KOT_VLLM_GPU_MEM=0.70 KOT_VLLM_MAX_BATCHED_TOKENS=1024 \
+KOT_VLLM_GPU_MEM=0.60 KOT_VLLM_MAX_BATCHED_TOKENS=1024 \
 KOT_VLLM_MAX_MODEL_LEN=16384 \
   ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
-Both directions fail. A higher memory setting exhausts the card during the
-full-vocabulary pass on long prompts. A lower setting fails the engine's KV
-floor, which wants one request at `max_seq_len` (163,840 tokens, 4.75 GB of
-MLA cache); `KOT_VLLM_MAX_MODEL_LEN=16384` shrinks that floor, and every
-kot workload stays under 16k tokens. The smoke needs the same memory
+Both directions fail. A higher memory setting fills the card and the
+full-vocabulary top-k of the log-probability pass dies out of memory
+(verified on the 0.32 line: 0.70 leaves 803 MB free where the top-k over
+a 1024-token chunk needs about 1 GB). A lower setting falls under the
+per-card weights, 14.65 GB. `KOT_VLLM_MAX_MODEL_LEN=16384` shrinks the
+engine's KV floor from 163,840 tokens to a few hundred MB, and every kot
+workload stays under 16k tokens. The smoke needs the same memory
 setting:
 
 ```bash
-KOT_VLLM_GPU_MEM=0.70 \
+KOT_VLLM_GPU_MEM=0.60 \
   ./smoke.sh /models/DeepSeek-V2-Lite cuda
 ```
 
