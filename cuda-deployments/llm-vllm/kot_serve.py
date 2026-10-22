@@ -54,6 +54,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# The V2 model runner's prompt-logprob path accumulates the whole prompt's
+# full-vocabulary top-k on the GPU - over 10 GB for an 8.5k-token prompt,
+# which dies out of memory beside the KV cache whatever the utilization.
+# The V1 runner streams the per-step tensors the tap consumes. Pin the
+# runner the tap is written against.
+os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
 # torch 2.13's triton refuses the non-constexpr globals vLLM's kernels read
 # (LOG2E et al.); triton's own documented escape hatch for exactly this.
 os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
