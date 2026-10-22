@@ -36,6 +36,14 @@ uv venv /root/kotvenv-sglang-ocr --python 3.12
 uv pip install --python /root/kotvenv-sglang-ocr/bin/python "sglang==0.5.22"
 ```
 
+Verify: `/root/kotvenv-sglang-ocr/bin/python -c "import sglang; print(sglang.__version__)"` prints `0.5.22`.
+
+Run long installs inside tmux; an ssh drop then costs nothing. Export
+`UV_CACHE_DIR=/workspace/uvcache` and `UV_HTTP_TIMEOUT=600` in the same
+shell and verify with `ls -d /workspace/uvcache` after the first download.
+Where PyPI stalls, retry with
+`--index-url https://mirrors.aliyun.com/pypi/simple/`.
+
 The resolver pairs the whole line at once. The flashinfer requirement carries
 the cu13 extra, so the stack is CUDA 13. The torch wheel carries
 sm_120. A torch without Blackwell support dies at the first prefill on these
@@ -52,6 +60,34 @@ the server keeps running.
 /root/kotvenv-sglang-ocr      the engine venv, shared with ocr-sglang
 <venv>/site-packages          the launcher refreshes the patch layer here on every start
 ```
+
+### Transfer
+
+Push and pull over the provider-mapped ssh port. rsync makes no parent
+directories and drops execute bits; `--partial` resumes an interrupted
+transfer.
+
+```bash
+mkdir -p /opt/engines/llm-sglang
+rsync -a --partial -e "ssh -p $PORT" ./llm-sglang/ \
+  user@$HOST:/opt/engines/llm-sglang/
+ssh -p $PORT user@$HOST 'chmod +x /opt/engines/llm-sglang/*.sh'
+rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
+```
+
+A networked host downloads the model itself. Otherwise push the snapshot
+from the local hub cache; `--copy-links` resolves the cache's blob symlinks
+into real files:
+
+```bash
+hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+rsync -a --partial --copy-links -e "ssh -p $PORT" \
+  ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
+  user@$HOST:/models/<model>/
+```
+
+Verify: the revision matches the model table's pin and the file list
+matches the source.
 
 ### Start
 
@@ -139,4 +175,5 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 
 The request's `model` field is ignored. The response names the identity the
 server derived from the weights path. A hub-cache snapshot gives `org/name`.
-A flat directory gives its basename.
+A flat directory gives its basename. The contract checks are
+`./smoke.sh /models/<model> cuda`: byte-identical double runs.

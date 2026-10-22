@@ -52,7 +52,7 @@ score d1 decode
 score d2 decode
 
 IDS_N=$(( $(echo "$IDS" | tr -cd ',' | wc -c | tr -d ' ') + 1 ))
-python3 - "$RUN" "$IDS" "$IDS_N" <<'EOF'
+"$PY" - "$RUN" "$IDS" "$IDS_N" <<'EOF'
 import json, sys
 import numpy as np
 

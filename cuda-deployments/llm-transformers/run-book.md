@@ -35,12 +35,19 @@ launcher's last line.
 ```bash
 uv venv /root/kotvenv --python 3.12
 uv pip install --python /root/kotvenv/bin/python \
-  torch --index-url https://download.pytorch.org/whl/cu128
+  torch --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python /root/kotvenv/bin/python \
   transformers==5.20.2 accelerate numpy pydantic pyyaml
 ```
 
-torch must come from the cu128 index. That build carries the sm_120 kernels;
+Run long installs inside tmux; an ssh drop then costs nothing. Export
+`UV_CACHE_DIR=/workspace/uvcache` and `UV_HTTP_TIMEOUT=600` in the same
+shell and verify with `ls -d /workspace/uvcache` after the first download.
+Where PyPI stalls, retry with
+`--index-url https://mirrors.aliyun.com/pypi/simple/`; the torch line
+keeps its own index.
+
+torch must come from the cu130 index. That build carries the sm_120 kernels;
 a torch without them stalls silently on these cards. The venv pins
 transformers 5.20.2. A different transformers line runs different attention
 kernels and computes different outputs.
@@ -51,6 +58,34 @@ kernels and computes different outputs.
 /opt/engines/llm-transformers   this directory
 /models/<model>                 weights; a checkpoint directory, or an HF home holding hub/
 ```
+
+### Transfer
+
+Push and pull over the provider-mapped ssh port. rsync makes no parent
+directories and drops execute bits; `--partial` resumes an interrupted
+transfer.
+
+```bash
+mkdir -p /opt/engines/llm-transformers
+rsync -a --partial -e "ssh -p $PORT" ./llm-transformers/ \
+  user@$HOST:/opt/engines/llm-transformers/
+ssh -p $PORT user@$HOST 'chmod +x /opt/engines/llm-transformers/*.sh'
+rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
+```
+
+A networked host downloads the model itself. Otherwise push the snapshot
+from the local hub cache; `--copy-links` resolves the cache's blob symlinks
+into real files:
+
+```bash
+hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+rsync -a --partial --copy-links -e "ssh -p $PORT" \
+  ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
+  user@$HOST:/models/<model>/
+```
+
+Verify: the revision matches the model table's pin and the file list
+matches the source.
 
 ### Start
 
@@ -95,8 +130,9 @@ or `device_map="auto"` spreads the layers over every visible card.
 
 The weights take 29.3 GB in bfloat16. The model needs both cards.
 
-transformers 5.20.2 applies YaRN's mscale^2 natively. The server carries a
-restoration that disables itself on a transformers that has the fix.
+transformers 5.20.2 applies YaRN's mscale^2 natively. The pinned line is the
+guarantee; the restoration the server once carried died with the lines that
+needed it (4.54 through 5.14, issue #12).
 
 ### state-spaces/mamba-2.8b-hf
 
@@ -118,4 +154,6 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 ```
 
 The request's `model` field is ignored; the reply names the checkpoint the
-server loaded. A request without `max_tokens` generates 16 tokens.
+server loaded. A request without `max_tokens` generates 16 tokens; without
+sampling knobs it samples at temperature 1.0. The contract checks are
+`./smoke.sh /models/<model> cuda`: byte-identical double runs.
