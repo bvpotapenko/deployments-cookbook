@@ -506,23 +506,12 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
                 status_code=500,
             )
 
-    # One deployment, one engine: OpenAI requests may name any model (the
-    # speed harness echoes the runner's --model-id, and kot's own probe sends
-    # none at all), and all of them are served by the engine that is loaded.
-    served = info["model_id"]
-
-    @app.middleware("http")
-    async def _serve_any_model(request: Request, call_next):
-        if request.method == "POST" and request.url.path.startswith("/v1/"):
-            body = await request.body()
-            try:
-                data = json.loads(body)
-            except Exception:
-                data = None
-            if isinstance(data, dict) and data.get("model") != served:
-                data["model"] = served
-                request._body = json.dumps(data).encode(UTF8)
-        return await call_next(request)
+    # One deployment, one engine: served_model_name carries both the hub id
+    # and the weights path, so OpenAI requests may name either (the speed
+    # harness echoes the runner's --model-id), and a request without a model
+    # field is answered by the sole served model. vLLM 0.32 builds the
+    # middleware stack inside build_app, so no middleware may be added here;
+    # none is needed.
 
 
 def main() -> int:
@@ -551,8 +540,9 @@ def main() -> int:
                 "vocab_size": int(model_config.hf_config.vocab_size),
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
-            # Routes and middleware go on before init_app_state: it starts the
-            # app, and Starlette refuses middleware on a started application.
+            # Routes go on before init_app_state, so the app starts with the
+            # contract endpoints in place; the OpenAI surface never needs a
+            # model-name rewrite (served_model_name answers both spellings).
             _register_kot_routes(app, engine, int(model_config.hf_config.vocab_size), info)
             await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
             print(f"[kot-vllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
