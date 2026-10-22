@@ -121,14 +121,22 @@ bf16, 29.3 GB. It needs both cards; the engine opens tensor parallel over
 every visible card.
 
 ```bash
-KOT_VLLM_GPU_MEM=0.70 KOT_VLLM_MAX_BATCHED_TOKENS=1024
+KOT_VLLM_GPU_MEM=0.70 KOT_VLLM_MAX_BATCHED_TOKENS=1024 \
+KOT_VLLM_MAX_MODEL_LEN=16384 \
+  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 Both directions fail. A higher memory setting exhausts the card during the
 full-vocabulary pass on long prompts. A lower setting fails the engine's KV
 floor, which wants one request at `max_seq_len` (163,840 tokens, 4.75 GB of
-MLA cache). Set `KOT_VLLM_MAX_MODEL_LEN=16384` when every workload stays
-under 16k tokens; that shrinks the floor and widens the working window.
+MLA cache); `KOT_VLLM_MAX_MODEL_LEN=16384` shrinks that floor, and every
+kot workload stays under 16k tokens. The smoke needs the same memory
+setting:
+
+```bash
+KOT_VLLM_GPU_MEM=0.70 \
+  ./smoke.sh /models/DeepSeek-V2-Lite cuda
+```
 
 ### state-spaces/mamba-2.8b-hf
 
@@ -141,10 +149,12 @@ measured limit is about 2046 tokens (prompt plus generated), whatever
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 8}' \
+  -d '{"model": "DeepSeek-V2-Lite",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 50, "temperature": 0.3, "top_p": 0.95}' \
   | python3 -m json.tool
 ```
 
-The `model` field must equal the identity the server prints in its log. The
-server derives that identity from the checkpoint. The contract checks are
+The `model` field must equal one of the aliases the server prints in its
+log (`/kot/info` names them: the checkpoint id and the weights path). The contract checks are
 `./smoke.sh /models/<model> cuda`: byte-identical double runs.
