@@ -103,7 +103,9 @@ def main() -> int:
         checkpoint, dtype="bfloat16", device_map="auto"
     )
     model.eval()
-    vocab_size = int(model.config.vocab_size)
+    # The native config keeps the language model's fields under text_config.
+    text_config = getattr(model.config, "text_config", None) or model.config
+    vocab_size = int(getattr(model.config, "vocab_size", 0) or text_config.vocab_size)
     devices = sorted({str(device) for device in model.hf_device_map.values()})
 
     info = {
@@ -209,8 +211,9 @@ def main() -> int:
         )
         expanded = video["input_ids"][0].tolist()
         media = {
-            "pixel_values_videos": video["pixel_values_videos"].to(model.device),
-            "video_grid_thw": video["video_grid_thw"].to(model.device),
+            key: value.to(model.device)
+            for key, value in video.items()
+            if key != "input_ids"
         }
         return raw, expanded, media
 
@@ -242,6 +245,10 @@ def main() -> int:
                 use_cache=True,
                 return_dict_in_generate=True,
                 output_logits=True,
+                # generate reads only each step's last-position logits; without
+                # this the first forward materialises the whole prompt's
+                # [seq, 248320] logits and OOMs card 0 beside the weights.
+                logits_to_keep=1,
                 **media,
             )
         generated = out.sequences[0][len(expanded):].tolist()
@@ -301,6 +308,7 @@ def main() -> int:
                 max_new_tokens=512,
                 pad_token_id=processor.tokenizer.eos_token_id,
                 use_cache=True,
+                logits_to_keep=1,
             )
         generated = out[0][len(expanded):].tolist()
         out_dir = Path(body["out_dir"])
