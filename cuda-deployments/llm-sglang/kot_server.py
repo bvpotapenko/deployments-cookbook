@@ -247,6 +247,14 @@ async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
     input_ids = [int(token) for token in body["input_ids"]]
     if not input_ids:
         raise ScoreFailure("empty input_ids")
+    # At TP>=2 the vocab-parallel embedding maps an out-of-range id to a
+    # silent zero row: a wrong golden that looks plausible. Refuse here,
+    # before any engine call, whatever the parallelism.
+    if min(input_ids) < 0 or max(input_ids) >= engine.vocab_size:
+        raise ScoreFailure(
+            f"input id outside [0, {engine.vocab_size}); the frozen "
+            "sequences and this model disagree on the vocabulary"
+        )
     out_dir = Path(body["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(body.get("seed", 42))
@@ -694,10 +702,14 @@ async def run_server(port: int, model: str, device: str) -> None:
     print(f"[kot_server] serving: {info}", flush=True)
 
     # One tiny generation so the first real request does not pay compile and
-    # graph costs; the stash it would write is cleaned on both sides.
+    # graph costs; the stash it would write is cleaned on both sides. The
+    # ids must come from the model's own tokenizer: a fixed list from
+    # another vocabulary embeds out-of-range rows on TP=1 (device assert)
+    # and silent zero rows on TP>=2, where the vocab-parallel embedding
+    # masks out-of-shard ids.
     _clean_stash()
     await engine.async_generate(
-        input_ids=[151644, 872, 198],
+        input_ids=engine.encode_prompt("ping"),
         sampling_params={"max_new_tokens": 1, "temperature": 1.0, "sampling_seed": 0},
     )
     _clean_stash()
