@@ -5,9 +5,10 @@ adapter and the spawned scheduler/detokenizer processes), through the
 PYTHONPATH entry ``kot_serve.sh`` sets. It imports nothing heavy at startup;
 the patches are applied when SGLang's own modules finish loading.
 
-Two monkeypatches, both additive: the original computation still runs and
-feeds SGLang's own logprob plumbing; the patch writes the full-vocabulary
-distribution of the scored positions where ``kot_server.py`` collects it.
+Two monkeypatches plus one launch shim, all additive: the original
+computation still runs and feeds SGLang's own logprob plumbing; the patch
+writes the full-vocabulary distribution of the scored positions where
+``kot_server.py`` collects it.
 
 * ``InputLogprobProcessor.forward`` computes the input rows through an
   injected ``get_logits_fn`` callable (the 0.5.21+ entry point; the
@@ -150,6 +151,7 @@ class _PatchOnLoadFinder:
     TARGETS = {
         "sglang.srt.layers.logprob_processor",
         "sglang.srt.sampling.penaltylib.min_new_tokens",
+        "sglang.srt.batch_invariant_ops.batch_invariant_ops",
     }
 
     def __init__(self) -> None:
@@ -217,6 +219,8 @@ def _apply_patch(fullname: str) -> None:
             _patch_input_logprob(torch, module)
         elif fullname == "sglang.srt.sampling.penaltylib.min_new_tokens":
             _patch_min_new_tokens(torch, module)
+        elif fullname == "sglang.srt.batch_invariant_ops.batch_invariant_ops":
+            _patch_batch_invariant_matmul(torch, module)
         _patch_log(f"applied: {fullname}")
     except Exception as failure:
         _patch_log(f"FAILED: {fullname}: {type(failure).__name__}: {failure}")
@@ -276,6 +280,42 @@ def _patch_input_logprob(torch, module) -> None:
 
     forward_with_stash._kot_patched = True
     module.InputLogprobProcessor.forward = forward_with_stash
+
+
+def _patch_batch_invariant_matmul(torch, module) -> None:
+    """Cap the batch-invariant persistent matmul's pipeline depth on sm_120.
+
+    The 5090 has 99 KB of shared memory per block, not Hopper's 227 KB. The
+    persistent triton matmul ships with num_stages=3, whose fp32 and bf16
+    tile configs both need 106,496 bytes and die with OutOfResources at
+    kernel launch (verified on mamba-2.8b-hf: the SSM's matmuls hit it
+    during CUDA-graph capture; sm_90-class cards never see it). Two
+    pipeline stages fit; the stage count is a scheduling knob and changes
+    no arithmetic.
+    """
+    if getattr(module.matmul_kernel_persistent, "_kot_stage_capped", False):
+        return
+    original_kernel = module.matmul_kernel_persistent
+
+    class _StageCappedKernel:
+        def __getitem__(self, grid):
+            inner = original_kernel[grid]
+
+            def launch(*args, **kwargs):
+                try:
+                    capability = torch.cuda.get_device_capability()
+                except Exception:
+                    capability = None
+                if capability is not None and capability[0] == 12:
+                    stages = int(kwargs.get("num_stages") or 0)
+                    if stages > 2:
+                        kwargs = {**kwargs, "num_stages": 2}
+                return inner(*args, **kwargs)
+
+            return launch
+
+    _StageCappedKernel._kot_stage_capped = True
+    module.matmul_kernel_persistent = _StageCappedKernel()
 
 
 def _patch_min_new_tokens(torch, module) -> None:
