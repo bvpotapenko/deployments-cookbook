@@ -462,7 +462,10 @@ class KotEngine:
         kwargs = {
             "model_path": model_dir,
             "device": "cuda" if is_cuda else "cpu",
-            "dtype": "auto" if is_cuda else "float32",
+            # "auto" maps a float32 checkpoint to float16, not bfloat16; a
+            # reference that ran bfloat16 then compares across a dtype the
+            # capture never chose. KOT_SGLANG_DTYPE pins it, per model row.
+            "dtype": os.environ.get("KOT_SGLANG_DTYPE") or ("auto" if is_cuda else "float32"),
             "random_seed": 42,
             # One extend per request, so a decode's stashed rows stay aligned:
             # a chunked extend samples a token per chunk and all but the last

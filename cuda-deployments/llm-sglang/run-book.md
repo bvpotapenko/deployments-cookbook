@@ -131,6 +131,7 @@ request pays no compile and graph costs.
 | variable | default | effect |
 |---|---|---|
 | `KOT_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang. The launcher tries it first, then a PATH python3. |
+| `KOT_SGLANG_DTYPE` | engine auto | compute dtype. `auto` maps a float32 checkpoint to float16; set `bfloat16` to match a bfloat16 reference. |
 | `KOT_SGLANG_MEM_FRACTION` | `0.45` | engine `mem_fraction_static`. Set it explicitly. The engine's own heuristic can go negative with chunked prefill off, and the fraction must cover the per-card weights. |
 | `KOT_SGLANG_MAX_PREFILL_TOKENS` | `8192` | engine `max_prefill_tokens`. The engine rejects a prompt longer than the window. |
 | `KOT_SGLANG_STASH_DIR` | `/scratch/kot-sglang-stash`, else `/tmp/kot-sglang-stash` | where the patch layer writes the full-vocabulary float32 rows. The server collects and deletes them per request. |
