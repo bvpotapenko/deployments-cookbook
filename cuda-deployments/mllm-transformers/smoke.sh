@@ -157,6 +157,8 @@ EOF
 import json, sys
 from pathlib import Path
 
+import numpy as np
+
 run = Path(sys.argv[1])
 ids = np.load(run / "v1" / "input_ids.npy").astype(int).tolist()
 n_rows = len(json.load(open(run / "v1.json"))["output_ids"])
@@ -176,7 +178,7 @@ curl -s --max-time 3600 -X POST "http://127.0.0.1:$PORT/kot/score" \
   -H 'Content-Type: application/json' -d @"$RUN/vr2.json" >"$RUN/vr2.reply"
 
 "$PY" - "$RUN" <<'EOF'
-import sys
+import json, sys
 from pathlib import Path
 
 import numpy as np
