@@ -1,6 +1,6 @@
 # Run Book: ocr-vllm
 
-This deployment serves DeepSeek-OCR-2 with vLLM 0.33. One process serves the
+This deployment serves DeepSeek-OCR-2 with vLLM 0.32.0. One process serves the
 OpenAI chat surface and the full-vocabulary log-probability surface on one
 port. The full-vocabulary tap is version-pinned, so the server refuses to
 start on any other vllm version. The engine applies the checkpoint's own
@@ -17,8 +17,8 @@ a comparison fails.
 |---|---|---|---|---|---|---|---|
 | deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.0001, top_p 1.0 |
 
-One stack serves every model: CPython 3.12, vLLM 0.33, the torch build that
-carries sm_120, and the transformers line the vLLM 0.33 resolver takes. The
+One stack serves every model: CPython 3.12, vLLM 0.32.0, the torch build that
+carries sm_120, and the transformers line the vLLM 0.32.0 resolver takes. The
 seed arrives with the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
@@ -30,20 +30,20 @@ The stack runs on CPython 3.12.
 ```bash
 # networked host
 uv venv /root/kotvenv-vllm-ocr --python 3.12
-uv pip install --python /root/kotvenv-vllm-ocr/bin/python "vllm==0.33"
+uv pip install --python /root/kotvenv-vllm-ocr/bin/python "vllm==0.32.0"
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-ocr-venv --python 3.12
 /scratch/kot-vllm-ocr-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.33"
+  --find-links ./wheels "vllm==0.32.0"
 ```
 
-The torch build must carry sm_120. The vLLM 0.33 resolver pairs one on its
+The torch build must carry sm_120. The vLLM 0.32.0 resolver pairs one on its
 own. A torch without Blackwell support dies at the first prefill on these
 cards.
 
-`make_wheels.sh` builds the vllm 0.33 closure into `wheels/` for linux
+`make_wheels.sh` builds the vllm 0.32.0 closure into `wheels/` for linux
 x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the pip
 freeze of a venv that passed `smoke.sh`. The script downloads one wheel per
 pin, eight in parallel, each with `--no-deps`. Files already present are
@@ -118,7 +118,7 @@ requested rows of the cached prefix never computed.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_PYTHON` | ambient `python3` | interpreter that carries vllm 0.33. The launcher's search never finds `/root/kotvenv-vllm-ocr`; set the variable. |
+| `KOT_PYTHON` | ambient `python3` | interpreter that carries vllm 0.32.0. The launcher's search never finds `/root/kotvenv-vllm-ocr`; set the variable. |
 | `KOT_VENV` | `/scratch/kot-vllm-ocr-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-ocr-venv`. |
 | `KOT_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom is needed for the log-probability pass. |
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | caps the per-step transient of that pass. |

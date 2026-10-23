@@ -18,6 +18,11 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# The allocator's own suggestion against fragmentation: the 52G of weights
+# over two 32G cards leaves little slack, and a fragmented pool OOMs a
+# request that would otherwise fit.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 # The interpreter: explicit override, then the provisioned venv, then PATH.
 if [ -n "${KOT_MLLM_PYTHON:-}" ]; then PY="$KOT_MLLM_PYTHON"
 elif [ -x /root/kotvenv-mllm/bin/python ]; then PY=/root/kotvenv-mllm/bin/python

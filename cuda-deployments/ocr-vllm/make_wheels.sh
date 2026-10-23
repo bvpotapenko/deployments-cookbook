@@ -3,7 +3,7 @@
 #
 #   ./make_wheels.sh
 #
-# The closure is vllm 0.30.0 plus its torch and CUDA libs (linux x86_64,
+# The closure is vllm 0.32.0 plus its torch and CUDA libs (linux x86_64,
 # python 3.12). The exact pins live in wheels-requirements.txt; regenerate
 # them from a verified provisioned venv with:
 #   /root/kotvenv-vllm-ocr/bin/pip freeze > wheels-requirements.txt

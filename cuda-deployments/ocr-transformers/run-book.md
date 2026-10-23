@@ -29,26 +29,41 @@ The stack runs on CPython 3.12.
 
 ```bash
 uv venv /root/kotvenv-ocr --python 3.12
+uv pip install --python /root/kotvenv-ocr/bin/python torch==2.14.1
 uv pip install --python /root/kotvenv-ocr/bin/python \
-  torch torchvision --index-url https://download.pytorch.org/whl/cu128
-uv pip install --python /root/kotvenv-ocr/bin/python \
-  transformers==5.20.2 numpy addict einops pillow accelerate huggingface_hub \
-  pydantic pyyaml
+  transformers==5.20.2 numpy safetensors pillow huggingface_hub pydantic pyyaml
 ```
 
 `provision.sh` groups these commands, installs uv when it is missing, and
 ends with an import self-check. Transformers 5.20.2 ships the configuration,
 the image processing, the processing and the modeling for this checkpoint.
-
-The torch build must carry sm_120. The cu128 index is where that build
-lives. A torch without Blackwell kernels does not run on these cards.
+The deployment's image processor is the PIL variant, so torchvision is not
+needed; the torch build must still carry sm_120 (PyPI's default for 2.14.x
+is a cu13x build that does).
 
 ### Layout
 
 ```text
-/opt/engines/ocr-transformers   this directory
-/models/DeepSeek-OCR-2          the weights directory; a hub snapshot plus two patched files
+/opt/engines/ocr-transformers   this directory: serve.py beside the three
+                                builder modules it imports, native_config
+                                (build_config), native_load (load_native),
+                                native_processor (build_processor)
+/models/deepseek-ai/DeepSeek-OCR-2
+                                the weights directory; a hub snapshot plus
+                                one patched file
 ```
+
+### Load
+
+The server loads through the native architecture and gates the load before
+any scoring: build_config reads the original config and asserts the lifted
+top-level copies agree with the nested originals; load_native calls
+from_pretrained with that config (transformers applies its registered
+deepseek_ocr2 conversion in memory, renames and stacks only) and checks
+0 missing / 0 unexpected keys plus a bitwise comparison of every checkpoint
+tensor against the loaded model; build_processor reproduces the reference
+image path (257 global tokens, 144 per 768x768 tile). The gates' report is
+stamped into /kot/info.
 
 ### Transfer
 
@@ -106,18 +121,22 @@ under sdpa. `cpu` runs float32 under eager.
 The model runs on one card.
 
 The weights directory is a hub snapshot of `deepseek-ai/DeepSeek-OCR-2` at
-revision `aaa02f3811945a91062062994c5c4a3f4c0af2b0`, plus two patched files
+revision `aaa02f3811945a91062062994c5c4a3f4c0af2b0`, plus one patched file
 over the snapshot. Take the whole directory. Never refresh single files
 from the hub.
 
 - `config.json`, sha256
-  `6e26957be7ef11041dce309baac46766e30f0fb45f4af6233307de2c0099de77`. The
-  patch lifts the language model's settings from the `language_config` block
-  to the top level. The vanilla file carries them only under
-  `language_config`.
+  `e2bb23b49b445f0bfd6eeb978bac9f19a2df82cb38472754e4ae83662d18f845`. This
+  is the PRISTINE hub file at the revision, verified byte-for-byte against
+  the hub on 2026-10-23. It carries the language model's settings BOTH
+  nested under `language_config` and as lifted top-level copies; the build
+  reads only the nested block and asserts the copies agree. An earlier
+  revision of this book recorded a patched config with sha
+  `6e26957b...`; that file added 23 default-valued fields and is gone.
 - `modeling_deepseekv2.py`, sha256
   `41ae3cf974208667f2e89a6392c7d65ffdd38d002a68fbf5063838cc9eb664a7`. The
-  native path loads no remote modeling file, so this file sits unused.
+  patched file of the remote-code era. The native path loads no remote
+  modeling file, so this file sits unused.
 
 The native loader reads `config.json`. Check the lifted top-level block
 against what the native DeepseekOCR2 configuration expects.

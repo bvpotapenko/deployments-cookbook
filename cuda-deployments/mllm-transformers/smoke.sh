@@ -111,4 +111,87 @@ n_rows = lp.shape[0]
 assert n_rows == ids.shape[0] - n_rows - 1 or n_rows < ids.shape[0], (n_rows, ids.shape)
 print("replay prefill: rows == the decode's n_rows:", "PASS" if 0 < n_rows < ids.shape[0] else "FAIL")
 EOF
+
+# ------------------------------------------------------------------ video leg
+# The video path: decode over a real video twice (byte-identity, the stored
+# ids carry exactly ONE video placeholder - the raw form), then the replay
+# round-trip: prefill over the stored ids twice, byte-identical.
+VIDEO="${VIDEO:-/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4}"
+video_score() { # tag mode max_new n_rows
+  curl -s --max-time 3600 -X POST "http://127.0.0.1:$PORT/kot/score" \
+    -H 'Content-Type: application/json' \
+    -d "{\"prompt_id\": \"$1\", \"input_ids\": [], \"mode\": \"$2\", \"max_new_tokens\": $3,
+         \"allow_eos\": true, \"n_rows\": $4, \"out_dir\": \"$RUN/$1\", \"seed\": 42,
+         \"attachments\": {\"video\": \"$VIDEO\"},
+         \"sampling\": {\"temperature\": 0.7, \"top_p\": 0.8, \"top_k\": 20, \"min_p\": 0.0}}" \
+    >"$RUN/$1.json"
+}
+video_score v1 decode 64 0
+video_score v2 decode 64 0
+
+"$PY" - "$RUN" "$MODEL" <<'EOF'
+import json, sys
+from pathlib import Path
+
+import numpy as np
+
+run, model = Path(sys.argv[1]), sys.argv[2]
+video_token = json.load(open(f"{model}/config.json"))["video_token_id"]
+blobs = []
+for tag in ("v1", "v2"):
+    reply = json.load(open(run / f"{tag}.json"))
+    ids = np.load(run / tag / "input_ids.npy")
+    lp = np.load(run / tag / "log_probs.npy")
+    out = reply["output_ids"]
+    assert lp.shape[0] == len(out) == reply["n_positions"], (tag, lp.shape, len(out))
+    assert lp.dtype == np.float32 and np.isfinite(lp).all(), tag
+    assert int((ids == video_token).sum()) == 1, \
+        (tag, "the stored ids must carry exactly one video placeholder (the raw form)")
+    assert ids[:6].tolist() != [] and lp.shape[1] == reply["vocab_size"], tag
+    blobs.append(lp.tobytes())
+print("video decode: rows == generated, one raw placeholder, finite, byte-identical:",
+      "PASS" if blobs[0] == blobs[1] else "FAIL")
+EOF
+
+"$PY" - "$RUN" <<'EOF'
+import json, sys
+from pathlib import Path
+
+run = Path(sys.argv[1])
+ids = np.load(run / "v1" / "input_ids.npy").astype(int).tolist()
+n_rows = len(json.load(open(run / "v1.json"))["output_ids"])
+for tag in ("vr1", "vr2"):
+    (run / f"{tag}.json").write_text(json.dumps({
+        "prompt_id": tag, "input_ids": ids, "mode": "prefill",
+        "max_new_tokens": 4, "allow_eos": False, "n_rows": n_rows,
+        "out_dir": str(run / tag), "seed": 42,
+        "attachments": {"video": "/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4"},
+        "sampling": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "min_p": 0.0},
+    }))
+print(f"video replay bodies: stored ids {len(ids)}, n_rows {n_rows}")
+EOF
+curl -s --max-time 3600 -X POST "http://127.0.0.1:$PORT/kot/score" \
+  -H 'Content-Type: application/json' -d @"$RUN/vr1.json" >"$RUN/vr1.reply"
+curl -s --max-time 3600 -X POST "http://127.0.0.1:$PORT/kot/score" \
+  -H 'Content-Type: application/json' -d @"$RUN/vr2.json" >"$RUN/vr2.reply"
+
+"$PY" - "$RUN" <<'EOF'
+import sys
+from pathlib import Path
+
+import numpy as np
+
+run = Path(sys.argv[1])
+blobs = []
+for tag in ("vr1", "vr2"):
+    reply = json.load(open(run / f"{tag}.reply"))
+    lp = np.load(run / tag / "log_probs.npy")
+    ids = np.load(run / tag / "input_ids.npy")
+    assert np.isfinite(lp).all(), tag
+    assert lp.shape[0] == reply["n_positions"] > 0, (tag, lp.shape, reply["n_positions"])
+    assert lp.shape[0] < len(ids), (tag, "the replay stores the tail's rows, not the full length")
+    blobs.append(lp.tobytes())
+print("video replay: rows == the tail's n_rows, finite, byte-identical:",
+      "PASS" if blobs[0] == blobs[1] else "FAIL")
+EOF
 echo "SMOKE DONE"
