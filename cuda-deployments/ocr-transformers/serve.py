@@ -172,14 +172,30 @@ def main():
 
     if not (Path(args.model) / "config.json").is_file():
         fail(f"{args.model} holds no config.json; this deployment loads a checkpoint directory")
-    model = AutoModel.from_pretrained(
-        args.model,
-        torch_dtype=dtype,
-        _attn_implementation=attention,
-        trust_remote_code=True,
-        use_safetensors=True,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    try:
+        model = AutoModel.from_pretrained(
+            args.model,
+            dtype=dtype,
+            attn_implementation=attention,
+            use_safetensors=True,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+    except ValueError as error:
+        if "trust_remote_code" not in str(error):
+            raise
+        print(
+            "[ocr-transformers] no native architecture for this checkpoint; "
+            "loading the checkpoint's own code",
+            flush=True,
+        )
+        model = AutoModel.from_pretrained(
+            args.model,
+            dtype=dtype,
+            attn_implementation=attention,
+            trust_remote_code=True,
+            use_safetensors=True,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     model = model.eval().to(device)
 
     # The checkpoint's remote code calls Tensor.cuda(); on any other device,
