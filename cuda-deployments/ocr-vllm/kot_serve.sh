@@ -12,7 +12,7 @@
 # pre-provision a venv and point KOT_PYTHON at it instead.
 set -euo pipefail
 
-VLLM_PIN="0.30.0"
+VLLM_PIN="0.32.0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT="" MODEL="" DEVICE=""

@@ -65,10 +65,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-os.environ.setdefault("VLLM_USE_V1", "1")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-# torch 2.13's triton refuses the non-constexpr globals vLLM 0.30's kernels
-# read (LOG2E et al.); triton's own documented escape hatch for exactly this.
+# The V2 model runner's prompt-logprob path accumulates the whole prompt's
+# full-vocabulary top-k on the GPU - over 10 GB for a long prompt, which
+# dies out of memory beside the KV cache whatever the utilization. The V1
+# runner streams the per-step tensors the tap consumes. Pin the runner the
+# tap is written against; the n-gram processor is a V1-interface plugin too.
+os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+# torch 2.13's triton refuses the non-constexpr globals vLLM's kernels read
+# (LOG2E et al.); triton's own documented escape hatch for exactly this.
 os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
 # FlashInfer's backend table claims sm_120 support but its JIT's own arch
 # check rejects Blackwell ("requires sm75 or higher"), so the V1 sampler's
@@ -78,7 +83,7 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 import numpy as np  # noqa: E402
 import vllm  # noqa: E402
 
-VLLM_PIN = "0.30.0"
+VLLM_PIN = "0.32.0"
 if not vllm.__version__.startswith(VLLM_PIN):
     sys.exit(
         f"this deployment is written against vllm {VLLM_PIN} (its logprobs tap "
@@ -90,11 +95,9 @@ from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from PIL import Image  # noqa: E402
 from vllm import SamplingParams  # noqa: E402
 from vllm.entrypoints.launchers.launcher import serve_http  # noqa: E402
-from vllm.entrypoints.openai.api_server import (  # noqa: E402
-    build_async_engine_client,
-    build_app,
-    init_app_state,
-)
+from vllm.entrypoints.launchers.api_server.app_state import init_app_state  # noqa: E402
+from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client  # noqa: E402
+from vllm.entrypoints.launchers.app import build_app  # noqa: E402
 from vllm.entrypoints.launchers.cli_args import make_arg_parser  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
@@ -104,6 +107,7 @@ SCORE = "/kot/score"
 CONTRACT_VERSION = 1
 SCORE_PREFIX = "kot-score-"
 UTF8 = "utf-8"
+SUPPORTED_TASKS = ("generate",)
 BLOCK_ROWS = 256  # one streamed line per block of decode rows: bounded memory, visible progress
 
 IMAGE = "image"
@@ -657,7 +661,7 @@ def main() -> int:
     model_id, model_revision = _resolve_identity(cli.model)
     here = str(Path(__file__).resolve().parent)
     args = _openai_args(cli.model, cli.device, cli.port, model_id, here)
-    app = build_app(args)
+    app = build_app(args, supported_tasks=SUPPORTED_TASKS)
 
     async def run() -> None:
         async with build_async_engine_client(args) as engine:
@@ -681,7 +685,7 @@ def main() -> int:
             _register_kot_routes(
                 app, engine, int(model_config.hf_config.vocab_size), info, image_token_id
             )
-            await init_app_state(engine, app.state, args)  # 0.30: no vllm_config arg
+            await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
             print(f"[kot-vllm-ocr] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(
                 app, sock=None, host=args.host, port=args.port, log_level="warning",
