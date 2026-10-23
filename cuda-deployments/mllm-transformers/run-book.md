@@ -4,20 +4,21 @@ This deployment serves Qwen/Qwen3.8-27B with transformers 5.20.2. The model
 runs the `qwen3_5` architecture and takes text, image and video input. One
 process holds the model in bfloat16 over both cards. The server pins every
 media-processing parameter and reports the full set in one line at startup.
-It serves text; the image and video paths land with the mllm porting work.
+It serves text and video; the image path lands with later porting work.
 
 ## Model parameters
 
 The request body carries the sampling parameters. The table holds the card
-count, the compute dtype and the recommended instruct-mode sampling.
+count, the compute dtype and the sampling values, which come from the
+checkpoint's own `generation_config.json`.
 
-| model | cards | dtype | sampling (recommended) |
+| model | cards | dtype | sampling |
 |---|---|---|---|
-| Qwen/Qwen3.8-27B | 2 | bfloat16 | temperature 0.7, top_p 0.80, top_k 20, presence_penalty 1.5, repetition_penalty 1.0 |
+| Qwen/Qwen3.8-27B | 2 | bfloat16 | temperature 1.0, top_p 0.95, top_k 20 |
 
-One stack serves the model: CPython 3.12, transformers 5.20.2, and the torch
-and torchvision builds from the cu128 index. The seed arrives with the
-request; 42 is the convention.
+One stack serves the model: CPython 3.12, transformers 5.20.2, torch
+2.14.1+cu130, torchvision 0.29.1+cu130, torchcodec 0.17. The seed arrives
+with the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
@@ -29,15 +30,21 @@ checks that path.
 ```bash
 uv venv /root/kotvenv-mllm --python 3.12
 uv pip install --python /root/kotvenv-mllm/bin/python \
-  torch torchvision --index-url https://download.pytorch.org/whl/cu128
+  torch==2.14.1 --index-url https://download.pytorch.org/whl/cu130
+uv pip install --python /root/kotvenv-mllm/bin/python --no-deps \
+  torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu130
+uv pip install --python /root/kotvenv-mllm/bin/python --no-deps torchcodec
 uv pip install --python /root/kotvenv-mllm/bin/python \
-  transformers==5.20.2 numpy accelerate pydantic pyyaml
+  transformers==5.20.2 numpy pydantic pyyaml
 ```
 
-torch and torchvision come from the cu128 index. That build carries the
-sm_120 kernels; a torch without them stalls silently on these cards.
-torchvision pairs with the torch build from the same index. transformers
-5.20.2 ships the `qwen3_5` architecture.
+The torch build must carry sm_120; cu130 does. torchvision 0.29.x pairs
+with torch 2.14.x (0.28.x requires torch 2.13 and dies at import:
+`operator torchvision::nms does not exist`); `--no-deps` keeps the torch
+build untouched. torchcodec decodes the videos (torchvision's reader was
+removed in torchvision 0.26) and needs the host's FFmpeg 6 libraries. An
+existing venv with the same pins works: the launcher falls through to
+`/root/kotvenv/bin/python`.
 
 ### Layout
 
@@ -123,36 +130,54 @@ changes the pixels the model sees.
 | parameter | value | source |
 |---|---|---|
 | video frame sampling | fps 2.0, `do_sample_frames` true | the model's cookbook default |
+| video per-frame pixel cap | `cap_pixels_per_frame` true | the reference implementation's (qwen-vl-utils) behavior; transformers does not default to it, and warns when the flag is absent |
 | video pixel budget | longest_edge 25165824, shortest_edge 4096 | the checkpoint's `video_preprocessor_config.json` |
 | image pixel budget | longest_edge 16777216, shortest_edge 65536 | the checkpoint's `preprocessor_config.json` |
 | patch geometry | patch 16, temporal patch 2, merge size 2 | the checkpoint's configs |
 | instruct mode | `enable_thinking` false in the chat-template rendering | the model's non-thinking mode |
 
-The server reads the pixel budgets and the patch geometry from the checkpoint
-at startup. The frame sampling is pinned in serve.py.
+Without the per-frame cap a 30-second clip costs about 12,000 video tokens;
+with it the worst clip so far costs 7,920. The count drives the KV cache and
+the prompt length of every request.
 
-Instruct mode samples at temperature 0.7, top_p 0.80, top_k 20,
-presence_penalty 1.5, repetition_penalty 1.0. The engine applies temperature,
+The server reads the pixel budgets and the patch geometry from the checkpoint
+at startup. The frame sampling and the cap are pinned in serve.py.
+
+Instruct mode samples at temperature 1.0, top_p 0.95, top_k 20 - the
+checkpoint's own `generation_config.json`. The engine applies temperature,
 top_p and top_k. It has no presence_penalty parameter; the server refuses a
 request that sets it above zero, with an error that names the field. A
 repetition_penalty field is not read; generation runs at the neutral 1.0. A
 value of 0.0 for temperature, top_p or top_k reads as unset; the server then
-generates with the instruct-mode value.
+generates with the values above.
+
+The video prompt is pinned in serve.py: "Describe what you see in the
+video." A video decode renders it with the checkpoint's chat template
+(`enable_thinking` false), expands the placeholder with the processor, and
+generates. The stored ids are the raw form (one video placeholder) plus the
+generated ids; the stored rows are generate's own per-step logits, passed
+through a float32 log-softmax. A replay prefill re-renders the same prompt
+from the attachment, asserts the stored ids' head matches, and scores the
+stored tail (`n_rows` rows) with `logits_to_keep`.
+
+`POST /kot/infer` is the speed surface: one video decode, the description
+written as `text.txt` into the request's `out_dir`, the file names returned.
 
 The server plants the request's seed before each decode. The same seed gives
 the same output.
 
 ## Check
 
-This server has no OpenAI chat surface. Its only request path takes token
-ids.
+The smoke boots the deployment and drives both surfaces: a text decode and
+its replay prefill, then a video decode twice (byte-identity; the stored ids
+carry exactly one video placeholder), then the video replay twice
+(byte-identity).
+
+```bash
+VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
+  KOT_MLLM_PYTHON=/root/kotvenv/bin/python \
+  ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
+```
 
 The startup line is the first check. It proves the model loaded, and it
 records every pinned parameter.
-
-```bash
-curl -s http://127.0.0.1:8090/
-```
-
-A live server answers an unknown path with its JSON error body
-(`{"error": "not_found", "detail": "/"}`). A dead port answers nothing.

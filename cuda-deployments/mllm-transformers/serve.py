@@ -17,10 +17,13 @@ cookbooks and the checkpoint's processor configs):
     (the non-thinking mode; its recommended sampling lives in the store's
     sampling yaml and arrives per request)
 
-The scoring contract follows the OCR family's frozen-inputs pattern: the
-input version's freeze renders the chat template to ids once (instruct
-rendering), the request carries those ids plus the media attachment, and a
-replay prefill stores only the rows over the generated ids (n_rows).
+The scoring contract follows the OCR family's frozen-inputs pattern, adapted
+to videos: the frozen inputs carry no ids (the prompt is built around the
+frames), so the deployment renders the pinned chat prompt itself - the raw
+form (one video placeholder) is what a capture stores, and a replay prefill
+re-renders it, asserts the stored head matches, and scores the stored tail
+(n_rows). The decode's rows come from generate's own per-step logits
+(output_logits), the raw pre-warper distribution.
 """
 
 from __future__ import annotations
@@ -38,19 +41,30 @@ from transformers import AutoModelForMultimodalLM, AutoProcessor
 UTF8 = "utf-8"
 INFO = "/kot/info"
 SCORE = "/kot/score"
+INFER = "/kot/infer"  # the speed surface: decode over the attachment, files named back
 HOST = "0.0.0.0"
 BACKLOG = 64
 CONTRACT_VERSION = 1
 
 IMAGE = "image"
 VIDEO = "video"
+PREFILL = "prefill"
+DECODE = "decode"
+
+# The pinned video prompt: what every video unit asks, in the checkpoint's
+# chat format. The deployment renders it; the frozen inputs carry no ids.
+VIDEO_PROMPT = "Describe what you see in the video."
 
 # The runtime media knobs this deployment pins. The pixel budgets and the
 # patch geometry come from the checkpoint's own configs; fps and frame
-# sampling are the cookbook defaults. A candidate deployment must report the
+# sampling are the cookbook defaults. cap_pixels_per_frame adopts the
+# reference implementation's (qwen-vl-utils) per-frame cap: without it the
+# transformers video path costs ~12000 tokens per 30 s clip, with it the
+# worst clip so far cost 7920. A candidate deployment must report the
 # same values or its capture compares nothing.
 VIDEO_FPS = 2.0
 VIDEO_DO_SAMPLE_FRAMES = True
+CAP_PIXELS_PER_FRAME = True
 
 
 def pinned_media_params(checkpoint: Path, processor) -> dict:
@@ -65,6 +79,8 @@ def pinned_media_params(checkpoint: Path, processor) -> dict:
     return {
         "video_fps": VIDEO_FPS,
         "video_do_sample_frames": VIDEO_DO_SAMPLE_FRAMES,
+        "video_cap_pixels_per_frame": CAP_PIXELS_PER_FRAME,
+        "video_prompt": VIDEO_PROMPT,
         "video_size_limits": video_cfg["size"],
         "image_size_limits": image_cfg["size"],
         "patch_size": video_cfg["patch_size"],
@@ -114,14 +130,14 @@ def main() -> int:
             self._json(HTTPStatus.OK, info)
 
         def do_POST(self):
-            if self.path != SCORE:
+            if self.path not in (SCORE, INFER):
                 self._error(HTTPStatus.NOT_FOUND, "not_found", self.path)
                 return
             body = json.loads(
                 self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
             )
             try:
-                self._json(HTTPStatus.OK, score(body))
+                self._json(HTTPStatus.OK, kot_infer(body) if self.path == INFER else score(body))
             except Exception as failure:
                 self._error(
                     HTTPStatus.INTERNAL_SERVER_ERROR, type(failure).__name__, str(failure)
@@ -144,17 +160,154 @@ def main() -> int:
 
     def score(body: dict) -> dict:
         attachments = body.get("attachments") or {}
+        path = attachments.get(VIDEO)
+        if path:
+            if body["mode"] == DECODE:
+                return _video_decode(body, path)
+            return _video_prefill(body, path, [int(t) for t in body["input_ids"]])
         if attachments:
             raise RuntimeError(
-                "media scoring lands with the mllm family contract; this boot "
-                "pins and reports the media parameters the contract will use"
+                "unsupported attachment kind(s): " + ", ".join(sorted(set(attachments) - {VIDEO}))
             )
         ids = [int(token) for token in body["input_ids"]]
         if not ids:
             raise RuntimeError("empty input_ids: the version's frozen ids are missing")
-        if body["mode"] == "decode":
+        if body["mode"] == DECODE:
             return _decode(body, ids)
         return _prefill(body, ids)
+
+    def render_video(path: str):
+        """The pinned prompt rendered two ways: the raw ids (one video
+        placeholder, what the capture stores) and the expanded forward inputs
+        (the processor's per-frame segments, deterministic in the video and
+        the pinned fps)."""
+        text = processor.apply_chat_template(
+            [{"role": "user", "content": [
+                {"type": "video", "video": path},
+                {"type": "text", "text": VIDEO_PROMPT},
+            ]}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        raw = processor.apply_chat_template(
+            [{"role": "user", "content": [
+                {"type": "video", "video": path},
+                {"type": "text", "text": VIDEO_PROMPT},
+            ]}],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )[0]
+        video = processor(
+            text=[text],
+            videos=[[path]],
+            fps=VIDEO_FPS,
+            do_sample_frames=VIDEO_DO_SAMPLE_FRAMES,
+            cap_pixels_per_frame=CAP_PIXELS_PER_FRAME,
+            return_tensors="pt",
+        )
+        expanded = video["input_ids"][0].tolist()
+        media = {
+            "pixel_values_videos": video["pixel_values_videos"].to(model.device),
+            "video_grid_thw": video["video_grid_thw"].to(model.device),
+        }
+        return raw, expanded, media
+
+    def _store_rows(out_dir: Path, rows: torch.Tensor, ids: list[int]) -> None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        np.save(out_dir / "log_probs.npy", rows.cpu().numpy(), allow_pickle=False)
+        np.save(out_dir / "input_ids.npy", np.asarray(ids, dtype=np.int32), allow_pickle=False)
+
+    def _video_decode(body: dict, path: str) -> dict:
+        raw, expanded, media = render_video(path)
+        seed = int(body.get("seed", 42))
+        torch.manual_seed(seed)
+        sampling = body.get("sampling") or {}
+        if float(sampling.get("presence_penalty", 0.0)):
+            raise RuntimeError(
+                "presence_penalty is unsupported on the transformers engine: "
+                "it is an OpenAI-surface knob (vllm and sglang apply it)"
+            )
+        with torch.no_grad():
+            out = model.generate(
+                input_ids=torch.tensor([expanded], device=model.device),
+                attention_mask=torch.ones(len(expanded), dtype=torch.long, device=model.device).unsqueeze(0),
+                do_sample=True,
+                temperature=float(sampling.get("temperature", 1.0) or 1.0),
+                top_p=float(sampling.get("top_p", 0.95) or 0.95),
+                top_k=int(sampling.get("top_k", 20) or 20),
+                max_new_tokens=int(body["max_new_tokens"]),
+                pad_token_id=processor.tokenizer.eos_token_id,
+                use_cache=True,
+                return_dict_in_generate=True,
+                output_logits=True,
+                **media,
+            )
+        generated = out.sequences[0][len(expanded):].tolist()
+        rows = torch.log_softmax(torch.cat(list(out.logits)).float(), dim=-1)[:, :vocab_size]
+        out_dir = Path(body["out_dir"])
+        _store_rows(out_dir, rows, [*raw, *generated])
+        return {
+            "prompt_id": body["prompt_id"],
+            "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
+            "n_positions": len(generated),
+            "vocab_size": vocab_size,
+            "output_ids": generated,
+        }
+
+    def _video_prefill(body: dict, path: str, ids: list[int]) -> dict:
+        raw, expanded, media = render_video(path)
+        if ids[: len(raw)] != raw:
+            fail = ids[:8]
+            raise RuntimeError(
+                f"the stored ids' head is not this deployment's raw video template: {fail}"
+            )
+        tail = ids[len(raw):]
+        n_rows = int(body.get("n_rows", 0))
+        if n_rows != len(tail):
+            raise RuntimeError(f"n_rows {n_rows} != the stored tail's length {len(tail)}")
+        full = torch.tensor([expanded + tail], dtype=torch.long, device=model.device)
+        with torch.no_grad():
+            # logits_to_keep pins the lm_head to the last n_rows+1 positions:
+            # at vocab 248320 the full-sequence logits would not fit beside
+            # the weights and the KV cache. The first n_rows of the block are
+            # the tail's predictors (row t predicts position t+1).
+            block = model(**media, input_ids=full, logits_to_keep=n_rows + 1).logits[0]
+        rows = torch.log_softmax(block[:n_rows].float(), dim=-1)[:, :vocab_size]
+        out_dir = Path(body["out_dir"])
+        _store_rows(out_dir, rows, ids)
+        return {
+            "prompt_id": body["prompt_id"],
+            "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
+            "n_positions": n_rows,
+            "vocab_size": vocab_size,
+            "output_ids": [],
+        }
+
+    def kot_infer(body: dict) -> dict:
+        """The speed surface: one video decode, the description written into
+        out_dir, the files named back. Only the clock reads what lands here."""
+        path = (body.get("attachments") or {}).get(VIDEO)
+        if not path:
+            raise RuntimeError("the speed request carries no video attachment")
+        raw, expanded, media = render_video(path)
+        torch.manual_seed(int(body.get("seed", 42)))
+        with torch.no_grad():
+            out = model.generate(
+                input_ids=torch.tensor([expanded], device=model.device),
+                attention_mask=torch.ones(1, len(expanded), dtype=torch.long, device=model.device),
+                do_sample=True, temperature=1.0, top_p=0.95, top_k=20,
+                max_new_tokens=512,
+                pad_token_id=processor.tokenizer.eos_token_id,
+                use_cache=True,
+            )
+        generated = out[0][len(expanded):].tolist()
+        out_dir = Path(body["out_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        text = processor.tokenizer.decode(generated, skip_special_tokens=True)
+        (out_dir / "text.txt").write_text(text, encoding=UTF8)
+        return {"prompt_id": body["prompt_id"], "files": ["text.txt"]}
 
     def _forward(ids: list[int]) -> torch.Tensor:
         tokens = torch.tensor([ids], dtype=torch.long, device=model.device)
