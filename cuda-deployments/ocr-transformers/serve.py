@@ -204,7 +204,10 @@ def main():
         torch.Tensor.cuda = lambda tensor, *_args, **_kwargs: tensor.to(device)
 
     remote = sys.modules[type(model).__module__]
-    vocab_size = int(model.config.vocab_size)
+    # The native config keeps the language model's fields under
+    # text_config; the checkpoint's remote code carried them at the top.
+    text_config = getattr(model.config, "text_config", None) or model.config
+    vocab_size = int(getattr(model.config, "vocab_size", 0) or text_config.vocab_size)
 
     parameter = next(model.parameters())
     info = {
