@@ -149,7 +149,9 @@ error that names the field. The OpenAI routes do not read the field.
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 8}' \
+  -d '{"model": "Qwen/Qwen3-0.6B",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 50, "temperature": 0.6, "top_p": 0.95}' \
   | python3 -m json.tool
 ```
 

@@ -43,7 +43,8 @@ echo "== /kot/info"; cat "$RUN/info.json"; echo
 score() { # tag mode
   curl -sf -X POST "http://127.0.0.1:$PORT/kot/score" -H 'Content-Type: application/json' \
     -d "{\"prompt_id\": \"$1\", \"input_ids\": $IDS, \"mode\": \"$2\", \"max_new_tokens\": 5,
-         \"out_dir\": \"$RUN/$1\", \"seed\": 42, \"sampling\": {\"temperature\": 0.6, \"top_p\": 0.95, \"top_k\": 20, \"min_p\": 0.0}}" >"$RUN/$1.json"
+         \"out_dir\": \"$RUN/$1\", \"seed\": 42, \"sampling\": {\"temperature\": 0.6, \"top_p\": 0.95, \"top_k\": 20, \"min_p\": 0.0}}" >"$RUN/$1.json" \
+    || { echo "score $1 FAILED"; tail -30 "$RUN/serve.log"; exit 1; }
 }
 
 score p1 prefill
@@ -59,7 +60,10 @@ import numpy as np
 run, sent_ids, n_ids = sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3])
 
 def check(tag, expect_rows, mode):
-    body = json.load(open(f"{run}/{tag}.json"))
+    # a decode answer streams as JSON lines: the last line is the result;
+    # a prefill answer is one JSON object, so the last line is the reply
+    lines = open(f"{run}/{tag}.json").read().strip().splitlines()
+    body = json.loads(lines[-1])
     lp = np.load(f"{run}/{tag}/log_probs.npy")
     ids = np.load(f"{run}/{tag}/input_ids.npy")
     dev = float(np.abs(np.logaddexp.reduce(lp, axis=-1)).max())

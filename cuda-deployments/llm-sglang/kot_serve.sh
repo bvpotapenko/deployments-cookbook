@@ -89,10 +89,16 @@ echo "[kot_serve] patch layer installed into $SITE_PACKAGES (module + .pth)"
 # process spawns.
 export SGLANG_ENABLE_JIT_DEEPGEMM=false
 
-# The deterministic matmul defaults to DeepGEMM, whose kernels do not cover
-# sm_120 (RTX 5090); the batch-invariant triton matmul is the fallback and
-# keeps determinism without DeepGEMM. Set before any sglang process spawns.
+# The batch-invariant TRITON persistent matmul is the fallback and
+# keeps determinism without DeepGEMM. Set before any sglang
+# process spawns.
 export SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_DEEPGEMM=0
+
+# sglang's async asserts make the embedding (and other layers) check their
+# inputs against real bounds and name the layer when one fails, at no cost
+# when nothing trips. The diagnosis path for unknown walls: the default
+# device-side assert names neither the input nor the layer.
+export SGLANG_ENABLE_ASYNC_ASSERT=1
 
 # The weights are local and the graded container has no network; the engine
 # must never reach for the hub either.

@@ -131,6 +131,7 @@ request pays no compile and graph costs.
 | variable | default | effect |
 |---|---|---|
 | `KOT_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang. The launcher tries it first, then a PATH python3. |
+| `KOT_SGLANG_DTYPE` | engine auto | compute dtype. `auto` maps a float32 checkpoint to float16; set `bfloat16` to match a bfloat16 reference. |
 | `KOT_SGLANG_MEM_FRACTION` | `0.45` | engine `mem_fraction_static`. Set it explicitly. The engine's own heuristic can go negative with chunked prefill off, and the fraction must cover the per-card weights. |
 | `KOT_SGLANG_MAX_PREFILL_TOKENS` | `8192` | engine `max_prefill_tokens`. The engine rejects a prompt longer than the window. |
 | `KOT_SGLANG_STASH_DIR` | `/scratch/kot-sglang-stash`, else `/tmp/kot-sglang-stash` | where the patch layer writes the full-vocabulary float32 rows. The server collects and deletes them per request. |
@@ -156,6 +157,14 @@ KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
 Both variables are required. A lower memory fraction leaves the KV pool below
 the per-card weight size, 14.65 GB, and the engine refuses to start. A
 smaller prefill window rejects the longest workload prompt, about 8.5k ids.
+The smoke needs the same variables plus the two interpreters:
+
+```bash
+KOT_PYTHON=/root/kotvenv/bin/python \
+KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
+KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
+  ./smoke.sh /models/DeepSeek-V2-Lite cuda
+```
 
 ### state-spaces/mamba-2.8b-hf
 
@@ -169,7 +178,9 @@ versions. All nvcc components must come from one CUDA version.
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "Qwen3-0.6B", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 8}' \
+  -d '{"model": "Qwen3-0.6B",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 50, "temperature": 0.6, "top_p": 0.95}' \
   | python3 -m json.tool
 ```
 
