@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
-"""DeepSeek-OCR-2 serving of DEPLOYMENT_CONTRACT.md, one flat file, no kot imports.
+"""DeepSeek-OCR-2 serving of DEPLOYMENT_CONTRACT.md, no kot imports.
 
     ./kot_serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
+
+Layout: this file beside the three builder modules it imports and never
+implements - native_config (build_config), native_load (load_native),
+native_processor (build_processor) - serving a weights directory that is a
+hub snapshot plus two patched files (run-book.md holds the list and the
+hashes). The checkpoint loads through transformers 5.20.2's built-in
+deepseek_ocr2 architecture; the checkpoint's own remote code is not used.
 
 Numerics contract, implemented exactly as our reference server's deepseek
 adapter does it:
@@ -15,9 +22,9 @@ adapter does it:
 * the ids sent are consumed verbatim: no BOS on the transcript, no chat
   template of ours, no truncation;
 * the log-softmax is computed in float32 over the model's configured
-  vocabulary (129280), whatever dtype the weights run in, so every row's
-  logsumexp is 0 and arrays align by token id. The checkpoint's own forward
-  also casts its logits to float, and we do not rely on that alone;
+  vocabulary (129280, the native config's text_config.vocab_size), whatever
+  dtype the weights run in, so every row's logsumexp is 0 and arrays align
+  by token id;
 * decode generates from the image template only (the sent ids are the frozen
   transcript, which decode does not use), applying the request's sampling
   object exactly as given (temperature, top_p, top_k, min_p; generate() takes
@@ -29,14 +36,18 @@ adapter does it:
   the log-probs were produced in is reported in /kot/info and kot casts to
   float32 on its side.
 
-The image path mirrors the checkpoint's own infer() exactly, both branches:
-
-* single view (both sides <= 768 px): the image is padded to 1024x1024 and
-  encoded as one 16*16+1 = 257-token block, with a zero crop tensor;
-* crop view (either side > 768 px): the checkpoint's own dynamic_preprocess
-  picks a 2..6-crop grid of 768x768 tiles, the token block grows by
-  144 * width_crops * height_crops tokens, and the forward receives the crop
-  stack beside the padded global view, with images_spatial_crop = [w, h].
+The image path is the native model's own contract, not the remote code's.
+The processor (build_processor's output) turns one image into the padded
+1024x1024 global view, a 2..6-tile grid of 768x768 crops when a side exceeds
+768 px (no local tensor otherwise), and the per-image tile count. The forward
+takes input_ids, pixel_values [1,3,1024,1024], pixel_values_local
+[tiles,3,768,768] or None, num_local_patches and attention_mask - no images
+list, no spatial crop, no position mask: the model finds the image positions
+itself (input_ids == 128815) and scatters the features in its own order,
+local tiles first, then the 256 global features, then the view separator.
+So the block a request's single image placeholder expands to is
+257 + 144 * tiles copies of 128815: every position holds the same id, the
+order inside the block is irrelevant, and the count is the reference's.
 
 log_probs are written row-streamed through numpy.lib.format.open_memmap: the
 file opens at its final shape and fills chunk by chunk, so a long unit never
@@ -48,18 +59,20 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib import metadata
-from itertools import repeat
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-from transformers import AutoModel, AutoTokenizer, set_seed
+from transformers import set_seed
+
+from native_config import build_config
+from native_load import load_native
+from native_processor import build_processor
 
 HOST = "127.0.0.1"
 INFO = "/kot/info"
@@ -77,11 +90,9 @@ IMAGE_TOKEN_ID = 128815
 BOS_ID = 0
 PATCH_SIZE = 16
 DOWNSAMPLE = 4
-BASE_SIZE = 1024
-MAX_SINGLE_VIEW = 768
-CROP_QUERIES = math.ceil((MAX_SINGLE_VIEW // PATCH_SIZE) / DOWNSAMPLE)
-NORM = (0.5, 0.5, 0.5)
-RGB_MAX = 255
+BASE_SIZE = 1024  # the global view: every image padded to 1024x1024
+TILE_SIZE = 768  # the local tiles: 768x768, and the single-view limit
+CROP_QUERIES = math.ceil((TILE_SIZE // PATCH_SIZE) / DOWNSAMPLE)
 IMAGE_IDS = [IMAGE_TOKEN_ID] * (
     math.ceil((BASE_SIZE // PATCH_SIZE) / DOWNSAMPLE) ** 2 + 1
 )
@@ -172,106 +183,70 @@ def main():
 
     if not (Path(args.model) / "config.json").is_file():
         fail(f"{args.model} holds no config.json; this deployment loads a checkpoint directory")
-    try:
-        model = AutoModel.from_pretrained(
-            args.model,
-            dtype=dtype,
-            attn_implementation=attention,
-            use_safetensors=True,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(args.model)
-    except ValueError as error:
-        if "trust_remote_code" not in str(error):
-            raise
-        print(
-            "[ocr-transformers] no native architecture for this checkpoint; "
-            "loading the checkpoint's own code",
-            flush=True,
-        )
-        model = AutoModel.from_pretrained(
-            args.model,
-            dtype=dtype,
-            attn_implementation=attention,
-            trust_remote_code=True,
-            use_safetensors=True,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    model = model.eval().to(device)
+    cfg = build_config(args.model)
+    # The device's dtype and attention reach the loader through the config,
+    # the two fields from_pretrained would set from its own keyword
+    # arguments.
+    cfg.dtype = dtype
+    cfg._attn_implementation = attention
+    model, report = load_native(args.model, cfg)
+    processor = build_processor(args.model)
+    # The loader owns what it built; the device is this server's own concern,
+    # and the move is a no-op when the loader already placed and cast the
+    # weights.
+    model = model.eval().to(device=device, dtype=dtype)
 
-    # The checkpoint's remote code calls Tensor.cuda(); on any other device,
-    # redirect it so the same code runs there.
-    if not device.startswith("cuda"):
-        torch.Tensor.cuda = lambda tensor, *_args, **_kwargs: tensor.to(device)
-
-    remote = sys.modules[type(model).__module__]
-    # The native config keeps the language model's fields under
-    # text_config; the checkpoint's remote code carried them at the top.
-    text_config = getattr(model.config, "text_config", None) or model.config
-    vocab_size = int(getattr(model.config, "vocab_size", 0) or text_config.vocab_size)
-
+    vocab_size = int(cfg.text_config.vocab_size)
     parameter = next(model.parameters())
     info = {
         "contract_version": 1,
         "model_id": Path(args.model).name,
-        "model_revision": getattr(model.config, "_commit_hash", None) or "",
-        "tokenizer_id": str(tokenizer.name_or_path),
+        "model_dir": str(Path(args.model)),
+        "model_revision": report["revision"] or "",
         "engine": f"transformers {metadata.version('transformers')}",
         "dtype": str(parameter.dtype).removeprefix("torch."),
         "device": str(parameter.device),
         "vocab_size": vocab_size,
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        # What load_native loaded and checked, stamped verbatim.
+        "load_report": report,
     }
     print(f"[ocr-deepseek-ocr-2] serving on {HOST}:{args.port}: {info}", flush=True)
 
     def views(image_path: str):
-        """The image as the checkpoint's own infer() encodes it.
+        """The image as the native processor encodes it.
 
-        Returns the images list for the forward, the spatial-crop counts, and
-        the image-token block: the padded global view alone for a small image,
-        or global view plus a 2..6-tile crop grid for a large one, with the
-        token block growing by 144 tokens per tile. The zero crop tensor is
-        how the forward recognises "no tiles".
+        Returns the global-view pixels, the local-tile pixels (None when the
+        image stayed single-view), the per-image tile count, and the
+        image-token block: 257 tokens for the padded global view plus 144
+        per tile. The native forward takes the pixels and the count and
+        finds the image positions itself, so the block is only a count of
+        128815 - and the count is the reference's.
         """
-        from PIL import Image, ImageOps
+        from PIL import Image
 
         image = Image.open(image_path).convert("RGB")
-        transform = remote.BasicImageTransform(mean=NORM, std=NORM, normalize=True)
-        pad_color = tuple(int(channel * RGB_MAX) for channel in NORM)
-        global_view = transform(
-            ImageOps.pad(image, (BASE_SIZE, BASE_SIZE), color=pad_color)
-        ).to(dtype).unsqueeze(0)
-        if image.size[0] <= MAX_SINGLE_VIEW and image.size[1] <= MAX_SINGLE_VIEW:
-            crop = torch.zeros((1, 3, BASE_SIZE, BASE_SIZE))
-            return [(crop.to(device), global_view.to(device))], [[1, 1]], list(IMAGE_IDS)
-        tiles, (width_num, height_num) = remote.dynamic_preprocess(image)
-        patches = torch.stack([transform(tile) for tile in tiles]).to(dtype)
-        tokens = [
-            *IMAGE_IDS,
-            *([IMAGE_TOKEN_ID] * (CROP_QUERIES * width_num)) * (CROP_QUERIES * height_num),
-        ]
+        features = processor.image_processor(images=[image], return_tensors="pt")
+        local = features.get("pixel_values_local")
+        tiles = int(features["num_local_patches"][0])
         return (
-            [(patches.to(device), global_view.to(device))],
-            [[width_num, height_num]],
-            tokens,
+            features["pixel_values"].to(device=device, dtype=dtype),
+            None if local is None else local.to(device=device, dtype=dtype),
+            tiles,
+            [IMAGE_TOKEN_ID] * (len(IMAGE_IDS) + CROP_QUERIES**2 * tiles),
         )
 
-    def template(raw_ids: list[int], image_tokens: list[int]) -> tuple[list[int], list[bool]]:
-        """The expanded prompt template, and which of its positions are image.
+    def template(raw_ids: list[int], image_tokens: list[int]) -> list[int]:
+        """The expanded prompt template.
 
         The raw ids the request carried (the version's frozen template) hold
         one image placeholder; this replaces it with the block the image
-        expands to, so the deployment consumes ids and never tokenizes.
+        expands to, so the deployment consumes ids and never tokenizes. The
+        native forward marks the image positions from the ids themselves, so
+        no position mask is built.
         """
         at = raw_ids.index(IMAGE_TOKEN_ID)
-        expanded = [*raw_ids[:at], *image_tokens, *raw_ids[at + 1:]]
-        return (
-            expanded,
-            [
-                *repeat(False, at),
-                *repeat(True, len(image_tokens)),
-                *repeat(False, len(expanded) - at - len(image_tokens)),
-            ],
-        )
+        return [*raw_ids[:at], *image_tokens, *raw_ids[at + 1:]]
 
     def raw_template_ids_from(body: dict) -> list[int]:
         """The version's frozen template ids the request carried, checked present."""
@@ -284,25 +259,23 @@ def main():
         image_path: str, raw_ids: list[int], continuation: list[int] | None
     ) -> tuple[dict[str, Any], dict[str, Any], list[int], int]:
         """One image as the forward and generate kwargs, plus where the template ends."""
-        image_list, spatial_crop, image_tokens = views(image_path)
-        tpl, mask = template(raw_ids, image_tokens)
+        pixel_values, pixel_values_local, tiles, image_tokens = views(image_path)
+        tpl = template(raw_ids, image_tokens)
         ids = torch.tensor([[*tpl, *(continuation or [])]], dtype=torch.long, device=device)
         shared = {
-            "images": image_list,
-            "images_spatial_crop": torch.tensor(spatial_crop, dtype=torch.long),
+            "pixel_values": pixel_values,
+            "pixel_values_local": pixel_values_local,
+            "num_local_patches": [tiles],
         }
         forward = {
             **shared,
             "input_ids": ids,
-            "images_seq_mask": torch.tensor(
-                [mask + [False] * (ids.shape[1] - len(tpl))], dtype=torch.bool, device=device
-            ),
+            "attention_mask": torch.ones_like(ids),
             "use_cache": False,
         }
         generate = {
             **shared,
             "inputs": ids[:, : len(tpl)],
-            "images_seq_mask": torch.tensor([mask], dtype=torch.bool, device=device),
             "attention_mask": torch.ones_like(ids[:, : len(tpl)]),
         }
         return forward, generate, tpl, len(tpl)
@@ -369,7 +342,7 @@ def main():
                 repetition_penalty=1.0,
                 min_new_tokens=0 if allow_eos else max_new_tokens,
                 max_new_tokens=max_new_tokens,
-                pad_token_id=tokenizer.eos_token_id,
+                pad_token_id=processor.tokenizer.eos_token_id,
                 use_cache=True,
                 return_dict_in_generate=True,
                 output_logits=True,
@@ -379,7 +352,7 @@ def main():
             )
         emitted = out.sequences[0, prompt_len:].tolist()
         write_log_probs(torch.cat(list(out.logits), dim=0), out_dir, len(emitted))
-        text = tokenizer.decode(emitted, skip_special_tokens=True)
+        text = processor.tokenizer.decode(emitted, skip_special_tokens=True)
         return emitted, text
 
     @route(SCORE)

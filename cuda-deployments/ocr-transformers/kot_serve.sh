@@ -24,9 +24,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # The interpreter is named explicitly, with PATH only as a late fallback: the
 # process that starts us may run inside an environment that is not ours, and
-# the OCR stack needs transformers 4.46.3 (the checkpoint's remote code breaks
-# on 5.x), so a dedicated venv wins on a provisioned host. In the graded
-# container the image carries the family stack and PATH resolves to it.
+# the stack needs the pinned transformers 5.20.2 venv on a provisioned host.
+# In the graded container the image carries the family stack and PATH
+# resolves to it.
 if [ -n "${KOT_OCR_PY:-}" ]; then
   PY="$KOT_OCR_PY"
 elif [ -x /root/kotvenv-ocr/bin/python ]; then
@@ -39,7 +39,9 @@ else
   PY=python3
 fi
 
-# The checkpoint's remote code imports from its own directory.
+# The working directory is the model dir, as in the reference era: the
+# runner's out_dir resolves against it when sent relative. serve.py imports
+# its sibling builder modules through its own directory on sys.path.
 cd "$MODEL"
 
 exec "$PY" "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

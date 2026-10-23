@@ -56,8 +56,8 @@ echo "== /kot/info"; cat "$RUN/info.json"; echo
 TEMPLATE="[0, 128815, 201, 21431, 126041, 16]"
 IDS="$("$PY" - "$MODEL" "$TEXT" <<'EOF'
 import sys
-from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained(sys.argv[1], trust_remote_code=True)
+from transformers import LlamaTokenizerFast
+tok = LlamaTokenizerFast.from_pretrained(sys.argv[1])
 print(tok.encode(sys.argv[2], add_special_tokens=False)[:12])
 EOF
 )"
