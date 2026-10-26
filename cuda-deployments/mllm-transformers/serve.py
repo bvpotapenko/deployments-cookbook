@@ -192,15 +192,10 @@ def main() -> int:
             add_generation_prompt=True,
             enable_thinking=False,
         )
-        raw = processor.apply_chat_template(
-            [{"role": "user", "content": [
-                {"type": "video", "video": path},
-                {"type": "text", "text": VIDEO_PROMPT},
-            ]}],
-            tokenize=True,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )[0]
+        # The raw form: the rendered string tokenized by the tokenizer only -
+        # ONE video placeholder. apply_chat_template(tokenize=True) runs the
+        # full processor in 5.20.2 and returns the expanded ids.
+        raw = processor.tokenizer(text, add_special_tokens=False)["input_ids"]
         video = processor(
             text=[text],
             videos=[[path]],
@@ -235,7 +230,6 @@ def main() -> int:
         with torch.no_grad():
             out = model.generate(
                 input_ids=torch.tensor([expanded], device=model.device),
-                attention_mask=torch.ones(len(expanded), dtype=torch.long, device=model.device).unsqueeze(0),
                 do_sample=True,
                 temperature=float(sampling.get("temperature", 1.0) or 1.0),
                 top_p=float(sampling.get("top_p", 0.95) or 0.95),
@@ -275,6 +269,15 @@ def main() -> int:
         if n_rows != len(tail):
             raise RuntimeError(f"n_rows {n_rows} != the stored tail's length {len(tail)}")
         full = torch.tensor([expanded + tail], dtype=torch.long, device=model.device)
+        # The processor's attention_mask and mm_token_type_ids cover the
+        # expanded prompt only; the replay's sequence is the prompt plus the
+        # tail (text, type 0), so both extend.
+        media["attention_mask"] = torch.ones_like(full)
+        media["mm_token_type_ids"] = torch.cat(
+            [media["mm_token_type_ids"],
+             torch.zeros(1, len(tail), dtype=media["mm_token_type_ids"].dtype, device=model.device)],
+            dim=1,
+        )
         with torch.no_grad():
             # logits_to_keep pins the lm_head to the last n_rows+1 positions:
             # at vocab 248320 the full-sequence logits would not fit beside
@@ -303,7 +306,6 @@ def main() -> int:
         with torch.no_grad():
             out = model.generate(
                 input_ids=torch.tensor([expanded], device=model.device),
-                attention_mask=torch.ones(1, len(expanded), dtype=torch.long, device=model.device),
                 do_sample=True, temperature=1.0, top_p=0.95, top_k=20,
                 max_new_tokens=512,
                 pad_token_id=processor.tokenizer.eos_token_id,
