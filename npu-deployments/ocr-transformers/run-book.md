@@ -128,7 +128,9 @@ This model runs on one card. The weights take about 6.4 GB. The vocabulary
 holds 129,280 tokens.
 
 The model directory is a hub snapshot plus two patched files from the
-remote-code era: `config.json` and `modeling_deepseekv2.py`. Copy the
+remote-code era: `config.json` and `modeling_deepseekv2.py`.
+`modeling_deepseekv2.py` was edited by Bogdan Potapenko for
+transformers 5.x compatibility. Copy the
 directory whole. The native path loads no modeling file from the weights
 directory. The patched `config.json` duplicates the language model's
 settings at the top level, and the vanilla file carries them only under

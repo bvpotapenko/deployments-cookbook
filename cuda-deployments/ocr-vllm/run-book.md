@@ -60,36 +60,40 @@ offline install itself, into `KOT_VENV`.
   chat_template.jinja     the chat template; the checkpoint ships none
   kot_ngram.py            copied into the venv's site-packages at every start
   wheels/                 the offline closure, built by make_wheels.sh, not committed
-/models/DeepSeek-OCR-2    weights; a hub snapshot plus two patched files
+/models/DeepSeek-OCR-2    weights; a hub snapshot plus one patched file
 ```
 
 ### Transfer
 
 Push and pull over the provider-mapped ssh port. rsync makes no parent
 directories and drops execute bits; `--partial` resumes an interrupted
-transfer.
+transfer. The excludes keep `__pycache__` and `.DS_Store` off the box.
 
 ```bash
 mkdir -p /opt/engines/ocr-vllm
-rsync -a --partial -e "ssh -p $PORT" ./ocr-vllm/ \
-  user@$HOST:/opt/engines/ocr-vllm/
+rsync -a --partial -e "ssh -p $PORT" \
+  --exclude __pycache__ --exclude .DS_Store \
+  ./ocr-vllm/ user@$HOST:/opt/engines/ocr-vllm/
 ssh -p $PORT user@$HOST 'chmod +x /opt/engines/ocr-vllm/*.sh'
 rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
 ```
 
-A networked host downloads the model itself. Otherwise push the snapshot
-from the local hub cache; `--copy-links` resolves the cache's blob symlinks
-into real files:
+A networked host downloads the model itself. On vast, huggingface.co
+times out, so the download goes through the mirror endpoint. Otherwise
+push the snapshot from the local hub cache; `--copy-links` resolves the
+cache's blob symlinks into real files:
 
 ```bash
-hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+HF_ENDPOINT=https://hf-mirror.com \
+  hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
   ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
   user@$HOST:/models/<model>/
 ```
 
 Verify: the revision matches the model table's pin and the file list
-matches the source. The two patched files travel in the same push.
+matches the source. The patched `modeling_deepseekv2.py` travels in the
+same push.
 
 ### Start
 
@@ -134,9 +138,11 @@ requested rows of the cached prefix never computed.
 
 The model runs on one card. The weights directory is a hub snapshot of
 `deepseek-ai/DeepSeek-OCR-2` at revision
-`aaa02f3811945a91062062994c5c4a3f4c0af2b0`, plus two patched files over
-the snapshot, `config.json` and `modeling_deepseekv2.py`. Take the whole
-directory. Never refresh single files from the hub.
+`aaa02f3811945a91062062994c5c4a3f4c0af2b0`, plus one patched file over
+the snapshot, `modeling_deepseekv2.py`: Bogdan Potapenko edited the hub
+file for transformers 5.x compatibility. `config.json` is the pristine
+hub file. Take the whole directory. Never refresh single files from
+the hub.
 
 The engine applies the checkpoint's own no-repeat n-gram rule. The rule
 blocks every token that would complete a 30-gram already seen inside a
@@ -159,7 +165,10 @@ The tokenizer adds BOS itself. Exactly one image rides a request.
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "/models/DeepSeek-OCR-2", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 8}' \
+  -d '{"model": "/models/DeepSeek-OCR-2",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 8,
+       "temperature": 0.0001, "top_p": 1.0}' \
   | python3 -m json.tool
 ```
 

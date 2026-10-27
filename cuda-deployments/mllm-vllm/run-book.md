@@ -42,7 +42,9 @@ the videos; the host needs FFmpeg 6 shared libraries. The video processor
 ### Transfer
 
 ```bash
-rsync -a --partial -e "ssh -p $PORT" ./mllm-vllm/ root@$HOST:/opt/engines/mllm-vllm/
+rsync -a --partial -e "ssh -p $PORT" \
+  --exclude __pycache__ --exclude .DS_Store \
+  ./mllm-vllm/ root@$HOST:/opt/engines/mllm-vllm/
 ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-vllm/*.sh'
 ```
 
@@ -90,6 +92,21 @@ distributions: the log-softmax of the raw logits, float32, over the full
 248,320-wide vocabulary.
 
 ## Check
+
+The chat surface takes a plain OpenAI request, with the checkpoint's own
+sampling from `generation_config.json`:
+
+```bash
+curl -s http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "Qwen/Qwen3.8-27B",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 50,
+       "temperature": 1.0, "top_p": 0.95, "top_k": 20}' \
+  | python3 -m json.tool
+```
+
+The contract checks are the smoke:
 
 ```bash
 VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \

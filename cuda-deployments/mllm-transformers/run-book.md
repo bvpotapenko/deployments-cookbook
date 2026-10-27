@@ -57,22 +57,25 @@ existing venv with the same pins works: the launcher falls through to
 
 Push and pull over the provider-mapped ssh port. rsync makes no parent
 directories and drops execute bits; `--partial` resumes an interrupted
-transfer.
+transfer. The excludes keep `__pycache__` and `.DS_Store` off the box.
 
 ```bash
 mkdir -p /opt/engines/mllm-transformers
-rsync -a --partial -e "ssh -p $PORT" ./mllm-transformers/ \
-  user@$HOST:/opt/engines/mllm-transformers/
+rsync -a --partial -e "ssh -p $PORT" \
+  --exclude __pycache__ --exclude .DS_Store \
+  ./mllm-transformers/ user@$HOST:/opt/engines/mllm-transformers/
 ssh -p $PORT user@$HOST 'chmod +x /opt/engines/mllm-transformers/*.sh'
 rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
 ```
 
-A networked host downloads the model itself. Otherwise push the snapshot
-from the local hub cache; `--copy-links` resolves the cache's blob symlinks
-into real files:
+A networked host downloads the model itself. On vast, huggingface.co
+times out, so the download goes through the mirror endpoint. Otherwise
+push the snapshot from the local hub cache; `--copy-links` resolves the
+cache's blob symlinks into real files:
 
 ```bash
-hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+HF_ENDPOINT=https://hf-mirror.com \
+  hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
   ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
   user@$HOST:/models/<model>/

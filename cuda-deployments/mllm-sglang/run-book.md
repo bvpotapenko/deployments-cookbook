@@ -46,7 +46,9 @@ which is slow and OOMs a 32G card on a ~12.4k-token video prefill. fla
 ### Transfer
 
 ```bash
-rsync -a --partial -e "ssh -p $PORT" ./mllm-sglang/ root@$HOST:/opt/engines/mllm-sglang/
+rsync -a --partial -e "ssh -p $PORT" \
+  --exclude __pycache__ --exclude .DS_Store \
+  ./mllm-sglang/ root@$HOST:/opt/engines/mllm-sglang/
 ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-sglang/*.sh'
 ```
 

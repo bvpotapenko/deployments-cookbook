@@ -69,29 +69,33 @@ stamped into /kot/info.
 
 Push and pull over the provider-mapped ssh port. rsync makes no parent
 directories and drops execute bits; `--partial` resumes an interrupted
-transfer.
+transfer. The excludes keep `__pycache__` and `.DS_Store` off the box.
 
 ```bash
 mkdir -p /opt/engines/ocr-transformers
-rsync -a --partial -e "ssh -p $PORT" ./ocr-transformers/ \
-  user@$HOST:/opt/engines/ocr-transformers/
+rsync -a --partial -e "ssh -p $PORT" \
+  --exclude __pycache__ --exclude .DS_Store \
+  ./ocr-transformers/ user@$HOST:/opt/engines/ocr-transformers/
 ssh -p $PORT user@$HOST 'chmod +x /opt/engines/ocr-transformers/*.sh'
 rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
 ```
 
-A networked host downloads the model itself. Otherwise push the snapshot
-from the local hub cache; `--copy-links` resolves the cache's blob symlinks
-into real files:
+A networked host downloads the model itself. On vast, huggingface.co
+times out, so the download goes through the mirror endpoint. Otherwise
+push the snapshot from the local hub cache; `--copy-links` resolves the
+cache's blob symlinks into real files:
 
 ```bash
-hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+HF_ENDPOINT=https://hf-mirror.com \
+  hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
   ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
   user@$HOST:/models/<model>/
 ```
 
 Verify: the revision matches the model table's pin and the file list
-matches the source. The two patched files travel in the same push.
+matches the source. The patched `modeling_deepseekv2.py` travels in the
+same push.
 
 ### Start
 
@@ -134,8 +138,11 @@ from the hub.
   revision of this book recorded a patched config with sha
   `6e26957b...`; that file added 23 default-valued fields and is gone.
 - `modeling_deepseekv2.py`, sha256
-  `41ae3cf974208667f2e89a6392c7d65ffdd38d002a68fbf5063838cc9eb664a7`. The
-  patched file of the remote-code era. The native path loads no remote
+  `41ae3cf974208667f2e89a6392c7d65ffdd38d002a68fbf5063838cc9eb664a7`.
+  Bogdan Potapenko patched the hub file for transformers 5.x
+  compatibility: guarded the `LlamaFlashAttention2` and
+  `is_torch_fx_available` imports, added the `mha_sdpa` entry and
+  `_supports_sdpa`. The native path loads no remote
   modeling file, so this file sits unused.
 
 The native loader reads `config.json`. Check the lifted top-level block

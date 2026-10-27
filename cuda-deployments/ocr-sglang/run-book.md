@@ -41,29 +41,33 @@ and flashinfer-python 0.7.1. The llm-sglang run book holds the install.
 
 Push and pull over the provider-mapped ssh port. rsync makes no parent
 directories and drops execute bits; `--partial` resumes an interrupted
-transfer.
+transfer. The excludes keep `__pycache__` and `.DS_Store` off the box.
 
 ```bash
 mkdir -p /opt/engines/ocr-sglang
-rsync -a --partial -e "ssh -p $PORT" ./ocr-sglang/ \
-  user@$HOST:/opt/engines/ocr-sglang/
+rsync -a --partial -e "ssh -p $PORT" \
+  --exclude __pycache__ --exclude .DS_Store \
+  ./ocr-sglang/ user@$HOST:/opt/engines/ocr-sglang/
 ssh -p $PORT user@$HOST 'chmod +x /opt/engines/ocr-sglang/*.sh'
 rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
 ```
 
-A networked host downloads the model itself. Otherwise push the snapshot
-from the local hub cache; `--copy-links` resolves the cache's blob symlinks
-into real files:
+A networked host downloads the model itself. On vast, huggingface.co
+times out, so the download goes through the mirror endpoint. Otherwise
+push the snapshot from the local hub cache; `--copy-links` resolves the
+cache's blob symlinks into real files:
 
 ```bash
-hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+HF_ENDPOINT=https://hf-mirror.com \
+  hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
   ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
   user@$HOST:/models/<model>/
 ```
 
 Verify: the revision matches the model table's pin and the file list
-matches the source. The two patched files travel in the same push.
+matches the source. The patched `modeling_deepseekv2.py` travels in the
+same push.
 
 ### Start
 
@@ -112,7 +116,10 @@ compile and graph costs.
 ### deepseek-ai/DeepSeek-OCR-2
 
 This model runs on one card. The checkpoint loads through its own remote code,
-and this sglang line carries no native architecture for it. The server reports
+and this sglang line carries no native architecture for it. The weights
+directory carries one patched file over the snapshot,
+`modeling_deepseekv2.py`: Bogdan Potapenko edited the hub file for
+transformers 5.x compatibility. The server reports
 the `_commit_hash` that the weights' `config.json` carries.
 
 The prompt is the checkpoint's plain format. BOS comes first, then one
@@ -132,7 +139,7 @@ never changes the reported log-probability rows.
 DOC="$(base64 -w0 doc.png)"   # macOS: base64 -i doc.png
 curl -s http://127.0.0.1:8798/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "DeepSeek-OCR-2", "max_tokens": 256, "temperature": 0.0001,
+  -d '{"model": "DeepSeek-OCR-2", "max_tokens": 256, "temperature": 0.0001, "top_p": 1.0,
        "messages": [{"role": "user", "content": [
          {"type": "image_url", "image_url": {"url": "data:image/png;base64,'"$DOC"'"}},
          {"type": "text", "text": "Free OCR."}]}]}' \
