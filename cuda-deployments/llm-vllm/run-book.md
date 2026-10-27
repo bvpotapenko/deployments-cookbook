@@ -62,22 +62,35 @@ cards.
 
 Push and pull over the provider-mapped ssh port. rsync makes no parent
 directories and drops execute bits; `--partial` resumes an interrupted
-transfer.
+transfer. The excludes keep `__pycache__` and `.DS_Store` off the box.
 
 ```bash
 mkdir -p /opt/engines/llm-vllm
-rsync -a --partial -e "ssh -p $PORT" ./llm-vllm/ \
-  user@$HOST:/opt/engines/llm-vllm/
+rsync -a --partial -e "ssh -p $PORT" \
+  --exclude __pycache__ --exclude .DS_Store --exclude wheels \
+  ./llm-vllm/ user@$HOST:/opt/engines/llm-vllm/
 ssh -p $PORT user@$HOST 'chmod +x /opt/engines/llm-vllm/*.sh'
 rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
 ```
 
-A networked host downloads the model itself. Otherwise push the snapshot
-from the local hub cache; `--copy-links` resolves the cache's blob symlinks
-into real files:
+The engine push leaves the wheel closure out. A networked host builds
+its venv from the index and never reads it. Push the closure only to a
+host that must install offline; `kot_serve.sh` fills a missing venv from
+it on first start:
 
 ```bash
-hf download <org>/<model> --revision <rev> --local-dir /models/<model>
+rsync -a --partial -e "ssh -p $PORT" ./llm-vllm/wheels/ \
+  user@$HOST:/opt/engines/llm-vllm/wheels/
+```
+
+A networked host downloads the model itself. On vast, huggingface.co
+times out, so the download goes through the mirror endpoint. Otherwise
+push the snapshot from the local hub cache; `--copy-links` resolves the
+cache's blob symlinks into real files:
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com \
+  hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
   ~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<rev>/ \
   user@$HOST:/models/<model>/
@@ -148,12 +161,32 @@ measured limit is about 2046 tokens (prompt plus generated), whatever
 
 ## Check
 
+One curl per model, each carrying its table row's sampling.
+
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "DeepSeek-V2-Lite",
+  -d '{"model": "Qwen/Qwen3-0.6B",
        "messages": [{"role": "user", "content": "ping"}],
-       "max_tokens": 50, "temperature": 0.3, "top_p": 0.95}' \
+       "max_tokens": 50,
+       "temperature": 0.6, "top_p": 0.95, "top_k": 20}' \
+  | python3 -m json.tool
+
+curl -s http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "deepseek-ai/DeepSeek-V2-Lite",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 50,
+       "temperature": 0.3, "top_p": 0.95}' \
+  | python3 -m json.tool
+
+curl -s http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "state-spaces/mamba-2.8b-hf",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 50,
+       "temperature": 0.7, "top_p": 0.9,
+       "repetition_penalty": 1.2}' \
   | python3 -m json.tool
 ```
 
