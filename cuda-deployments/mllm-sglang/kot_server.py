@@ -541,7 +541,11 @@ class KotEngine:
             # max_prefill_tokens * 1.5 MB and can go negative; and headroom
             # for the full-vocab logprob transient, which for a long prefill
             # at this vocabulary is multiple GB with chunking off by contract.
-            "mem_fraction_static": 0.45,
+            # The fraction must also cover the weights per card and the
+            # hybrid state cache: the 52G model at TP=2 holds 26G per card,
+            # and 0.45 of a 32G card starves the budget before the cache is
+            # sized. KOT_SGLANG_MEM_FRACTION overrides for models that big.
+            "mem_fraction_static": float(os.environ.get("KOT_SGLANG_MEM_FRACTION", "0.45")),
             "log_level": "info",
         }
         if is_cuda:

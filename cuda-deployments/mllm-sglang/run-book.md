@@ -11,6 +11,12 @@ log-probability surface over both cards, one request at a time.
 |---|---|---|---|---|
 | Qwen/Qwen3.8-27B | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 2 (TP=2) | bfloat16 | temperature 1.0, top_p 0.95, top_k 20 |
 
+The model needs `KOT_SGLANG_MEM_FRACTION=0.89` on 2x RTX 5090: the weights
+hold 25.64 GiB per card and the fraction must cover them, the hybrid state
+cache and the 20,480-token KV window. At 0.89 the engine sizes
+`max_mamba_cache_size=7` and `max_total_num_tokens=25626`; at the 0.45
+default (or 0.88) the budget goes negative (or 131 tokens short).
+
 The sampling values are the checkpoint's own `generation_config.json`. The
 seed arrives with the request; 42 is the convention.
 
@@ -68,13 +74,16 @@ The launcher installs the patch layer into the venv's site-packages (module
 | variable | default | effect |
 |---|---|---|
 | `KOT_SGLANG_PYTHON` | unset | the interpreter carrying sglang; set it on a provisioned host |
+| `KOT_SGLANG_MEM_FRACTION` | `0.45` | `mem_fraction_static`; must cover the weights per card, the hybrid state cache and the KV window (0.89 for Qwen3.8-27B on 2x RTX 5090) |
 | `KOT_SGLANG_STASH_DIR` | set by the launcher | the patch layer's stash root |
 | `KOT_SGLANG_DEBUG` | unset | logs every patch event to a /tmp trace |
 
 Engine pins in kot_server.py: `chunked_prefill_size=-1` (a chunked extend
 samples a token per chunk and desynchronises the stash), `disable_overlap_
 schedule=True` (the overlap scheduler's phantom decode row),
-`mem_fraction_static=0.45` (the full-vocab transient beside the weights),
+`mem_fraction_static` through `KOT_SGLANG_MEM_FRACTION` (the full-vocab
+transient beside the weights; the default 0.45 suits models whose weights
+fit under it),
 `max_prefill_tokens=16384`, `context_length=20480`,
 `enable_deterministic_inference` and the triton attention backend on CUDA.
 
@@ -118,6 +127,8 @@ curl -s http://127.0.0.1:8090/kot/infer \
 cat /tmp/kot-probe/text.txt
 ```
 
-On 2x RTX 5090 this boot is blocked: `kot_server.py` hard-pins
-`mem_fraction_static=0.45` and the hybrid state cache budget goes negative
-at TP=2 (issue #26). The boot needs that knob.
+On 2x RTX 5090 the boot needs `KOT_SGLANG_MEM_FRACTION=0.89` (issue #26):
+the engine then sizes `max_mamba_cache_size=7` and
+`max_total_num_tokens=25626`. The server still dies after engine init on a
+missing identity function (issue #28); the surfaces answer once that fix
+lands.
