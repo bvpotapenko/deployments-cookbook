@@ -100,8 +100,8 @@ if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
   # loopback -- a published port forwards to the container's ethernet
   # address, where nothing listens. Re-enter this script inside: it now sees
   # torch_npu and takes one of the direct paths. bash execs python, so
-  # SIGTERM reaches the server. A deterministic name lets a supervisor (or
-  # the smoke) clean up an orphaned wrap after the client dies.
+  # SIGTERM reaches the server. A deterministic name lets a supervisor
+  # clean up an orphaned wrap after the client dies.
   DOCKER_ARGS+=("--name=bd-vllm-serve-$$")
   DOCKER_ARGS+=(-v "${DIR}:/deployment:ro" -w /deployment)
 

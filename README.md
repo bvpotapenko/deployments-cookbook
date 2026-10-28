@@ -1,2 +1,3 @@
-Deployments are made for Kernel Output Testing (KOT).
-Deployments support two interfaces, one allows pre-sampling full vocabulary log_probs, the other one is OpenAI (normal inference, speed tests)
+Each deployment serves a model behind two interfaces: one returns
+pre-sampling full-vocabulary log-probabilities per position, the other is
+OpenAI-compatible (normal inference, speed tests).

@@ -743,6 +743,15 @@ def main() -> int:
     async def run() -> None:
         async with build_async_engine_client(args) as engine:
             model_config = engine.vllm_config.model_config
+            # hf_config here is the multimodal wrapper: Qwen3_5Config nests
+            # the vocab size in its text config, so the flat read crashed
+            # the boot. get_vocab_size() is the engine's own resolver - the
+            # same source its logits width uses - and answers 0 when the
+            # field is missing; a 0 would fail much later, in confusing
+            # ways, so it fails here instead.
+            vocab_size = model_config.get_vocab_size()
+            if vocab_size <= 0:
+                raise RuntimeError("the engine resolved a vocab size of 0")
             info = {
                 "contract_version": CONTRACT_VERSION,
                 "model_id": model_id,
@@ -751,14 +760,12 @@ def main() -> int:
                 "engine": f"vllm {vllm.__version__}",
                 "dtype": str(model_config.dtype).removeprefix("torch."),
                 "device": cli.device,
-                "vocab_size": int(model_config.hf_config.vocab_size),
+                "vocab_size": vocab_size,
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             # Routes and middleware go on before init_app_state: it starts the
             # app, and Starlette refuses middleware on a started application.
-            _register_kot_routes(
-                app, engine, int(model_config.hf_config.vocab_size), info
-            )
+            _register_kot_routes(app, engine, vocab_size, info)
             await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
             print(f"[kot-vllm-ocr] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(

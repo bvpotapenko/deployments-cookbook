@@ -160,13 +160,11 @@ KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
 Both variables are required. A lower memory fraction leaves the KV pool below
 the per-card weight size, 14.65 GB, and the engine refuses to start. A
 smaller prefill window rejects the longest workload prompt, about 8.5k ids.
-The smoke needs the same variables plus the two interpreters:
+The same variables serve every launch of this model:
 
 ```bash
-KOT_PYTHON=/root/kotvenv/bin/python \
-KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
 KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
-  ./smoke.sh /models/DeepSeek-V2-Lite cuda
+  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 ### state-spaces/mamba-2.8b-hf
@@ -216,5 +214,4 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 
 The request's `model` field is ignored. The response names the identity the
 server derived from the weights path. A hub-cache snapshot gives `org/name`.
-A flat directory gives its basename. The contract checks are
-`./smoke.sh /models/<model> cuda`: byte-identical double runs.
+A flat directory gives its basename.

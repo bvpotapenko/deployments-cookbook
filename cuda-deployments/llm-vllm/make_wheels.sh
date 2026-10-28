@@ -3,7 +3,7 @@
 #
 # The closure is rebuilt whenever the pinned vllm line moves: run this on any
 # linux x86_64 host with network, then `./kot_serve.sh` installs offline from
-# wheels/ on first start (the graded container has no network).
+# wheels/ on first start (an offline host has no network).
 #
 #   ./make_wheels.sh
 #

@@ -248,7 +248,7 @@ async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
     if not input_ids:
         raise ScoreFailure("empty input_ids")
     # At TP>=2 the vocab-parallel embedding maps an out-of-range id to a
-    # silent zero row: a wrong golden that looks plausible. Refuse here,
+    # silent zero row: a wrong capture that looks plausible. Refuse here,
     # before any engine call, whatever the parallelism.
     if min(input_ids) < 0 or max(input_ids) >= engine.vocab_size:
         raise ScoreFailure(

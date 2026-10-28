@@ -150,16 +150,6 @@ The image part must be a data URI. The server decodes it itself and fetches no
 URLs. The text part is the instruction alone, and the server adds BOS, the
 image placeholder and the newline itself.
 
-```bash
-KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
-  ./smoke.sh /models/DeepSeek-OCR-2 cuda
-```
-
-The interpreter export is required: the serve launcher's candidate list
-omits the box venv. On the 4-row decode arrays the smoke's first-line
-check prints FAIL from a memmap contiguity flag; the substantive checks
-(rows, byte-identity, logsumexp) pass.
-
-The smoke drives the whole surface: a prefill twice, a decode under each EOS
-gate, the chat surface, and a decode-then-prefill round trip over the ids the
-decode wrote. It fails when the server log holds a token-drift line.
+The serve launcher's interpreter candidate list omits the box venv; export
+`KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python` when launching by
+hand.

@@ -154,15 +154,12 @@ implements no such knob.
 ## Check
 
 The server serves no chat route. It serves the scoring route that
-`serve.py` defines. Run the deployment's own check:
+`serve.py` defines. The identity surface answers with the engine's own
+facts:
 
 ```bash
-IMAGE=/path/to/document.png ./smoke.sh /models/DeepSeek-OCR-2 npu
+curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
 ```
 
-The smoke starts its own server, teacher-forces one transcript over one
-image twice, decodes under both stop gates, and replays one stored id file
-through a prefill. It prints PASS/FAIL lines for shape, dtype, row count
-and byte-identity. Any image works, and one wider or taller than 768 px also
-exercises the crop path. The first run builds the image. Allow a few
-minutes.
+Any image serves the scoring route, and one wider or taller than 768 px also
+exercises the crop path.

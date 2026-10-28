@@ -187,9 +187,9 @@ Run `npu-smi info` before you claim a card.
 
 ### Qwen/Qwen3-0.6B
 
-The model runs on one card. Proven on this server: the smoke run passes
-10/10, byte-identical prefills and seeded decodes, an 8,192-token decode
-plus prefill, and a run of the MLCommons Inference Endpoints client over the
+The model runs on one card. Proven on this server: byte-identical prefills
+and seeded decodes, an 8,192-token decode plus prefill, and a run of the
+MLCommons Inference Endpoints client over the
 chat surface. The sampling values come from the checkpoint's own
 `generation_config.json`.
 
@@ -216,8 +216,3 @@ The `model` field is ignored: the server serves the one checkpoint it was
 started with, and the reply names that identity. With `"stream": true` the
 reply is SSE and carries no Content-Length: the server closes the connection
 after `[DONE]`, and that close is the body's only terminator.
-
-`./smoke.sh /models/Qwen3-0.6B` starts its own server (port 8749 by
-default) and runs the full check: shape, dtype and row sums, byte identity
-across two prefills and two seeded decodes, verbatim ids, and the stream
-close.

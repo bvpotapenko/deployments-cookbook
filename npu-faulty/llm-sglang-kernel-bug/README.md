@@ -3,7 +3,7 @@
 SGLang serving Qwen3-0.6B on Ascend 910B behind the kot deployment contract (v1).
 One adapter process (`kot_server.py`) embeds `sglang.Engine` in its own asyncio loop;
 `/kot/score`, `/v1/completions` and `/v1/chat/completions` (SSE) drive the same engine.
-Verified on the box: smoke 10/10 (byte-identical prefills and seeded decodes),
+Verified on the box: byte-identical prefills and seeded decodes,
 8192-token decode+prefill rehearsal, MLC Endpoints run.
 
 ## Run
@@ -22,7 +22,7 @@ Note argparse polarity: `--root` before `capture`, `--repo` after — both absol
 
 Manual (host mode): `./kot_serve.sh --port P --model /abs/model --device npu`
 docker-wraps `kot-llm-ascend-910b:latest` with the platform device nodes and
-re-enters itself inside. Smoke: `./smoke.sh /abs/model npu`.
+re-enters itself inside.
 
 ## Config that must be preserved
 
@@ -51,7 +51,7 @@ re-enters itself inside. Smoke: `./smoke.sh /abs/model npu`.
 - Distinct cards: llm-sglang uses card 0 (`--device-index 0`), the vllm
   deployment uses card 1 (`ASCEND_RT_VISIBLE_DEVICES=1`, port 8750). Keep it
   that way; check `npu-smi info` before claiming.
-- Distinct ports: 8752 (sglang smoke) vs 8750 (vllm). Distinct /tmp paths.
+- Distinct ports: 8752 (sglang) vs 8750 (vllm). Distinct /tmp paths.
 - Kill only by container name/`--filter ancestor`, never `pkill -f kot_serve`
   (kills your own ssh session and any provisioning install mid-flight).
 - The vllm sibling (`npu-deployments/llm-vllm`) pins vllm 0.23.0 +

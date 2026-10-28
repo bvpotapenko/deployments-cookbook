@@ -177,15 +177,21 @@ the same output.
 
 ## Check
 
-The smoke boots the deployment and drives both surfaces: a text decode and
-its replay prefill, then a video decode twice (byte-identity; the stored ids
-carry exactly one video placeholder), then the video replay twice
-(byte-identity).
+The identity surface answers with the engine's own facts:
 
 ```bash
-VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
-  KOT_MLLM_PYTHON=/root/kotvenv-mllm/bin/python \
-  ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
+curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+```
+
+The generation surface takes a video and writes its answer to `out_dir`:
+
+```bash
+curl -s http://127.0.0.1:8090/kot/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt_id": "probe", "out_dir": "/tmp/kot-probe",
+       "attachments": {"video": "/path/to/video.mp4"}}' \
+  | python3 -m json.tool
+cat /tmp/kot-probe/text.txt
 ```
 
 The startup line is the first check. It proves the model loaded, and it

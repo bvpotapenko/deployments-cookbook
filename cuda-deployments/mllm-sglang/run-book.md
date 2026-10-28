@@ -101,17 +101,23 @@ distributions: the log-softmax of the raw logits, float32, over the full
 
 ## Check
 
+The identity surface answers with the engine's own facts:
+
 ```bash
-VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
-  KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
-  ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
+curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+```
+
+The generation surface takes a video and writes its answer to `out_dir`:
+
+```bash
+curl -s http://127.0.0.1:8090/kot/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt_id": "probe", "out_dir": "/tmp/kot-probe",
+       "attachments": {"video": "/path/to/video.mp4"}}' \
+  | python3 -m json.tool
+cat /tmp/kot-probe/text.txt
 ```
 
 On 2x RTX 5090 this boot is blocked: `kot_server.py` hard-pins
 `mem_fraction_static=0.45` and the hybrid state cache budget goes negative
-at TP=2 (issue #26). The smoke cannot pass until that knob exists.
-
-The smoke drives a video decode twice (byte-identity; the stored ids carry
-exactly one video placeholder), the replay twice, the teacher-forced
-acceptance against the reference golden's own rows for the same unit
-(median renyi_inf reported), and the /kot/infer speed surface.
+at TP=2 (issue #26). The boot needs that knob.

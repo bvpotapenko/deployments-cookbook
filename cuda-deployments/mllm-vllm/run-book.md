@@ -107,22 +107,10 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-The contract checks are the smoke:
-
-```bash
-VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
-  KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
-  ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
-```
-
 The default boot OOMed engine init on 2x RTX 5090 until the
 `KOT_VLLM_MAX_NUM_SEQS` pin landed (issue #24): the temporary KV of the
 CUDA-graph profiling scales with the concurrent-request count, not with the
 window, and the 256 API-server default asked for 6.12 GiB beside the weights.
-The engine now boots without `eager`; `/kot/info` still dies on a flat vocab
-read (issue #25), so the smoke cannot pass until that fix lands.
-
-The smoke drives a video decode twice (byte-identity; the stored ids carry
-exactly one video placeholder), the replay twice, the teacher-forced
-acceptance against the reference golden's own rows for the same unit
-(median renyi_inf reported), and the /kot/infer speed surface.
+The engine boots without `eager`. `/kot/info` reads the vocab size through
+the engine's own resolver (issue #25): the multimodal wrapper configs nest it
+in their text config, and the flat read crashed the boot after init.
