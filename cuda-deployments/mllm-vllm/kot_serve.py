@@ -609,15 +609,20 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # One video per request.
     args.limit_mm_per_prompt = {"video": 1}
     # The video units run ~12.4k-token prompts (the checkpoint's own pixel
-    # budget) plus a 4096-token decode; the window covers both. It also
-    # sizes the minimal KV vLLM allocates for CUDA-graph profiling - a
-    # 32768 window wants 6.12 GiB of profile KV beside 25.8G of weights and
-    # OOMs a 32G card at boot; 20480 fits.
+    # budget) plus a 4096-token decode; the window covers both.
     args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "20480"))
     # The full-vocab prompt-logprob tap streams [chunk, 248320] fp32 per
     # chunk; 1024 tokens per chunk keeps the transient near 1 GB beside the
     # weights (26G per card at TP=2).
     args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "1024"))
+    # The contract serves one request at a time. vLLM's API-server default
+    # on a 32G card is 256, and the temporary KV vLLM allocates for
+    # CUDA-graph profiling is sized by the request count, not the window:
+    # one block per min(max_num_seqs, max_cudagraph_capture_size). A hybrid
+    # block holds a full GatedDeltaNet state per sequence, so 256 asked for
+    # 6.12 GiB beside 25.8G of weights and OOMed boot; 4 drops the profile
+    # cache to ~0.1 GiB.
+    args.max_num_seqs = int(os.environ.get("KOT_VLLM_MAX_NUM_SEQS", "4"))
     args.max_logprobs = 1_000_000
     args.enable_prefix_caching = False
     args.disable_log_requests = True
