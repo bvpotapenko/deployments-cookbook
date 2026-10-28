@@ -111,8 +111,14 @@ The contract checks are the smoke:
 ```bash
 VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
   KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
+  KOT_VLLM_COMPILATION=eager \
   ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
 ```
+
+On 2x RTX 5090 the default boot OOMs in engine init; `eager` is the wired
+workaround until the tower-sharding knob lands (issue #24). With eager the
+engine boots, but `/kot/info` then dies on a flat vocab read (issue #25);
+the smoke cannot pass until that fix lands.
 
 The smoke drives a video decode twice (byte-identity; the stored ids carry
 exactly one video placeholder), the replay twice, the teacher-forced

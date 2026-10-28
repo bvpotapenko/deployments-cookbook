@@ -52,6 +52,10 @@ a torch without them stalls silently on these cards. The venv pins
 transformers 5.20.2. A different transformers line runs different attention
 kernels and computes different outputs.
 
+accelerate is not optional. The loader spreads a multi-card model's layers
+with `device_map="auto"`, and that call is accelerate's. DeepSeek-V2-Lite
+needs both cards; a venv without accelerate refuses the load at start.
+
 ### Layout
 
 ```text

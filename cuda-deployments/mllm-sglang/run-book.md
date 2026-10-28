@@ -107,6 +107,10 @@ VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
   ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
 ```
 
+On 2x RTX 5090 this boot is blocked: `kot_server.py` hard-pins
+`mem_fraction_static=0.45` and the hybrid state cache budget goes negative
+at TP=2 (issue #26). The smoke cannot pass until that knob exists.
+
 The smoke drives a video decode twice (byte-identity; the stored ids carry
 exactly one video placeholder), the replay twice, the teacher-forced
 acceptance against the reference golden's own rows for the same unit

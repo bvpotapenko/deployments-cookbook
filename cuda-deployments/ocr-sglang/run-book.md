@@ -151,8 +151,14 @@ URLs. The text part is the instruction alone, and the server adds BOS, the
 image placeholder and the newline itself.
 
 ```bash
-./smoke.sh /models/DeepSeek-OCR-2
+KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
+  ./smoke.sh /models/DeepSeek-OCR-2 cuda
 ```
+
+The interpreter export is required: the serve launcher's candidate list
+omits the box venv. On the 4-row decode arrays the smoke's first-line
+check prints FAIL from a memmap contiguity flag; the substantive checks
+(rows, byte-identity, logsumexp) pass.
 
 The smoke drives the whole surface: a prefill twice, a decode under each EOS
 gate, the chat surface, and a decode-then-prefill round trip over the ids the
