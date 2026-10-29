@@ -616,9 +616,13 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # budget) plus a 4096-token decode; the window covers both.
     args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "20480"))
     # The full-vocab prompt-logprob tap streams [chunk, 248320] fp32 per
-    # chunk; 1024 tokens per chunk keeps the transient near 1 GB beside the
-    # weights (26G per card at TP=2).
-    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "1024"))
+    # chunk. At k = vocab_size the gather chain (logits, log_softmax, topk
+    # values, int64 topk indices, the two cat tensors, the int32 copy)
+    # peaks at ~8 MiB of GPU tensors per chunk token beside the weights
+    # (25.64 GiB per card at TP=2): ~8 GiB at 1024, ~1 GiB at 128. 128 is
+    # the capture default; the speed profile overrides it (speed traffic
+    # requests no logprobs and has no gather transient).
+    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "128"))
     # The contract serves one request at a time. vLLM's API-server default
     # on a 32G card is 256, and the temporary KV vLLM allocates for
     # CUDA-graph profiling is sized by the request count, not the window:
@@ -644,8 +648,12 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # hosts that do carry the toolkit.
     args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
     # The 52G of weights over two cards leave ~5G per card for the KV cache
-    # and the full-vocab logprob transients; 0.90 hands the margin to both.
-    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.90"))
+    # and the gather transient. The KV pool's floor is the 20,480-token
+    # window (measured ~66 KB per token per card at TP=2, hybrid page
+    # alignment), so 0.89 is the floor: 0.88 sizes the pool under the
+    # window and the engine refuses to boot. 0.89 leaves ~1 GiB of headroom
+    # for the 128-chunk gather; the speed profile runs 0.90.
+    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.89"))
     # KOT_VLLM_DTYPE exists for cross-checking numerics; a capture runs the
     # engine's own default ("auto": the checkpoint's dtype).
     dtype_override = os.environ.get("KOT_VLLM_DTYPE", "")
@@ -765,6 +773,11 @@ def main() -> int:
                 "dtype": str(model_config.dtype).removeprefix("torch."),
                 "device": cli.device,
                 "vocab_size": vocab_size,
+                # The chunk size is part of the numerics: a chunked prefill
+                # splits the attention and state passes at chunk boundaries,
+                # so rows produced at one size need not be bit-identical to
+                # rows produced at another. Every capture carries its own.
+                "max_num_batched_tokens": args.max_num_batched_tokens,
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             # Routes and middleware go on before init_app_state: it starts the
