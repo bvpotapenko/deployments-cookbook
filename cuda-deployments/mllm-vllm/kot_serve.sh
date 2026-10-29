@@ -80,4 +80,10 @@ echo "[kot-vllm-mllm] python: $PY" >&2
 # reach the log as they happen.
 export PYTHONUNBUFFERED=1
 
+# The V2 model runner: tail-only prompt scoring (prompt_logprob_token_ids +
+# prompt_logprob_start), no top-k and no full-prompt pinned buffer - the
+# V1 floor that OOMs this box does not exist on this path. Default on;
+# VLLM_USE_V2_MODEL_RUNNER=0 boots the V1 path for a comparison run.
+export VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-1}"
+
 exec "$PY" "$DIR/kot_serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

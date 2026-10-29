@@ -65,17 +65,21 @@ import json
 import os
 import signal
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-# The V2 model runner's prompt-logprob path accumulates the whole prompt's
-# full-vocabulary top-k on the GPU - over 10 GB for a long prompt, which
-# dies out of memory beside the KV cache whatever the utilization. The V1
-# runner streams the per-step tensors the tap consumes. Pin the runner the
-# tap is written against; the n-gram processor is a V1-interface plugin too.
-os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+# The V2 model runner is the replay path: its tail scoring
+# (prompt_logprob_token_ids + prompt_logprob_start) scores only the kept
+# rows, with no top-k and no full-prompt buffer. The old pin-off reason -
+# the V2 prompt_logprob path accumulating the whole prompt's top-k on the
+# GPU - no longer applies: the replay never requests prompt_logprobs. The
+# decode tap's per-step tensors work under both runners (verified
+# byte-identical). The launcher exports 1; this setdefault covers a direct
+# python launch.
+os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "1")
 # torch 2.13's triton refuses the non-constexpr globals vLLM's kernels read
 # (LOG2E et al.); triton's own documented escape hatch for exactly this.
 os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
@@ -132,13 +136,28 @@ SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
 # server with a named culprit beats a hung one.
 REQUEST_TIMEOUT_S = float(os.environ.get("KOT_VLLM_REQUEST_TIMEOUT", "1800"))
 
+
 # A stack of every thread, on demand, without ptrace (the serving container
 # denies it): `kill -USR1 <pid>` and the log answers.
 faulthandler.register(signal.SIGUSR1, all_threads=True)
 
+
 # request_id -> the LogprobsProcessor vLLM built for it, carrying our stashed
 # raw tensors. Only score requests (SCORE_PREFIX) are registered.
 SINKS: dict[str, LogprobsProcessor] = {}
+
+# The V2 model runner (VLLM_USE_V2_MODEL_RUNNER=1, exported by the
+# launcher and defaulted at the module level) scores only the tail rows
+# against fixed token ids (prompt_logprob_token_ids + prompt_logprob_start):
+# no top-k, no full-prompt pinned buffer, and the rows arrive on
+# RequestOutput.prompt_token_id_logprobs as [rows, vocab] float32 in
+# token-id order - already scattered, no permutation to undo.
+
+# The GPU holds [rows, vocab] ids, mask and scores for the whole tail from
+# the first chunk to the last (~3.1 MiB per row at this vocabulary), so a
+# tail above this cap must arrive in segments. Provisional until the free
+# GPU memory is measured with a scoring request in flight.
+V2_TAIL_SEGMENT_ROWS = 512
 
 
 def _install_logprobs_tap() -> None:
@@ -154,7 +173,6 @@ def _install_logprobs_tap() -> None:
 
     def from_new_request(cls, tokenizer, request):
         processor = original_from_new_request(cls, tokenizer, request)
-        processor.kot_prompt_tensors = []
         processor.kot_sample_lists = []
         rid = getattr(request, "request_id", "?")
         if rid.startswith(SCORE_PREFIX):
@@ -162,13 +180,12 @@ def _install_logprobs_tap() -> None:
         return processor
 
     def update_from_output(self, output):
-        if output.new_prompt_logprobs_tensors is not None:
-            tensors = output.new_prompt_logprobs_tensors
-            self.kot_prompt_tensors.append(tensors)
-            if self.prompt_logprobs is not None:
-                self.prompt_logprobs.extend(
-                    [{} for _ in range(tensors.logprobs.shape[0])]
-                )
+        # The V2 runner's tail scores ride this field; vLLM's own
+        # update_from_output would move it onto the processor, and the
+        # RequestOutput reads it from there. Without the passthrough the
+        # field arrives as None.
+        if getattr(output, "prompt_token_id_logprobs", None) is not None:
+            self.prompt_token_id_logprobs = output.prompt_token_id_logprobs.numpy()
         if output.new_logprobs is not None:
             lists = output.new_logprobs
             self.kot_sample_lists.append(lists)
@@ -185,34 +202,33 @@ def _scatter_full_vocab(token_ids, logprobs, vocab_size: int) -> np.ndarray:
     Column 0 of each row is the prompt/sampled token's own logprob; columns
     1..k are the top-k. With k = vocab_size the top-k is the whole vocabulary
     (a padded engine emits pad logits as -inf, so pad ids sort behind every
-    real id and cannot enter the top-k). The permutation check makes that a
-    hard fact rather than an assumption.
+    real id and cannot enter the top-k). The out array starts as NaN and the
+    k values fill it by id: the fill is complete exactly when the ids are a
+    permutation of the vocabulary, put_along_axis raises on out-of-range
+    ids, and any NaN left behind says the top-k was not the full vocabulary
+    - the guarantee the sort check gave, without the full-width int64 tile
+    and sort (tens of GiB at this vocabulary).
+
+    The scatter runs one 256-row block at a time, converting ids to int64
+    per block: the peak holds the out array plus one block of ids (about
+    0.5 GB at 4096 kept rows), never the whole kept tail in int64.
     """
-    ids = np.asarray(token_ids, dtype=np.int64)[:, 1:]
-    values = np.asarray(logprobs, dtype=np.float32)[:, 1:]
-    expected = np.tile(np.arange(vocab_size, dtype=np.int64), (ids.shape[0], 1))
-    if not np.array_equal(np.sort(ids, axis=1), expected):
+    ids_all = np.asarray(token_ids)
+    values_all = np.asarray(logprobs)
+    rows = ids_all.shape[0]
+    out = np.full((rows, vocab_size), np.nan, dtype=np.float32)
+    block = 256
+    for start in range(0, rows, block):
+        stop = min(start + block, rows)
+        ids = np.asarray(ids_all[start:stop], dtype=np.int64)[:, 1:]
+        values = np.asarray(values_all[start:stop], dtype=np.float32)[:, 1:]
+        np.put_along_axis(out[start:stop], ids, values, axis=1)
+    if np.isnan(out).any():
         raise ValueError(
-            "the engine's top-k is not a full permutation of the configured "
-            f"vocabulary ({ids.shape[1]} of {vocab_size}); refusing to write "
-            "misaligned log-probs"
+            "the engine's top-k did not cover the configured vocabulary "
+            f"({vocab_size}); refusing to write misaligned log-probs"
         )
-    out = np.empty((ids.shape[0], vocab_size), dtype=np.float32)
-    np.put_along_axis(out, ids, values, axis=1)
     return out
-
-
-def _prompt_rows(processor: LogprobsProcessor, vocab_size: int) -> np.ndarray:
-    """The stashed prompt tensors as one [rows, vocab_size] float32 array."""
-    if not processor.kot_prompt_tensors:
-        raise RuntimeError("the engine produced no prompt logprobs at all")
-    token_ids = np.concatenate(
-        [np.asarray(t.logprob_token_ids) for t in processor.kot_prompt_tensors]
-    )
-    logprobs = np.concatenate(
-        [np.asarray(t.logprobs) for t in processor.kot_prompt_tensors]
-    )
-    return _scatter_full_vocab(token_ids, logprobs, vocab_size)
 
 
 def _decode_rows(entries: list, vocab_size: int) -> np.ndarray:
@@ -256,17 +272,13 @@ def _resolve_sampling(body: dict) -> dict:
 
 
 def _sampling_params(body: dict, vocab_size: int) -> SamplingParams:
-    """Score-path params: pre-sampling logprobs over the full vocab.
-
-    The decode's sampling object is applied exactly as given (all four fields
-    are native SamplingParams knobs): they steer what the sampler draws and
-    never touch the reported logprobs, which are the raw logits' log-softmax.
-    No penalties are set, and the only logits processor that can appear is
-    min_tokens (EOS suppression under allow_eos=false), which changes which
-    token is sampled, never the reported raw logprobs.
+    """The decode's sampling object, applied exactly as given (all four
+    fields are native SamplingParams knobs): they steer what the sampler
+    draws and never touch the reported logprobs, which are the raw logits'
+    log-softmax. No penalties are set, and the only logits processor that
+    can appear is min_tokens (EOS suppression under allow_eos=false), which
+    changes which token is sampled, never the reported raw logprobs.
     """
-    if body["mode"] == "prefill":
-        return SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=vocab_size)
     sampling = _resolve_sampling(body)
     max_new_tokens = int(body["max_new_tokens"])
     allow_eos = bool(body.get("allow_eos", False))
@@ -372,6 +384,45 @@ def _raw_template_ids(video_path: str) -> list[int]:
         enable_thinking=False,
     )
     return list(processor.tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+_EXPANDED_CACHE: dict[str, list[int]] = {}
+
+
+def _expanded_template_ids(video_path: str) -> list[int]:
+    """The pinned prompt's EXPANDED ids, as the checkpoint's own HF processor
+    computes them for this video: the frame sampling and the per-frame
+    timestamp structure the engine expands the placeholder into, at the same
+    pins. Cached per video; a CPU pass of a second or two.
+
+    The V2 runner scores rows by absolute expanded position
+    (prompt_logprob_start), so the deployment must know the expanded length
+    before the request; the engine's own expansion is verified against it
+    after the request.
+    """
+    if video_path not in _EXPANDED_CACHE:
+        processor = _processor()
+        messages = [{"role": "user", "content": [
+            {"type": "video", "video": video_path},
+            {"type": "text", "text": VIDEO_PROMPT},
+        ]}]
+        video = processor(
+            text=[processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )],
+            videos=[[video_path]],
+            fps=VIDEO_FPS,
+            # The same pin _video_prompt hands the engine: without it the
+            # count matches only videos whose frames sit under the cap, and
+            # the engine's rows check rejects the start index for the rest.
+            cap_pixels_per_frame=CAP_PIXELS_PER_FRAME,
+            return_tensors=None,
+        )
+        _EXPANDED_CACHE[video_path] = list(map(int, video["input_ids"][0]))
+    return _EXPANDED_CACHE[video_path]
 
 
 def _video_prompt(ids: list[int], video_path: str) -> TokensPrompt:
@@ -526,33 +577,67 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     out_dir = Path(body["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # The prompt rows cover the whole expanded prompt (the frozen template's
+    # image block plus the ids the request carried); the rows the family
+    # keeps are the tail: the classic n - 1, or the last n_rows when the
+    # request trims (the OCR replay keeps only the rows over the
+    # generated ids).
+    n = len(transcript)
+    keep = int(body.get("n_rows", 0)) or n - 1
+    if keep >= n:
+        raise ValueError(f"n_rows {keep} asks for more rows than {n} ids can predict")
+
     request_id = f"{SCORE_PREFIX}{uuid.uuid4().hex}"
-    params = _sampling_params(body, vocab_size)
+    # Tail-only scoring: the V2 runner scores the last `keep` causal rows
+    # against the full vocabulary in natural order, keeping [rows, vocab]
+    # ids, mask and scores on the GPU (~3.1 MiB per row) from the first
+    # chunk to the last. The cost is bounded by the tail, not the prompt:
+    # no top-k, no full-prompt pinned buffer.
+    if keep > V2_TAIL_SEGMENT_ROWS:
+        raise ValueError(
+            f"n_rows {keep} exceeds the unsegmented tail cap "
+            f"{V2_TAIL_SEGMENT_ROWS}; segmentation lands with the "
+            "measured segment size"
+        )
+    video_path = body["attachments"][VIDEO]
+    raw_len = len(_raw_template_ids(video_path))
+    expanded_n = (
+        len(_expanded_template_ids(video_path)) + len(transcript) - raw_len
+    )
+    params = SamplingParams(
+        max_tokens=1,
+        temperature=1.0,
+        prompt_logprob_token_ids=np.tile(
+            np.arange(vocab_size, dtype=np.int64), (keep, 1)
+        ),
+        prompt_logprob_start=expanded_n - 1 - keep,
+    )
+    started = time.monotonic()
     try:
         final = None
         async for output in engine.generate(prompt, params, request_id):
             final = output
         if final is None or not final.finished:
             raise RuntimeError("the engine ended the request without finishing it")
-        processor = _pop_sink(request_id)
     finally:
         _pop_sink(request_id)
-    if processor is None:
+    engine_s = time.monotonic() - started
+    # The engine's own expansion must match the processor-computed one,
+    # or the start index scored the wrong rows.
+    expanded_actual = len(final.prompt_token_ids or ())
+    if expanded_actual != expanded_n:
         raise RuntimeError(
-            "no logprob tap for the request; the V1 LogprobsProcessor patch did not run"
+            f"the engine expanded the prompt to {expanded_actual} ids, "
+            f"the processor computed {expanded_n}; the start index "
+            "cannot be trusted"
         )
-
-    # The prompt rows cover the whole expanded prompt (the frozen template's
-    # image block plus the ids the request carried); the rows the family
-    # keeps are the tail: the classic n - 1, or the last n_rows when the
-    # request trims (the OCR replay keeps only the rows over the
-    # generated ids).
-    all_rows = _prompt_rows(processor, vocab_size)
-    n = len(transcript)
-    keep = int(body.get("n_rows", 0)) or n - 1
-    if keep >= n:
-        raise ValueError(f"n_rows {keep} asks for more rows than {n} ids can predict")
-    log_probs = np.ascontiguousarray(all_rows[-keep:])
+    rows = getattr(final, "prompt_token_id_logprobs", None)
+    if rows is None:
+        raise RuntimeError(
+            "the V2 runner returned no prompt_token_id_logprobs; the "
+            "tap passthrough did not run"
+        )
+    log_probs = np.ascontiguousarray(rows, dtype=np.float32)
     _check_well_formed(log_probs)
 
     np.save(out_dir / "log_probs.npy", log_probs, allow_pickle=False)
@@ -563,6 +648,11 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
         out_dir / "input_ids.npy",
         np.ascontiguousarray(np.asarray(transcript, dtype=np.int32)),
         allow_pickle=False,
+    )
+    print(
+        f"[kot-vllm-mllm] prefill {body['prompt_id']}: ids {n}, keep {keep}, "
+        f"engine {engine_s:.1f}s, rows {time.monotonic() - started - engine_s:.1f}s",
+        flush=True,
     )
     return {
         "prompt_id": body["prompt_id"],
@@ -659,12 +749,14 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # hosts that do carry the toolkit.
     args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
     # The 52G of weights over two cards leave ~5G per card for the KV cache
-    # and the gather transient. The KV pool's floor is the 20,480-token
-    # window (measured ~66 KB per token per card at TP=2, hybrid page
-    # alignment), so 0.89 is the floor: 0.88 sizes the pool under the
-    # window and the engine refuses to boot. 0.89 leaves ~1 GiB of headroom
-    # for the 128-chunk gather; the speed profile runs 0.90.
-    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.89"))
+    # and the scoring transient. The V2 runner's own accounting is tighter
+    # than V1's: at 0.89 the available KV falls 20 MiB under the 20,480-token
+    # window (0.70 GiB available vs 0.72 needed) and the engine refuses to
+    # boot. 0.91 sizes the pool at 38,229 KV tokens and still leaves ~2.4 GiB
+    # free beside the pool - the V2 tail scoring needs at most ~3.1 MiB per
+    # row, so the 64-row replay costs ~0.2 GiB and even a 512-row segment
+    # fits.
+    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.91"))
     # KOT_VLLM_DTYPE exists for cross-checking numerics; a capture runs the
     # engine's own default ("auto": the checkpoint's dtype).
     dtype_override = os.environ.get("KOT_VLLM_DTYPE", "")
@@ -727,12 +819,10 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
                     media_type="application/x-ndjson",
                 )
             # A hard bound on the prefill body: past it, every thread's
-            # stack is dumped to the log and the process exits. The timer
-            # runs on its own C thread, independent of the event loop and
-            # the GIL, so it also covers a blocked loop and a wedged host;
-            # it is process-global, which is safe because score requests
-            # are serialized. A dead server with a named culprit beats a
-            # hung one.
+            # stack is dumped to the log and the process exits. The loop
+            # bound in _score answers 500 only while the event loop lives;
+            # this one also covers a blocked loop and a wedged host. A dead
+            # server with a named culprit beats a hung one.
             faulthandler.dump_traceback_later(REQUEST_TIMEOUT_S, exit=True)
             try:
                 return JSONResponse(await _score(engine, body, vocab_size))

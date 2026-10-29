@@ -58,18 +58,60 @@ KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
 The first boot compiles the engine; minutes. A warm compile cache makes the
 second boot faster.
 
+Two launch profiles. The defaults serve the capture surfaces (`/kot/score`),
+whose full-vocabulary gather sets the memory budget. Speed traffic requests
+no logprobs and has no gather transient, so the speed profile gives the
+engine back its chunking and its margin:
+
+```bash
+# speed profile (throughput): the API-server default chunk, the full pool
+KOT_VLLM_MAX_BATCHED_TOKENS=2048 KOT_VLLM_GPU_MEM=0.90 \
+  KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
+  ./kot_serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
+```
+
+The chunk size is part of the numerics: a chunked prefill splits the
+attention and GatedDeltaNet state passes at chunk boundaries, so rows
+produced at 128 need not be bit-identical to rows produced at 2048.
+`/kot/info` reports `max_num_batched_tokens`, so every capture carries its
+own.
+
 ### Parameters
 
 | variable | default | effect |
 |---|---|---|
 | `KOT_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
-| `KOT_VLLM_GPU_MEM` | `0.90` | `gpu_memory_utilization`; the weights take 82% of each card |
+| `KOT_VLLM_GPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under the 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
 | `KOT_VLLM_MAX_MODEL_LEN` | `20480` | the window: the ~12.4k-token video prompt plus the 4096-token decode |
-| `KOT_VLLM_MAX_BATCHED_TOKENS` | `1024` | the full-vocab logprob transient stays near 1 GB per chunk |
+| `KOT_VLLM_MAX_BATCHED_TOKENS` | `128` | the chunk size of every prefill. The full-vocab gather peaks at ~8 MiB of GPU tensors per chunk token at this vocabulary (~1 GiB at 128, ~8 GiB at 1024 - which OOMs beside the weights). Global: the speed profile overrides to 2048 |
 | `KOT_VLLM_MAX_NUM_SEQS` | `4` | the CUDA-graph profiling KV and the capture sizes scale with the concurrent-request count; the 256 API-server default on 32G cards OOMs boot |
+| `KOT_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
 | `KOT_VLLM_DTYPE` | unset | numeric cross-check override |
 | `KOT_VLLM_COMPILATION` | unset | `eager` disables CUDA graphs |
+
+### Host memory
+
+The V2 runner removed the V1 floor: no full-prompt pinned buffer, no
+full-prompt message, no top-k. The measured host peak during a replay is
+56.5 GiB against the container's 120.7 GiB limit (V1 needed ~122 GiB at the
+final relay and the cgroup OOM-killed the server). The deployment's own
+row processing is the blocked scatter over the kept tail only.
+
+### The V2 runner
+
+The launcher pins `VLLM_USE_V2_MODEL_RUNNER=1`. The replay scores only the
+tail rows against fixed token ids (`prompt_logprob_token_ids` +
+`prompt_logprob_start`): the engine keeps `[rows, vocab]` ids, mask and
+scores on the GPU at ~3.1 MiB per row from the first chunk to the last, so
+a tail above 512 rows must arrive in segments (each segment re-prefills
+the video); the 64-row probe replay completes in ~6 s end to end. The
+deployment computes the expanded prompt length through the checkpoint's
+own HF processor (cached per video) and verifies the engine's expansion
+against it, so the absolute start index cannot drift. The rows arrive
+already scattered, `[rows, vocab]` float32 in token-id order. The scores
+come from a Triton fp32 kernel, not torch `log_softmax`: expect different
+low-order bits from the V1 mechanism.
 
 ## Video contract
 
