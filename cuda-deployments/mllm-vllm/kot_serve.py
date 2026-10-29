@@ -249,6 +249,21 @@ def _decode_rows(entries: list, vocab_size: int) -> np.ndarray:
     return _scatter_full_vocab(token_ids, logprobs, vocab_size)
 
 
+def _refuse_occupied_out_dir(body: dict, out_dir: Path) -> None:
+    """A score request must not silently replace another run's rows.
+
+    The out_dir is client-named; two runs over the same directory would make
+    the second overwrite the first without a trace (it happened once during
+    the #31 gate: a reused request body pointed the candidate at the
+    golden's directory). Refuse unless the request names ``overwrite``.
+    """
+    if (out_dir / "log_probs.npy").exists() and not body.get("overwrite"):
+        raise ValueError(
+            f"out_dir already holds log_probs.npy ({out_dir}); send "
+            "\"overwrite\": true to replace it"
+        )
+
+
 def _check_well_formed(log_probs: np.ndarray) -> None:
     """log-softmax rows in float32: finite, and logsumexp 0 within float32 noise."""
     if not np.isfinite(log_probs).all():
@@ -469,6 +484,7 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
     video_path = body["attachments"][VIDEO]
     max_new_tokens = int(body["max_new_tokens"])
     out_dir = Path(body["out_dir"])
+    _refuse_occupied_out_dir(body, out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     request_id = f"{SCORE_PREFIX}{uuid.uuid4().hex}"
     raw_ids = _raw_template_ids(video_path)
@@ -579,6 +595,7 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
         raise ValueError(f"unknown mode {body['mode']!r}; the contract names prefill and decode")
     transcript = _score_transcript(body)
     out_dir = Path(body["out_dir"])
+    _refuse_occupied_out_dir(body, out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # The prompt rows cover the whole expanded prompt (the frozen template's
