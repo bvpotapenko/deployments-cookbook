@@ -150,10 +150,6 @@ The image part must be a data URI. The server decodes it itself and fetches no
 URLs. The text part is the instruction alone, and the server adds BOS, the
 image placeholder and the newline itself.
 
-```bash
-./smoke.sh /models/DeepSeek-OCR-2
-```
-
-The smoke drives the whole surface: a prefill twice, a decode under each EOS
-gate, the chat surface, and a decode-then-prefill round trip over the ids the
-decode wrote. It fails when the server log holds a token-drift line.
+The serve launcher's interpreter candidate list omits the box venv; export
+`KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python` when launching by
+hand.

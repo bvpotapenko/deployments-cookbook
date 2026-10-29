@@ -33,18 +33,24 @@ uv pip install --python /root/kotvenv-mllm/bin/python \
   torch==2.14.1 --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python /root/kotvenv-mllm/bin/python --no-deps \
   torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu130
-uv pip install --python /root/kotvenv-mllm/bin/python --no-deps torchcodec
+uv pip install --python /root/kotvenv-mllm/bin/python --no-deps \
+  torchcodec==0.17
 uv pip install --python /root/kotvenv-mllm/bin/python \
-  transformers==5.20.2 numpy pydantic pyyaml
+  transformers==5.20.2 accelerate numpy pydantic pyyaml pillow \
+  einops flash-linear-attention==0.2.2
 ```
 
 The torch build must carry sm_120; cu130 does. torchvision 0.29.x pairs
 with torch 2.14.x (0.28.x requires torch 2.13 and dies at import:
 `operator torchvision::nms does not exist`); `--no-deps` keeps the torch
-build untouched. torchcodec decodes the videos (torchvision's reader was
-removed in torchvision 0.26) and needs the host's FFmpeg 6 libraries. An
-existing venv with the same pins works: the launcher falls through to
-`/root/kotvenv/bin/python`.
+build untouched, so the recipe installs pillow itself. torchcodec decodes
+the videos (torchvision's reader was removed in torchvision 0.26) and
+needs the host's FFmpeg 6 libraries. accelerate is required by
+`device_map="auto"`. flash-linear-attention 0.2.2 and einops run the
+hybrid GatedDeltaNet layers as kernels; the reference PyTorch fallback
+OOMs a 32 GB card on a ~12.4k-token video prefill. The launcher falls
+through to `/root/kotvenv/bin/python` only if that venv carries the same
+stack.
 
 ### Layout
 
@@ -171,15 +177,21 @@ the same output.
 
 ## Check
 
-The smoke boots the deployment and drives both surfaces: a text decode and
-its replay prefill, then a video decode twice (byte-identity; the stored ids
-carry exactly one video placeholder), then the video replay twice
-(byte-identity).
+The identity surface answers with the engine's own facts:
 
 ```bash
-VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
-  KOT_MLLM_PYTHON=/root/kotvenv/bin/python \
-  ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
+curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+```
+
+The generation surface takes a video and writes its answer to `out_dir`:
+
+```bash
+curl -s http://127.0.0.1:8090/kot/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt_id": "probe", "out_dir": "/tmp/kot-probe",
+       "attachments": {"video": "/path/to/video.mp4"}}' \
+  | python3 -m json.tool
+cat /tmp/kot-probe/text.txt
 ```
 
 The startup line is the first check. It proves the model loaded, and it

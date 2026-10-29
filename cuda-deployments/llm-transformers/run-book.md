@@ -52,6 +52,10 @@ a torch without them stalls silently on these cards. The venv pins
 transformers 5.20.2. A different transformers line runs different attention
 kernels and computes different outputs.
 
+accelerate is not optional. The loader spreads a multi-card model's layers
+with `device_map="auto"`, and that call is accelerate's. DeepSeek-V2-Lite
+needs both cards; a venv without accelerate refuses the load at start.
+
 ### Layout
 
 ```text
@@ -111,8 +115,8 @@ retries with `attn_implementation="eager"`. On cuda the weights run bfloat16
 under sdpa, and `device_map="auto"` spreads the layers over every visible
 card. Set CUDA_VISIBLE_DEVICES to pin the card set.
 
-`smoke.sh` accepts KOT_PYTHON to name its interpreter. `kot_serve.sh` does
-not; its exec line is the fixed path above.
+`kot_serve.sh` runs a fixed interpreter, the exec path above; it accepts no
+override.
 
 ### Parameters
 
@@ -180,5 +184,4 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 
 The request's `model` field is ignored; the reply names the checkpoint the
 server loaded. A request without `max_tokens` generates 16 tokens; without
-sampling knobs it samples at temperature 1.0. The contract checks are
-`./smoke.sh /models/<model> cuda`: byte-identical double runs.
+sampling knobs it samples at temperature 1.0.

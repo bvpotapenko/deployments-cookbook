@@ -35,7 +35,7 @@ distribution of the scored positions where ``kot_server.py`` collects it.
   this build the scheduler's overlap prep calls the penalizer on a fresh
   zeros accumulator, and the non-overlap branch inside this very function
   calls it on logits that accumulator was already added to -- never on the
-  raw logits. Proven the hard way: a smoke decode stashed uniform rows
+  raw logits. Proven the hard way: a decode probe stashed uniform rows
   (log(1/vocab) everywhere; shape, logsumexp and byte-identity checks all
   pass on those), and a real capture stashed the model's rows carrying the
   ban's exact -inf at the EOS columns. Hooking one public wrapper is not
@@ -211,7 +211,7 @@ class _PatchOnLoadFinder:
 def _patch_log(message: str) -> None:
     """One line per patch event into the stash dir and onto stderr: the
     scheduler's env is curated, and its stderr reaches the server log, so a
-    smoke run shows patch events without the stash dir being mounted."""
+    run shows patch events even without the stash dir being mounted."""
     try:
         with open(os.path.join(STASH_DIR, "patched.log"), "a", encoding="utf-8") as log:
             log.write(message + "\n")
@@ -384,7 +384,7 @@ def _patch_sampling_batch_info(torch, module) -> None:
     In this build the penalizer is called on either the accumulator (a
     fresh zeros tensor, in the scheduler's overlap prep) or on logits that
     accumulator was already added to -- never on the raw logits -- so the
-    stash must not live there: a smoke decode stashed uniform rows
+    stash must not live there: a decode probe stashed uniform rows
     (log(1/vocab) everywhere), and a real capture stashed the model's rows
     carrying the ban's exact -inf at the EOS columns. A batch with penalties
     active is a scored decode -- only the score path sets min_new_tokens --

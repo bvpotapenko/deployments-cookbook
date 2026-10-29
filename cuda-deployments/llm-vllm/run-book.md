@@ -144,13 +144,13 @@ full-vocabulary top-k of the log-probability pass dies out of memory
 (verified on the 0.32 line: 0.70 leaves 803 MB free where the top-k over
 a 1024-token chunk needs about 1 GB). A lower setting falls under the
 per-card weights, 14.65 GB. `KOT_VLLM_MAX_MODEL_LEN=16384` shrinks the
-engine's KV floor from 163,840 tokens to a few hundred MB, and every kot
-workload stays under 16k tokens. The smoke needs the same memory
-setting:
+engine's KV floor from 163,840 tokens to a few hundred MB, and every
+workload here stays under 16k tokens. The same memory setting serves every
+launch of this model:
 
 ```bash
 KOT_VLLM_GPU_MEM=0.60 KOT_VLLM_MAX_MODEL_LEN=16384 \
-  ./smoke.sh /models/DeepSeek-V2-Lite cuda
+  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 ### state-spaces/mamba-2.8b-hf
@@ -191,5 +191,4 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 ```
 
 The `model` field must equal one of the aliases the server prints in its
-log (`/kot/info` names them: the checkpoint id and the weights path). The contract checks are
-`./smoke.sh /models/<model> cuda`: byte-identical double runs.
+log (`/kot/info` names them: the checkpoint id and the weights path).

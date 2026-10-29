@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import os
 import sys
@@ -370,8 +371,11 @@ def _video_prompt(ids: list[int], video_path: str) -> TokensPrompt:
     processor = _processor()
     frames, metadata = processor.video_processor.fetch_videos(
         video_path,
-        sample_indices_fn=lambda meta: processor.video_processor.sample_frames(
-            metadata=meta, fps=VIDEO_FPS
+        # The same hook the reference builds for itself: the sampler takes
+        # metadata by keyword and absorbs extra kwargs, so no parameter
+        # name to get wrong.
+        sample_indices_fn=functools.partial(
+            processor.video_processor.sample_frames, fps=VIDEO_FPS
         ),
     )
     if not isinstance(frames, np.ndarray):
@@ -609,15 +613,20 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # One video per request.
     args.limit_mm_per_prompt = {"video": 1}
     # The video units run ~12.4k-token prompts (the checkpoint's own pixel
-    # budget) plus a 4096-token decode; the window covers both. It also
-    # sizes the minimal KV vLLM allocates for CUDA-graph profiling - a
-    # 32768 window wants 6.12 GiB of profile KV beside 25.8G of weights and
-    # OOMs a 32G card at boot; 20480 fits.
+    # budget) plus a 4096-token decode; the window covers both.
     args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "20480"))
     # The full-vocab prompt-logprob tap streams [chunk, 248320] fp32 per
     # chunk; 1024 tokens per chunk keeps the transient near 1 GB beside the
     # weights (26G per card at TP=2).
     args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "1024"))
+    # The contract serves one request at a time. vLLM's API-server default
+    # on a 32G card is 256, and the temporary KV vLLM allocates for
+    # CUDA-graph profiling is sized by the request count, not the window:
+    # one block per min(max_num_seqs, max_cudagraph_capture_size). A hybrid
+    # block holds a full GatedDeltaNet state per sequence, so 256 asked for
+    # 6.12 GiB beside 25.8G of weights and OOMed boot; 4 drops the profile
+    # cache to ~0.1 GiB.
+    args.max_num_seqs = int(os.environ.get("KOT_VLLM_MAX_NUM_SEQS", "4"))
     args.max_logprobs = 1_000_000
     args.enable_prefix_caching = False
     args.disable_log_requests = True
@@ -738,6 +747,15 @@ def main() -> int:
     async def run() -> None:
         async with build_async_engine_client(args) as engine:
             model_config = engine.vllm_config.model_config
+            # hf_config here is the multimodal wrapper: Qwen3_5Config nests
+            # the vocab size in its text config, so the flat read crashed
+            # the boot. get_vocab_size() is the engine's own resolver - the
+            # same source its logits width uses - and answers 0 when the
+            # field is missing; a 0 would fail much later, in confusing
+            # ways, so it fails here instead.
+            vocab_size = model_config.get_vocab_size()
+            if vocab_size <= 0:
+                raise RuntimeError("the engine resolved a vocab size of 0")
             info = {
                 "contract_version": CONTRACT_VERSION,
                 "model_id": model_id,
@@ -746,14 +764,12 @@ def main() -> int:
                 "engine": f"vllm {vllm.__version__}",
                 "dtype": str(model_config.dtype).removeprefix("torch."),
                 "device": cli.device,
-                "vocab_size": int(model_config.hf_config.vocab_size),
+                "vocab_size": vocab_size,
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             # Routes and middleware go on before init_app_state: it starts the
             # app, and Starlette refuses middleware on a started application.
-            _register_kot_routes(
-                app, engine, int(model_config.hf_config.vocab_size), info
-            )
+            _register_kot_routes(app, engine, vocab_size, info)
             await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
             print(f"[kot-vllm-ocr] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(

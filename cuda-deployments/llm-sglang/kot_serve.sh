@@ -36,12 +36,11 @@ fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The interpreter that has sglang. The CUDA host names its engine venv with
-# KOT_SGLANG_PYTHON; the CPU smoke runs inside the repo's .venv-smoke.
+# KOT_SGLANG_PYTHON.
 PYTHON_CANDIDATES=(
   "${KOT_SGLANG_PYTHON:-}"
   "$HERE/.venv/bin/python"
   "$HERE/.venv-cuda/bin/python"
-  "$HERE/../.venv-smoke/bin/python"
   "$(command -v python3 || true)"
 )
 PYTHON=""

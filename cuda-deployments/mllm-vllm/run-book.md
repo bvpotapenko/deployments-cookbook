@@ -64,8 +64,9 @@ second boot faster.
 |---|---|---|
 | `KOT_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
 | `KOT_VLLM_GPU_MEM` | `0.90` | `gpu_memory_utilization`; the weights take 82% of each card |
-| `KOT_VLLM_MAX_MODEL_LEN` | `20480` | also sizes the minimal KV of the CUDA-graph profiling; a larger window OOMs boot |
+| `KOT_VLLM_MAX_MODEL_LEN` | `20480` | the window: the ~12.4k-token video prompt plus the 4096-token decode |
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `1024` | the full-vocab logprob transient stays near 1 GB per chunk |
+| `KOT_VLLM_MAX_NUM_SEQS` | `4` | the CUDA-graph profiling KV and the capture sizes scale with the concurrent-request count; the 256 API-server default on 32G cards OOMs boot |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
 | `KOT_VLLM_DTYPE` | unset | numeric cross-check override |
 | `KOT_VLLM_COMPILATION` | unset | `eager` disables CUDA graphs |
@@ -106,15 +107,10 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-The contract checks are the smoke:
-
-```bash
-VIDEO=/workspace/kot/kot_store/inputs/videos/v1/video_430.mp4 \
-  KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
-  ./smoke.sh /models/Qwen/Qwen3.8-27B cuda
-```
-
-The smoke drives a video decode twice (byte-identity; the stored ids carry
-exactly one video placeholder), the replay twice, the teacher-forced
-acceptance against the reference golden's own rows for the same unit
-(median renyi_inf reported), and the /kot/infer speed surface.
+The default boot OOMed engine init on 2x RTX 5090 until the
+`KOT_VLLM_MAX_NUM_SEQS` pin landed (issue #24): the temporary KV of the
+CUDA-graph profiling scales with the concurrent-request count, not with the
+window, and the 256 API-server default asked for 6.12 GiB beside the weights.
+The engine boots without `eager`. `/kot/info` reads the vocab size through
+the engine's own resolver (issue #25): the multimodal wrapper configs nest it
+in their text config, and the flat read crashed the boot after init.

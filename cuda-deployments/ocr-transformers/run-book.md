@@ -161,14 +161,14 @@ it through the real sampler path.
 
 ## Check
 
-This deployment serves no chat route. The by-hand check is the smoke. It
-teacher-forces one transcript over one image twice, decodes under both stop
-gates, and prints PASS/FAIL lines for shape, dtype and byte-identity.
+This deployment serves no chat route. The identity surface answers with the
+engine's own facts:
 
 ```bash
-IMAGE=/path/to/document.png ./smoke.sh /models/DeepSeek-OCR-2 cuda
+curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
 ```
 
-Any image serves. An image with one side above 768 px exercises the crop
-path. The model reads a grid of 768x768 tiles beside the padded global
-view. The image block grows by 144 tokens per tile.
+The score surface takes the frozen template ids and an image; `/kot/score`
+is the whole contract. Any image serves. An image with one side above 768 px
+exercises the crop path. The model reads a grid of 768x768 tiles beside the
+padded global view. The image block grows by 144 tokens per tile.

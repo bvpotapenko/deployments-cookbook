@@ -508,6 +508,28 @@ async def kot_infer(engine, body: dict, lock: asyncio.Lock) -> dict:
     return {"prompt_id": body["prompt_id"], "files": ["text.txt"]}
 
 
+def _resolve_identity(model_dir: str) -> tuple[str, str]:
+    """(model_id, revision) as provenance, from the weights themselves.
+
+    A weights directory does not name its hub id; ``_name_or_path`` in
+    config.json usually does. KOT_MODEL_ID / KOT_MODEL_REVISION override both.
+    """
+    override_id = os.environ.get("KOT_MODEL_ID", "")
+    override_revision = os.environ.get("KOT_MODEL_REVISION", "")
+    if override_id:
+        return override_id, override_revision
+    model_id = Path(model_dir).name
+    revision = ""
+    config_path = Path(model_dir) / "config.json"
+    if config_path.is_file():
+        config = json.loads(config_path.read_text(encoding=UTF8))
+        name_or_path = str(config.get("_name_or_path", ""))
+        if "/" in name_or_path:
+            model_id = name_or_path
+        revision = str(config.get("_commit_hash", "") or "")
+    return model_id, override_revision or revision
+
+
 class KotEngine:
     """What the endpoints need from the engine, named once."""
 
@@ -541,7 +563,11 @@ class KotEngine:
             # max_prefill_tokens * 1.5 MB and can go negative; and headroom
             # for the full-vocab logprob transient, which for a long prefill
             # at this vocabulary is multiple GB with chunking off by contract.
-            "mem_fraction_static": 0.45,
+            # The fraction must also cover the weights per card and the
+            # hybrid state cache: the 52G model at TP=2 holds 26G per card,
+            # and 0.45 of a 32G card starves the budget before the cache is
+            # sized. KOT_SGLANG_MEM_FRACTION overrides for models that big.
+            "mem_fraction_static": float(os.environ.get("KOT_SGLANG_MEM_FRACTION", "0.45")),
             "log_level": "info",
         }
         if is_cuda:

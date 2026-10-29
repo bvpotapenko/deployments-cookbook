@@ -53,9 +53,8 @@ covers the 9k long prefill; lowers the KV floor), `KOT_VLLM_NPU_MEM`,
 bit-exact with compiled, so captures are legal either way), `KOT_NPU_IMAGE`,
 `KOT_OUT_MOUNTS`, `KOT_UID`.
 
-## Smoke / rebuild
+## Rebuild
 
-    ./smoke.sh /path/to/weights [npu]     # info + 2x prefill + 2x decode + determinism + stream probe
     ./make_wheels.sh                      # rebuild wheels/ from wheels-requirements.txt (rerun until counts match)
 
 ## Verified results (Qwen3-0.6B, one 910B2)

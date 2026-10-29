@@ -17,7 +17,7 @@ first suspect when a comparison fails.
 |---|---|---|---|---|---|
 | Qwen/Qwen3-0.6B | `c1899de289a04d12100db370d81485cdf75e47ca` | 1 | 0.45 | 8192 | temperature 0.6, top_p 0.95, top_k 20 |
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.70 | 12288 | temperature 0.3, top_p 0.95 |
-| state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | not supported | | | |
+| state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | default | default | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
 One stack serves every model: CPython 3.12, sglang 0.5.22, torch 2.14.1,
 sglang-kernel 0.4.9, flashinfer-python 0.7.1 and transformers 5.19.0, the
@@ -160,26 +160,30 @@ KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
 Both variables are required. A lower memory fraction leaves the KV pool below
 the per-card weight size, 14.65 GB, and the engine refuses to start. A
 smaller prefill window rejects the longest workload prompt, about 8.5k ids.
-The smoke needs the same variables plus the two interpreters:
+The same variables serve every launch of this model:
 
 ```bash
-KOT_PYTHON=/root/kotvenv/bin/python \
-KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
 KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
-  ./smoke.sh /models/DeepSeek-V2-Lite cuda
+  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 ### state-spaces/mamba-2.8b-hf
 
-The engine cannot serve this model. Serving it needs the `mamba_ssm` and
-`causal-conv1d` CUDA kernel packages. Building them against torch 2.14.1
-fails with a ptx version error when the nvcc toolchain mixes CUDA component
-versions. All nvcc components must come from one CUDA version.
+This model runs on one card at the deployment defaults. The 0.5.22 line
+needs no kernel build: the mamba kernels are in-tree triton, and the model
+chain imports no `mamba_ssm` or `causal-conv1d`. The patch layer caps the
+persistent matmul's pipeline stages on sm_120 (commit 4639952); the
+uncapped kernel needs more shared memory than the card has.
+
+One wall stayed open when the last box's rent ended: the warmup generation
+died with a device-side assert at the embedding (`unquant.py`), the
+sampler drawing a token id from the padded vocab region. The cause sits
+engine-side; no deployment knob reaches it. Retry on the current box
+before trusting this engine for the model.
 
 ## Check
 
-One curl per model, each carrying its table row's sampling. mamba-2.8b-hf
-has no launch on this engine.
+One curl per model, each carrying its table row's sampling.
 
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
@@ -197,9 +201,17 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
        "max_tokens": 50,
        "temperature": 0.3, "top_p": 0.95}' \
   | python3 -m json.tool
+
+curl -s http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "mamba-2.8b-hf",
+       "messages": [{"role": "user", "content": "ping"}],
+       "max_tokens": 50,
+       "temperature": 0.7, "top_p": 0.9,
+       "repetition_penalty": 1.2}' \
+  | python3 -m json.tool
 ```
 
 The request's `model` field is ignored. The response names the identity the
 server derived from the weights path. A hub-cache snapshot gives `org/name`.
-A flat directory gives its basename. The contract checks are
-`./smoke.sh /models/<model> cuda`: byte-identical double runs.
+A flat directory gives its basename.

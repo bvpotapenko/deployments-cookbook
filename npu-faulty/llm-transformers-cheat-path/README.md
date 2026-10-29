@@ -121,16 +121,11 @@ other spikes cover those engines.
   concurrent timing), the process context stays dead -- every later request
   answers 500 until restart. The device itself recovers.
 
-## Smoke
+## Run without hardware
 
-    ./smoke.sh /path/to/weights [device]     # device defaults to npu
-
-Starts the server, scores one prefill and one decode twice, and checks
-shape, dtype, logsumexp ~ 0, verbatim ids, and byte-identity. On a machine
-with neither torch_npu nor docker, run `serve.py` under `uv` directly (the
-CPU smoke that verified this deployment ran:
+On a machine with neither torch_npu nor docker, run `serve.py` under `uv`
+directly:
 
     uv run --with torch --with transformers --with accelerate \
       --with safetensors --with numpy \
       python serve.py --port P --model <snapshot> --device cpu
-).

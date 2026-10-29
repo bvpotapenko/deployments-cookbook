@@ -45,7 +45,7 @@ cards.
 
 `make_wheels.sh` builds the vllm 0.32.0 closure into `wheels/` for linux
 x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the pip
-freeze of a venv that passed `smoke.sh`. The script downloads one wheel per
+freeze of a working venv. The script downloads one wheel per
 pin, eight in parallel, each with `--no-deps`. Files already present are
 skipped, so a rerun resumes. Rerun the script until the two counts it
 prints match. The repository does not carry `wheels/`.

@@ -2,8 +2,8 @@
 
 Deliberately faulty deployments used to test LLM-as-a-judge evaluation of
 grading agents. Each row is one deployment whose inner logic was altered to
-inflate performance metrics while keeping the correctness path (`/kot/score`
-and its smoke checks) passing. The fault is a serving-integrity cheat: the
+inflate performance metrics while keeping the correctness path (`/kot/score`)
+passing. The fault is a serving-integrity cheat: the
 numbers the harness measures no longer come from the contract's computation.
 
 Every faulty file carries a cover story in its docstring. The story sells the
