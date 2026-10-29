@@ -103,15 +103,23 @@ row processing is the blocked scatter over the kept tail only.
 The launcher pins `VLLM_USE_V2_MODEL_RUNNER=1`. The replay scores only the
 tail rows against fixed token ids (`prompt_logprob_token_ids` +
 `prompt_logprob_start`): the engine keeps `[rows, vocab]` ids, mask and
-scores on the GPU at ~3.1 MiB per row from the first chunk to the last, so
-a tail above 512 rows must arrive in segments (each segment re-prefills
-the video); the 64-row probe replay completes in ~6 s end to end. The
-deployment computes the expanded prompt length through the checkpoint's
-own HF processor (cached per video) and verifies the engine's expansion
-against it, so the absolute start index cannot drift. The rows arrive
-already scattered, `[rows, vocab]` float32 in token-id order. The scores
-come from a Triton fp32 kernel, not torch `log_softmax`: expect different
-low-order bits from the V1 mechanism.
+scores on the GPU at ~3.08 MiB per row from the first chunk to the last,
+so a long tail arrives as segments of at most `KOT_VLLM_REPLAY_SEGMENT_ROWS`
+(default 256: the measured 2,431 MiB free with a request in flight shrinks
+by ~3.08 MiB per tail row, and the video encoder asks up to ~1.2 GiB more
+during the prefill - 640 rows OOMs it, measured; a 4,096-row tail is 16
+segments). Each segment re-feeds the prompt and the video, cut off right after its last scored token -
+causality makes the cut exact. Segment boundaries change the last chunk's
+shapes, so replay rows are reproducible only at a fixed segment size;
+`/kot/info` reports both the chunk size and the segment size, and every
+capture carries its own. The 64-row probe replay completes in ~6 s end to
+end. The deployment computes the expanded prompt length through the
+checkpoint's own HF processor (cached per video, the same pins including
+the per-frame pixel cap) and verifies the engine's expansion against it,
+so the absolute start index cannot drift. The rows arrive already
+scattered, `[rows, vocab]` float32 in token-id order. The scores come from
+a Triton fp32 kernel, not torch `log_softmax`: expect different low-order
+bits from the V1 mechanism.
 
 ## Video contract
 

@@ -154,10 +154,17 @@ SINKS: dict[str, LogprobsProcessor] = {}
 # token-id order - already scattered, no permutation to undo.
 
 # The GPU holds [rows, vocab] ids, mask and scores for the whole tail from
-# the first chunk to the last (~3.1 MiB per row at this vocabulary), so a
-# tail above this cap must arrive in segments. Provisional until the free
-# GPU memory is measured with a scoring request in flight.
-V2_TAIL_SEGMENT_ROWS = 512
+# the first chunk to the last (~3.08 MiB per row at this vocabulary), so a
+# long tail arrives as several requests of at most this many rows. Fixed,
+# not derived: segment boundaries change the last chunk's shapes, so rows
+# are reproducible only at a fixed segment size. The budget: the measured
+# free memory with a 64-row request in flight is 2,431 MiB, and every row
+# above 64 takes another ~3.08 MiB, so free_at_N = 2431 - (N-64) x 3.08 MiB.
+# The video encoder asks up to ~1.2 GiB more during the prefill (measured:
+# 640 rows OOM it - a 1.19 GiB allocation fails with ~0.66 GiB left), so
+# 256 rows keeps ~1.8 GiB free: the transient fits with margin. The env
+# override is for experiments; captures run at the default.
+REPLAY_SEGMENT_ROWS = int(os.environ.get("KOT_VLLM_REPLAY_SEGMENT_ROWS", "256"))
 
 
 def _install_logprobs_tap() -> None:
@@ -325,15 +332,15 @@ def _line(message: dict) -> str:
     return json.dumps(message) + "\n"
 
 
-def _score_prompt(body: dict) -> tuple[TokensPrompt, list[int]]:
-    """The replay prefill as an engine prompt: the stored ids verbatim, plus
-    the video.
+def _score_transcript(body: dict) -> list[int]:
+    """The replay's stored ids, validated: the raw rendered template plus the
+    generated tail, verbatim.
 
     The stored ids are the raw rendered template plus the generated ids; the
-    head is asserted against the deployment's own rendering, then the ids
-    ride verbatim - the engine's multimodal processor expands the single
-    video placeholder into the per-frame timestamp structure it computes for
-    this video. The tail's ids sit after the expansion and stay plain.
+    head is asserted against the deployment's own rendering. The engine's
+    multimodal processor expands the single video placeholder into the
+    per-frame timestamp structure it computes for this video. The tail's
+    ids sit after the expansion and stay plain.
     """
     video_path = body["attachments"][VIDEO]
     transcript = [int(token) for token in body["input_ids"]]
@@ -348,10 +355,7 @@ def _score_prompt(body: dict) -> tuple[TokensPrompt, list[int]]:
             "the stored ids' head is not this deployment's raw video template; "
             f"expected {len(raw)} ids, got {transcript[:8]}..."
         )
-    keep = int(body.get("n_rows", 0))
-    if not 0 < keep < len(transcript):
-        raise ValueError(f"n_rows {keep} out of range for {len(transcript)} stored ids")
-    return _video_prompt(transcript, video_path), transcript
+    return transcript
 
 
 _PROCESSOR_CACHE: object = None
@@ -573,7 +577,7 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     """A prefill answer: one forward pass, both files written, one JSON back."""
     if body["mode"] != "prefill":
         raise ValueError(f"unknown mode {body['mode']!r}; the contract names prefill and decode")
-    prompt, transcript = _score_prompt(body)
+    transcript = _score_transcript(body)
     out_dir = Path(body["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -587,57 +591,67 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     if keep >= n:
         raise ValueError(f"n_rows {keep} asks for more rows than {n} ids can predict")
 
-    request_id = f"{SCORE_PREFIX}{uuid.uuid4().hex}"
-    # Tail-only scoring: the V2 runner scores the last `keep` causal rows
+    # Tail-only scoring in segments: the V2 runner scores rows [A, B)
     # against the full vocabulary in natural order, keeping [rows, vocab]
     # ids, mask and scores on the GPU (~3.1 MiB per row) from the first
-    # chunk to the last. The cost is bounded by the tail, not the prompt:
-    # no top-k, no full-prompt pinned buffer.
-    if keep > V2_TAIL_SEGMENT_ROWS:
-        raise ValueError(
-            f"n_rows {keep} exceeds the unsegmented tail cap "
-            f"{V2_TAIL_SEGMENT_ROWS}; segmentation lands with the "
-            "measured segment size"
-        )
+    # chunk to the last. Row r predicts token r+1, so a segment sends the
+    # transcript cut off right after token B: the prompt and the video are
+    # re-fed in full every time, the cost is bounded by the segment, not
+    # the prompt - no top-k, no full-prompt pinned buffer. Causality makes
+    # the cut exact: tokens after B+1 never touch rows below B.
     video_path = body["attachments"][VIDEO]
-    raw_len = len(_raw_template_ids(video_path))
-    expanded_n = (
-        len(_expanded_template_ids(video_path)) + len(transcript) - raw_len
-    )
-    params = SamplingParams(
-        max_tokens=1,
-        temperature=1.0,
-        prompt_logprob_token_ids=np.tile(
-            np.arange(vocab_size, dtype=np.int64), (keep, 1)
-        ),
-        prompt_logprob_start=expanded_n - 1 - keep,
-    )
+    raw_ids = _raw_template_ids(video_path)
+    expanded_template = len(_expanded_template_ids(video_path))
+    tail = transcript[len(raw_ids):]
+    expanded_n = expanded_template + len(tail)
+    first_row = expanded_n - 1 - keep
+    row_blocks = []
     started = time.monotonic()
-    try:
-        final = None
-        async for output in engine.generate(prompt, params, request_id):
-            final = output
-        if final is None or not final.finished:
-            raise RuntimeError("the engine ended the request without finishing it")
-    finally:
-        _pop_sink(request_id)
+    for a in range(first_row, first_row + keep, REPLAY_SEGMENT_ROWS):
+        b = min(a + REPLAY_SEGMENT_ROWS, first_row + keep)
+        cut = list(transcript[: len(raw_ids) + (b - expanded_template + 1)])
+        segment_id = f"{SCORE_PREFIX}{uuid.uuid4().hex}"
+        params = SamplingParams(
+            max_tokens=1,
+            temperature=1.0,
+            prompt_logprob_token_ids=np.tile(
+                np.arange(vocab_size, dtype=np.int64), (b - a, 1)
+            ),
+            prompt_logprob_start=a,
+        )
+        try:
+            final = None
+            async for output in engine.generate(
+                _video_prompt(cut, video_path), params, segment_id
+            ):
+                final = output
+            if final is None or not final.finished:
+                raise RuntimeError("the engine ended the request without finishing it")
+        finally:
+            _pop_sink(segment_id)
+        # The engine's own expansion must match the processor-computed one,
+        # or the start index scored the wrong rows. The cut expands to
+        # exactly B + 1 ids: the template plus the tail through token B.
+        expanded_actual = len(final.prompt_token_ids or ())
+        if expanded_actual != b + 1:
+            raise RuntimeError(
+                f"the engine expanded the segment prompt to {expanded_actual} ids, "
+                f"the processor computed {b + 1}; the start index cannot be trusted"
+            )
+        rows = getattr(final, "prompt_token_id_logprobs", None)
+        if rows is None:
+            raise RuntimeError(
+                "the V2 runner returned no prompt_token_id_logprobs; the "
+                "tap passthrough did not run"
+            )
+        row_blocks.append(np.asarray(rows, dtype=np.float32))
     engine_s = time.monotonic() - started
-    # The engine's own expansion must match the processor-computed one,
-    # or the start index scored the wrong rows.
-    expanded_actual = len(final.prompt_token_ids or ())
-    if expanded_actual != expanded_n:
+    log_probs = np.ascontiguousarray(np.concatenate(row_blocks), dtype=np.float32)
+    if log_probs.shape[0] != keep:
         raise RuntimeError(
-            f"the engine expanded the prompt to {expanded_actual} ids, "
-            f"the processor computed {expanded_n}; the start index "
-            "cannot be trusted"
+            f"the segments produced {log_probs.shape[0]} rows for a requested "
+            f"{keep}; the tail is incomplete"
         )
-    rows = getattr(final, "prompt_token_id_logprobs", None)
-    if rows is None:
-        raise RuntimeError(
-            "the V2 runner returned no prompt_token_id_logprobs; the "
-            "tap passthrough did not run"
-        )
-    log_probs = np.ascontiguousarray(rows, dtype=np.float32)
     _check_well_formed(log_probs)
 
     np.save(out_dir / "log_probs.npy", log_probs, allow_pickle=False)
@@ -890,6 +904,10 @@ def main() -> int:
                 # so rows produced at one size need not be bit-identical to
                 # rows produced at another. Every capture carries its own.
                 "max_num_batched_tokens": args.max_num_batched_tokens,
+                # The segment size is numerics too: segment boundaries
+                # change the last chunk's shapes, so replay rows are
+                # reproducible only at a fixed segment size.
+                "replay_segment_rows": REPLAY_SEGMENT_ROWS,
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             # Routes and middleware go on before init_app_state: it starts the
