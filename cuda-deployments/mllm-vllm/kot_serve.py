@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import os
 import sys
@@ -370,8 +371,11 @@ def _video_prompt(ids: list[int], video_path: str) -> TokensPrompt:
     processor = _processor()
     frames, metadata = processor.video_processor.fetch_videos(
         video_path,
-        sample_indices_fn=lambda meta: processor.video_processor.sample_frames(
-            metadata=meta, fps=VIDEO_FPS
+        # The same hook the reference builds for itself: the sampler takes
+        # metadata by keyword and absorbs extra kwargs, so no parameter
+        # name to get wrong.
+        sample_indices_fn=functools.partial(
+            processor.video_processor.sample_frames, fps=VIDEO_FPS
         ),
     )
     if not isinstance(frames, np.ndarray):
