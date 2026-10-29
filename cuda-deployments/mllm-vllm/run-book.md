@@ -58,23 +58,18 @@ KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
 The first boot compiles the engine; minutes. A warm compile cache makes the
 second boot faster.
 
-Two launch profiles. The defaults serve the capture surfaces (`/kot/score`),
-whose full-vocabulary gather sets the memory budget. Speed traffic requests
-no logprobs and has no gather transient, so the speed profile gives the
-engine back its chunking and its margin:
-
-```bash
-# speed profile (throughput): the API-server default chunk, the full pool
-KOT_VLLM_MAX_BATCHED_TOKENS=2048 KOT_VLLM_GPU_MEM=0.90 \
-  KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
-  ./kot_serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
-```
+One launch profile serves both surfaces. Under the V2 runner the score path
+has no full-vocab gather, so the capture surfaces no longer need a small
+chunk: the API-server default (2048) fits the replay's memory budget with
+the same margin as 128 did, and capture and speed share chunk shapes.
+Measured at 2048: the 64-row probe replay completes in ~2.8 s engine time,
+the 4,096-row segmented replay in ~118 s wall, byte-identical across runs.
 
 The chunk size is part of the numerics: a chunked prefill splits the
 attention and GatedDeltaNet state passes at chunk boundaries, so rows
-produced at 128 need not be bit-identical to rows produced at 2048.
-`/kot/info` reports `max_num_batched_tokens`, so every capture carries its
-own.
+produced at one size need not be bit-identical to rows produced at another.
+`/kot/info` reports `max_num_batched_tokens` and `replay_segment_rows`, so
+every capture carries its own.
 
 ### Parameters
 
@@ -83,7 +78,8 @@ own.
 | `KOT_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
 | `KOT_VLLM_GPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under the 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
 | `KOT_VLLM_MAX_MODEL_LEN` | `20480` | the window: the ~12.4k-token video prompt plus the 4096-token decode |
-| `KOT_VLLM_MAX_BATCHED_TOKENS` | `128` | the chunk size of every prefill. The full-vocab gather peaks at ~8 MiB of GPU tensors per chunk token at this vocabulary (~1 GiB at 128, ~8 GiB at 1024 - which OOMs beside the weights). Global: the speed profile overrides to 2048 |
+| `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | the chunk size of every prefill, shared by capture and speed. The size is part of the numerics and is reported in `/kot/info` |
+| `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (a 4,096-row tail is 16 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
 | `KOT_VLLM_MAX_NUM_SEQS` | `4` | the CUDA-graph profiling KV and the capture sizes scale with the concurrent-request count; the 256 API-server default on 32G cards OOMs boot |
 | `KOT_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
@@ -150,7 +146,7 @@ sampling from `generation_config.json`:
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "Qwen/Qwen3.8-27B",
+  -d '{"model": "Qwen3.8-27B",
        "messages": [{"role": "user", "content": "ping"}],
        "max_tokens": 50,
        "temperature": 1.0, "top_p": 0.95, "top_k": 20}' \

@@ -730,14 +730,12 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # The video units run ~12.4k-token prompts (the checkpoint's own pixel
     # budget) plus a 4096-token decode; the window covers both.
     args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "20480"))
-    # The full-vocab prompt-logprob tap streams [chunk, 248320] fp32 per
-    # chunk. At k = vocab_size the gather chain (logits, log_softmax, topk
-    # values, int64 topk indices, the two cat tensors, the int32 copy)
-    # peaks at ~8 MiB of GPU tensors per chunk token beside the weights
-    # (25.64 GiB per card at TP=2): ~8 GiB at 1024, ~1 GiB at 128. 128 is
-    # the capture default; the speed profile overrides it (speed traffic
-    # requests no logprobs and has no gather transient).
-    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "128"))
+    # The chunk size of every prefill. Under the V2 runner the score path
+    # has no full-vocab gather, so the #29 budget that forced 128 is void:
+    # 2048 is vLLM's API-server default for this card class and serves both
+    # surfaces with one profile, so capture and speed share chunk shapes.
+    # The size is still part of the numerics - it is reported in /kot/info.
+    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "2048"))
     # The contract serves one request at a time. vLLM's API-server default
     # on a 32G card is 256, and the temporary KV vLLM allocates for
     # CUDA-graph profiling is sized by the request count, not the window:
