@@ -59,9 +59,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import functools
 import json
 import os
+import signal
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -124,6 +126,15 @@ VIDEO_FPS = 2.0
 CAP_PIXELS_PER_FRAME = True
 
 SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
+
+# A stall bound for the score body: past it, the faulthandler watchdog
+# dumps every thread's stack to the log and exits the process. A dead
+# server with a named culprit beats a hung one.
+REQUEST_TIMEOUT_S = float(os.environ.get("KOT_VLLM_REQUEST_TIMEOUT", "1800"))
+
+# A stack of every thread, on demand, without ptrace (the serving container
+# denies it): `kill -USR1 <pid>` and the log answers.
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 # request_id -> the LogprobsProcessor vLLM built for it, carrying our stashed
 # raw tensors. Only score requests (SCORE_PREFIX) are registered.
@@ -715,7 +726,18 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
                     _decode_stream(engine, body, vocab_size),
                     media_type="application/x-ndjson",
                 )
-            return JSONResponse(await _score(engine, body, vocab_size))
+            # A hard bound on the prefill body: past it, every thread's
+            # stack is dumped to the log and the process exits. The timer
+            # runs on its own C thread, independent of the event loop and
+            # the GIL, so it also covers a blocked loop and a wedged host;
+            # it is process-global, which is safe because score requests
+            # are serialized. A dead server with a named culprit beats a
+            # hung one.
+            faulthandler.dump_traceback_later(REQUEST_TIMEOUT_S, exit=True)
+            try:
+                return JSONResponse(await _score(engine, body, vocab_size))
+            finally:
+                faulthandler.cancel_dump_traceback_later()
         except Exception as failure:  # any failure is the deployment's answer
             import traceback
 

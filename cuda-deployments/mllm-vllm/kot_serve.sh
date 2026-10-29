@@ -75,4 +75,9 @@ PY="$(find_python)"
 echo "[kot-vllm-mllm] python: $PY" >&2
 "$PY" -c "import vllm; assert vllm.__version__ == '$VLLM_PIN', vllm.__version__" >&2
 
+# The serve log is a file: block-buffered stdout would swallow diagnostics
+# while the process hangs. The faulthandler dump and the phase prints must
+# reach the log as they happen.
+export PYTHONUNBUFFERED=1
+
 exec "$PY" "$DIR/kot_serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
