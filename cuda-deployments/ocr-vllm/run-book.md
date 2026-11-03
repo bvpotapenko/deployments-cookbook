@@ -44,8 +44,8 @@ own. A torch without Blackwell support dies at the first prefill on these
 cards.
 
 `make_wheels.sh` builds the vllm 0.32.0 closure into `wheels/` for linux
-x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the pip
-freeze of a working venv. The script downloads one wheel per
+x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the same
+closure as `llm-vllm`. The script downloads one wheel per
 pin, eight in parallel, each with `--no-deps`. Files already present are
 skipped, so a rerun resumes. Rerun the script until the two counts it
 prints match. The repository does not carry `wheels/`.
@@ -53,11 +53,21 @@ prints match. The repository does not carry `wheels/`.
 Without `KOT_PYTHON`, and with no ambient vllm, the launcher runs the
 offline install itself, into `KOT_VENV`.
 
+The speed harness runs in its own interpreter, not in this venv. It loads the
+tokenizer from the weights directory with `trust_remote_code=True`, and that
+imports the checkpoint's Python files. The server never imports them. Install
+what they import into the harness's interpreter. Without it the speed phase
+lands `speed_absent` with `No module named 'einops'`.
+
+```bash
+HARNESS_PY="$(dirname "$(readlink -f "$(command -v inference-endpoint)")")/python"
+uv pip install --python "$HARNESS_PY" einops addict matplotlib torch torchvision
+```
+
 ### Layout
 
 ```text
 /opt/engines/ocr-vllm     this directory
-  chat_template.jinja     the chat template; the checkpoint ships none
   kot_ngram.py            copied into the venv's site-packages at every start
   wheels/                 the offline closure, built by make_wheels.sh, not committed
 /models/DeepSeek-OCR-2    weights; a hub snapshot plus one patched file
@@ -155,12 +165,16 @@ The sampling temperature 0.0001 is near-greedy by design. Every decode
 runs through the engine's real sampler. The checkpoint's own recipe names
 0.0.
 
-The checkpoint's tokenizer ships no chat template. The deployment carries
-`chat_template.jinja` and applies it. The template renders the checkpoint's
-plain prompt format, the image placeholder first and the instruction after.
-The tokenizer adds BOS itself. Exactly one image rides a request.
+The checkpoint's tokenizer ships no chat template, and vLLM's fallback for its
+`model_type` adds role tags. The server names vLLM's own
+`template_deepseek_ocr.jinja` instead. It renders the checkpoint's plain prompt
+format: BOS, the image placeholder, a newline, the instruction. Exactly one
+image rides a request.
 
 ## Check
+
+The text path, the image path, then the tokenizer load the speed harness runs.
+`doc.png` is any document page.
 
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
@@ -170,9 +184,26 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
        "max_tokens": 8,
        "temperature": 0.0001, "top_p": 1.0}' \
   | python3 -m json.tool
+
+printf '{"model": "/models/DeepSeek-OCR-2",
+  "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "Free OCR."},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,%s"}}]}],
+  "max_completion_tokens": 64, "seed": 42,
+  "temperature": 0.0001, "top_p": 1.0, "return_token_ids": true}' \
+  "$(base64 -w0 doc.png)" \
+  | curl -s http://127.0.0.1:8090/v1/chat/completions \
+      -H 'Content-Type: application/json' -d @- \
+  | python3 -c 'import json, sys; r = json.load(sys.stdin); r["prompt_token_ids"] = r.get("prompt_token_ids", [])[:2]; print(json.dumps(r, indent=1))'
+
+HARNESS_PY="$(dirname "$(readlink -f "$(command -v inference-endpoint)")")/python"
+"$HARNESS_PY" -c "from transformers import AutoTokenizer; \
+AutoTokenizer.from_pretrained('/models/DeepSeek-OCR-2', trust_remote_code=True)"
 ```
+
+The image answer carries the page's text, and `prompt_token_ids` starts
+`[0, 128815]`: BOS, then the image placeholder. The tokenizer load exits 0
+without a traceback.
 
 The `model` field accepts the weights path and the identity the server
 prints at startup. The identity comes from the checkpoint's `config.json`.
-A bare text prompt carries no image. A document request carries the image
-as one `image_url` data-URI part.
