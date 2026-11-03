@@ -3,7 +3,9 @@
 This deployment serves Qwen/Qwen3.8-27B with SGLang 0.5.22. The model runs
 the native `qwen3_5` architecture (the multimodal path inherits Qwen3-VL);
 the units are short videos. One process serves the full-vocabulary
-log-probability surface over both cards, one request at a time.
+log-probability surface over both cards, one request at a time, and the chat
+surface beside it, concurrently and batched. The runner must not overlap the
+two: a score that shares a batch with chat traffic stashes their rows too.
 
 ## Model parameters
 
@@ -85,6 +87,8 @@ schedule=True` (the overlap scheduler's phantom decode row),
 transient beside the weights; the default 0.45 suits models whose weights
 fit under it),
 `max_prefill_tokens=16384`, `context_length=20480`,
+`mm_process_config` (fps 2.0 and the per-frame cap), `mm_processor_worker_num=2`
+(one worker runs the video pass on the event loop),
 `enable_deterministic_inference` and the triton attention backend on CUDA.
 
 ## Video contract
@@ -95,15 +99,17 @@ text "Describe what you see in the video.") and consumes ids verbatim from
 that render: the raw form (one video placeholder) on a decode, the raw form
 plus the generated tail on a replay, the head asserted.
 
-The video rides to the engine as `video_data` (the attachment path, fps 2.0);
-the engine's own multimodal processor samples the frames and expands the
-placeholder into the per-frame timestamp structure. The deployment also
-computes the expanded id count through the checkpoint's HF processor (the
-same pins) and guards every request on it: a retokenize fallback or a frame
-selection that disagrees with the reference fails the request instead of
-reading as numbers.
+The video rides to the engine as `video_data` (the attachment path). The
+engine's own frame step samples and resizes by rules of its own, so the patch
+layer replaces it: frames come from `Qwen3VLVideoProcessor.sample_frames` at
+fps 2.0, unresized, and the HF processor resizes them on the CPU with
+`cap_pixels_per_frame` true and expands the placeholder into the per-frame
+timestamp structure. The deployment also computes the expanded id count through
+the checkpoint's HF processor (the same pins) and guards every score request on
+it: a retokenize fallback or a frame selection that disagrees with the reference
+fails the request instead of reading as numbers.
 
-A video unit costs ~12.4k tokens (the checkpoint's own pixel budget:
+A video unit costs at most ~12.4k tokens (the checkpoint's own pixel budget:
 `longest_edge 25165824` per video). The stored rows are the pre-sampling
 distributions: the log-softmax of the raw logits, float32, over the full
 248,320-wide vocabulary.
@@ -127,8 +133,20 @@ curl -s http://127.0.0.1:8090/kot/infer \
 cat /tmp/kot-probe/text.txt
 ```
 
+The chat surface takes one user message, a text part and a video part. The url
+is `file:///abs/path`, a plain absolute path or a `data:video/...;base64,...`
+URI; `"stream": true` answers in SSE:
+
+```bash
+curl -s http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": [
+         {"type": "text", "text": "Describe what you see in the video."},
+         {"type": "video_url", "video_url": {"url": "file:///path/to/video.mp4"}}]}],
+       "max_completion_tokens": 64, "seed": 42}' \
+  | python3 -m json.tool
+```
+
 On 2x RTX 5090 the boot needs `KOT_SGLANG_MEM_FRACTION=0.89` (issue #26):
 the engine then sizes `max_mamba_cache_size=7` and
-`max_total_num_tokens=25626`. The server still dies after engine init on a
-missing identity function (issue #28); the surfaces answer once that fix
-lands.
+`max_total_num_tokens=25626`.

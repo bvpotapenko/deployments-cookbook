@@ -6,9 +6,10 @@ copies this file into the engine venv's site-packages, where site.py finds it
 without any PYTHONPATH. It imports nothing heavy at startup; the patches are
 applied when SGLang's own modules finish loading.
 
-Two monkeypatches, both additive: the original computation still runs and
-feeds SGLang's own logprob plumbing; the patch writes the full-vocabulary
-distribution of the scored positions where ``kot_server.py`` collects it.
+Three monkeypatches. The first two are additive: the original computation
+still runs and feeds SGLang's own logprob plumbing; the patch writes the
+full-vocabulary distribution of the scored positions where ``kot_server.py``
+collects it. The third replaces a step: ``qwen_vl.preprocess_video``.
 
 * ``LogitsProcessor.compute_temp_top_p_normalized_logprobs`` is where the
   log-softmax over the whole vocabulary exists for prefill positions. It is
@@ -30,6 +31,14 @@ distribution of the scored positions where ``kot_server.py`` collects it.
   sampler entry is the only point every generated token passes through. For
   a decode of g tokens that is g rows (the first comes from the extend
   forward that emits the first token).
+
+* ``qwen_vl.preprocess_video`` runs ahead of the HF processor on its own rules:
+  an even frame count, truncated indices, and a BILINEAR pre-resize to a 28-px
+  grid under 768 * 28 * 28 pixels. The replacement selects frames through
+  ``Qwen3VLVideoProcessor.sample_frames`` and leaves their size alone, so what
+  the HF processor receives is what the reference's own call decodes, and its
+  resize, under the cap ``mm_process_config`` carries, is the only one. Those
+  rules are constants and module code: no engine kwarg reaches them.
 
 Under tensor parallelism every rank runs LogitsProcessor and the Sampler
 with identical post-all-gather logits; both patches gate on the tensor
@@ -159,6 +168,7 @@ class _PatchOnLoadFinder:
         "sglang.srt.layers.logits_processor",
         "sglang.srt.layers.logprob_processor",
         "sglang.srt.layers.sampler",
+        "sglang.srt.multimodal.processors.qwen_vl",
     }
 
     def __init__(self) -> None:
@@ -219,6 +229,8 @@ def _apply_patch(fullname: str) -> None:
             _patch_input_logprob(torch, module)
         elif fullname == "sglang.srt.layers.sampler":
             _patch_sampler(torch, module)
+        elif fullname == "sglang.srt.multimodal.processors.qwen_vl":
+            _patch_qwen_video(module)
         _patch_log(f"applied: {fullname}")
     except Exception as failure:
         _patch_log(f"FAILED: {fullname}: {type(failure).__name__}: {failure}")
@@ -328,6 +340,48 @@ def _patch_sampler(torch, module) -> None:
     module.Sampler.forward = forward_with_stash
 
 
+def _patch_qwen_video(module) -> None:
+    """Frames as the reference selects them, unresized, off the event loop.
+
+    The HF pass stays on the CPU, where the reference resizes: a bicubic resize
+    on the card is not promised the same pixels. fps comes from
+    ``mm_process_config``. The engine awaits this function on its one event
+    loop, and the decode would stall every open connection if it ran there.
+    """
+    if getattr(module.preprocess_video, "_kot_patched", False):
+        return
+    import asyncio
+
+    from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
+    from transformers.video_utils import VideoMetadata
+
+    # sample_frames reads min_frames, max_frames and fps off the instance; the
+    # checkpoint's video_preprocessor_config.json sets none of them.
+    sampler = Qwen3VLVideoProcessor()
+    original = module.preprocess_video
+
+    async def preprocess_video_pinned(vr, image_factor=module.IMAGE_FACTOR, video_config={}):
+        if not isinstance(vr, module.VideoDecoderWrapper):
+            return await original(vr, image_factor, video_config)
+        total_frames, video_fps = len(vr), vr.avg_fps
+        indices = sampler.sample_frames(
+            VideoMetadata(total_num_frames=total_frames, fps=video_fps),
+            fps=video_config["fps"],
+        )
+        frames = await asyncio.to_thread(vr.get_frames_as_tensor, indices.tolist())
+        return frames.permute(0, 3, 1, 2), {  # NHWC -> TCHW
+            "fps": video_fps,
+            "duration": total_frames / video_fps,
+            "total_num_frames": total_frames,
+            "frames_indices": indices,
+            "video_backend": "torchcodec",
+        }
+
+    preprocess_video_pinned._kot_patched = True
+    module.preprocess_video = preprocess_video_pinned
+    module.QwenVLImageProcessor.video_preprocessing_device = "cpu"
+
+
 def _trace(message: str) -> None:
     """Forensics for the count path: /tmp, because the stash dir does not
     exist while modules load and the patch log swallows write errors."""
@@ -336,4 +390,18 @@ def _trace(message: str) -> None:
             trace.write(message + "\n")
     except Exception:
         pass
+
+
+_stub_sgl_kernel_finder()
+if CAPTURE_MODE:
+    # On demand: kill -USR1 <pid> dumps every thread's stack to stderr --
+    # the hang diagnosis path where ptrace is unavailable.
+    import faulthandler
+    import signal
+
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    # Ahead of PathFinder: appended finders never run, because PathFinder
+    # answers first. This finder only claims its targets and asks PathFinder
+    # for their real specs, so being first is safe.
+    sys.meta_path.insert(0, _PatchOnLoadFinder())
 
