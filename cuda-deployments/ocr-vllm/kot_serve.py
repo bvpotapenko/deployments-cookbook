@@ -48,10 +48,9 @@ Logprob objects per position on the frontend. The tap below keeps the raw
 tensors instead and leaves cheap placeholders in vLLM's own lists, so its
 invariants hold and nothing else changes.
 
-The chat template (the checkpoint's tokenizer ships none) is this
-directory's chat_template.jinja: it renders the same plain format the score
-path builds, image placeholder first, so both surfaces feed the model the
-same shape of prompt.
+The chat template (the checkpoint's tokenizer ships none) is vLLM's own
+template_deepseek_ocr.jinja: BOS, image placeholder, newline, instruction,
+the plain format the score path carries.
 """
 
 from __future__ import annotations
@@ -537,7 +536,7 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     return model_id, override_revision or revision
 
 
-def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -> argparse.Namespace:
+def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.Namespace:
     """The vLLM server's own CLI namespace, pinned the way this contract needs.
 
     vLLM's arg parser passes ``deprecated=True`` to argparse on some versions,
@@ -562,10 +561,10 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     args.host = "127.0.0.1"
     args.port = port
     args.served_model_name = [model_id, model]
-    # The checkpoint's tokenizer ships no chat template; this deployment's
-    # own jinja renders the same plain format the score path builds, so the
-    # chat and score surfaces feed the model the same shape of prompt.
-    args.chat_template = str(Path(here) / "chat_template.jinja")
+    # The checkpoint's tokenizer ships no chat template, and vLLM's fallback for
+    # its model_type (deepseek_vl_v2) adds role tags. vLLM's OCR template renders
+    # the plain format: BOS, <image>, newline, instruction.
+    args.chat_template = "template_deepseek_ocr.jinja"
     # One document per request, exactly one image in it.
     args.limit_mm_per_prompt = {"image": 1}
     # The model's own max_position_embeddings (8192) covers template +
@@ -659,8 +658,7 @@ def main() -> int:
 
     _install_logprobs_tap()
     model_id, model_revision = _resolve_identity(cli.model)
-    here = str(Path(__file__).resolve().parent)
-    args = _openai_args(cli.model, cli.device, cli.port, model_id, here)
+    args = _openai_args(cli.model, cli.device, cli.port, model_id)
     app = build_app(args, supported_tasks=SUPPORTED_TASKS)
 
     async def run() -> None:
