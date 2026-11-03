@@ -311,6 +311,7 @@ def main() -> int:
                 pad_token_id=processor.tokenizer.eos_token_id,
                 use_cache=True,
                 logits_to_keep=1,
+                **media,
             )
         generated = out[0][len(expanded):].tolist()
         out_dir = Path(body["out_dir"])
