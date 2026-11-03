@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# kot deployment: ocr family (DeepSeek-OCR-2), vllm engine.
+# kot deployment: mllm family (Qwen3.8-27B), vllm engine.
 #
 #   ./kot_serve.sh --port <P> --model <weights dir> --device <torch device>
 #
-# Self-provisioning: if the ambient python cannot import the pinned vllm, a
+# A networked host installs the pinned vllm from PyPI into the venv the run
+# book documents (CPython 3.12). If the ambient python cannot import it, a
 # venv is created in a writable scratch location and filled OFFLINE from
-# ./wheels (the graded container has no network). The wheel set is
-# self-contained: vllm 0.30.0 with its own torch (cu128,
-# Blackwell-capable) and CUDA libraries, so it runs on any host with a CUDA
-# 12.x driver regardless of the image's own torch. On a networked test host,
-# pre-provision a venv and point KOT_PYTHON at it instead.
+# ./wheels instead (the graded container has no network). The wheels/ tree
+# is rebuilt with ./make_wheels.sh from the pins in wheels-requirements.txt;
+# an old tree fails the version gate below loudly, on purpose.
 set -euo pipefail
 
 VLLM_PIN="0.32.0"
+# The run book's video pair, on top of vllm: the PyTorch cu130 torchvision
+# build and the closure's torchcodec.
+TORCHVISION_PIN="0.28.0+cu130"
+TORCHCODEC_PIN="0.17.0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT="" MODEL="" DEVICE=""
@@ -48,7 +51,7 @@ find_python() {
   fi
   local venv="${KOT_VENV:-/scratch/kot-vllm-venv}"
   if ! mkdir -p "$(dirname "$venv")" 2>/dev/null || ! mkdir -p "$venv" 2>/dev/null; then
-    venv="/tmp/kot-vllm-ocr-venv"
+    venv="/tmp/kot-vllm-venv"
     mkdir -p "$venv"
   fi
   if [ ! -x "$venv/bin/python" ]; then
@@ -63,10 +66,11 @@ find_python() {
       exit 1
     fi
   fi
-  if ! "$venv/bin/python" -c "import vllm" >/dev/null 2>&1; then
-    echo "[kot-vllm-mllm] installing vllm $VLLM_PIN offline from $DIR/wheels" >&2
+  if ! "$venv/bin/python" -c "import vllm; from importlib.metadata import version as v; assert (v('torchvision'), v('torchcodec')) == ('$TORCHVISION_PIN', '$TORCHCODEC_PIN')" >/dev/null 2>&1; then
+    echo "[kot-vllm-mllm] installing vllm $VLLM_PIN, torchvision $TORCHVISION_PIN, torchcodec $TORCHCODEC_PIN offline from $DIR/wheels" >&2
     "$venv/bin/pip" install --no-index --no-cache-dir \
-      --find-links "$DIR/wheels" "vllm==$VLLM_PIN" >&2
+      --find-links "$DIR/wheels" "vllm==$VLLM_PIN" \
+      "torchvision==$TORCHVISION_PIN" "torchcodec==$TORCHCODEC_PIN" >&2
   fi
   printf '%s' "$venv/bin/python"
 }
