@@ -3,13 +3,12 @@
 #
 #   ./kot_serve.sh --port <P> --model <weights dir> --device <torch device>
 #
-# Self-provisioning: if the ambient python cannot import the pinned vllm, a
+# A networked host installs the pinned vllm from PyPI into the venv the run
+# book documents (CPython 3.12). If the ambient python cannot import it, a
 # venv is created in a writable scratch location and filled OFFLINE from
-# ./wheels (the graded container has no network). The wheel set is
-# self-contained: vllm 0.30.0 with its own torch (cu128,
-# Blackwell-capable) and CUDA libraries, so it runs on any host with a CUDA
-# 12.x driver regardless of the image's own torch. On a networked test host,
-# pre-provision a venv and point KOT_PYTHON at it instead.
+# ./wheels instead (the graded container has no network). The wheels/ tree
+# is rebuilt with ./make_wheels.sh from the pins in wheels-requirements.txt;
+# an old tree fails the version gate below loudly, on purpose.
 set -euo pipefail
 
 VLLM_PIN="0.32.0"
