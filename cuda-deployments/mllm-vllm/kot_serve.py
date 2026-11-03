@@ -128,6 +128,7 @@ VIDEO_TAG = "<|video_pad|>"
 VIDEO_PROMPT = "Describe what you see in the video."
 VIDEO_FPS = 2.0
 CAP_PIXELS_PER_FRAME = True
+INPUTS_DIR = "/inputs"  # the contract's read-only mount of the frozen inputs
 
 SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
 
@@ -772,6 +773,24 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
         "do_sample_frames": False,
         "cap_pixels_per_frame": CAP_PIXELS_PER_FRAME,
     }
+    # The chat surface does /kot/score's work through vLLM's own settings;
+    # the score path reads none of these three. The prompt: the template's
+    # default adds a system message and an open think block.
+    args.default_chat_template_kwargs = {"enable_thinking": False}
+    # The frames: the qwen3_vl loader runs the arithmetic of the HF sampler
+    # score calls and ignores VideoMediaIO's num_frames=32. torchcodec is the
+    # decoder score uses, in the same seek mode, so the frame count and fps
+    # that arithmetic reads are the same too. vLLM's default codec is OpenCV,
+    # whose metadata and pixels are not. do_sample_frames false above keeps
+    # the HF processor from resampling what the loader picked.
+    args.media_io_kwargs = {
+        "video": {"video_backend": "qwen3_vl", "backend": "torchcodec", "fps": VIDEO_FPS},
+    }
+    # file:// URLs under the mount. vLLM's media connector raises on a missing
+    # path for every media request, base64 included, so a host without the
+    # mount leaves it unset and keeps serving data URIs.
+    if Path(INPUTS_DIR).is_dir():
+        args.allowed_local_media_path = INPUTS_DIR
     # "auto" picks flashinfer's cutlass MoE on Blackwell, whose JIT needs
     # nvcc - absent on serving hosts - and dies at engine init. The triton
     # MoE backend runs sm_120 fine. KOT_VLLM_MOE_BACKEND overrides for
