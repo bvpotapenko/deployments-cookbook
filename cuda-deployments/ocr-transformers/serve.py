@@ -14,7 +14,7 @@ Numerics contract, implemented exactly as our reference server's deepseek
 adapter does it:
 
 * prefill is teacher forced: the transcript's ids are appended verbatim to the
-  template the model builds from the image ("<|User|>:\\n<image>\\nFree OCR."
+  template the model builds from the image (BOS, then "<image>\\nFree OCR."
   in the checkpoint's own plain format, one 257-token image block), the
   forward runs over both, and the rows returned are
   logits[prompt_len : prompt_len + len(transcript) - 1], so a transcript of n

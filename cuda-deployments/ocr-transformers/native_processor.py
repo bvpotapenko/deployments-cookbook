@@ -65,7 +65,7 @@ PATCH_SIZE = 16
 DOWNSAMPLE = 4
 NORM = (0.5, 0.5, 0.5)
 PAD_COLOR = (127, 127, 127)  # int(0.5 * 255) per channel, as the reference pads
-TEMPLATE = "<|User|>:\n<image>\nFree OCR."  # the checkpoint's plain sft format
+TEMPLATE = "<image>\nFree OCR."  # the checkpoint's plain sft format; its recipe adds BOS
 GLOBAL_QUERIES = (GLOBAL_SIZE // PATCH_SIZE // DOWNSAMPLE) ** 2  # 256
 TILE_QUERIES = (MAX_SINGLE_VIEW // PATCH_SIZE // DOWNSAMPLE) ** 2  # 144
 
