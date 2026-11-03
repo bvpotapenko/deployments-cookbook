@@ -53,17 +53,6 @@ prints match. The repository does not carry `wheels/`.
 Without `KOT_PYTHON`, and with no ambient vllm, the launcher runs the
 offline install itself, into `KOT_VENV`.
 
-The speed harness runs in its own interpreter, not in this venv. It loads the
-tokenizer from the weights directory with `trust_remote_code=True`, and that
-imports the checkpoint's Python files. The server never imports them. Install
-what they import into the harness's interpreter. Without it the speed phase
-lands `speed_absent` with `No module named 'einops'`.
-
-```bash
-HARNESS_PY="$(dirname "$(readlink -f "$(command -v inference-endpoint)")")/python"
-uv pip install --python "$HARNESS_PY" einops addict matplotlib torch torchvision
-```
-
 ### Layout
 
 ```text
@@ -173,8 +162,7 @@ image rides a request.
 
 ## Check
 
-The text path, the image path, then the tokenizer load the speed harness runs.
-`doc.png` is any document page.
+The text path, then the image path. `doc.png` is any document page.
 
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
@@ -195,15 +183,10 @@ printf '{"model": "/models/DeepSeek-OCR-2",
   | curl -s http://127.0.0.1:8090/v1/chat/completions \
       -H 'Content-Type: application/json' -d @- \
   | python3 -c 'import json, sys; r = json.load(sys.stdin); r["prompt_token_ids"] = r.get("prompt_token_ids", [])[:2]; print(json.dumps(r, indent=1))'
-
-HARNESS_PY="$(dirname "$(readlink -f "$(command -v inference-endpoint)")")/python"
-"$HARNESS_PY" -c "from transformers import AutoTokenizer; \
-AutoTokenizer.from_pretrained('/models/DeepSeek-OCR-2', trust_remote_code=True)"
 ```
 
 The image answer carries the page's text, and `prompt_token_ids` starts
-`[0, 128815]`: BOS, then the image placeholder. The tokenizer load exits 0
-without a traceback.
+`[0, 128815]`: BOS, then the image placeholder.
 
 The `model` field accepts the weights path and the identity the server
 prints at startup. The identity comes from the checkpoint's `config.json`.
