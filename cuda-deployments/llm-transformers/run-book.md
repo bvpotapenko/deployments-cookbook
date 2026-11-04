@@ -153,7 +153,8 @@ error that names the field. The OpenAI routes do not read the field.
 
 ## Check
 
-One curl per model, each carrying its table row's sampling.
+One curl per model, each carrying its table row's sampling. The mamba
+checkpoint ships no chat template, so its curl posts to `/v1/completions`.
 
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
@@ -172,10 +173,10 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
        "temperature": 0.3, "top_p": 0.95}' \
   | python3 -m json.tool
 
-curl -s http://127.0.0.1:8090/v1/chat/completions \
+curl -s http://127.0.0.1:8090/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"model": "state-spaces/mamba-2.8b-hf",
-       "messages": [{"role": "user", "content": "ping"}],
+       "prompt": "ping",
        "max_tokens": 50,
        "temperature": 0.7, "top_p": 0.9,
        "repetition_penalty": 1.2}' \

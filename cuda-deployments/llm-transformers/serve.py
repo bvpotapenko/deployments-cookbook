@@ -90,11 +90,13 @@ class StreamReply:
         self.prompt_tokens = prompt_tokens
         self.max_tokens = max_tokens
         self.chat = chat
-        self.id = (f"chatcmpl-{uuid4().hex}" if chat else f"cmpl-{uuid4().hex()}")
+        self.id = f"chatcmpl-{uuid4().hex}" if chat else f"cmpl-{uuid4().hex}"
         self.created = int(datetime.now(timezone.utc).timestamp())
 
     def chunk(self, delta: dict, finish_reason: str | None) -> bytes:
-        choice: dict = {"index": 0, "delta": delta, "finish_reason": finish_reason}
+        # A completion carries its text on the choice, as the non-streaming reply does.
+        content = {"delta": delta} if self.chat else {"text": delta.get("text", "")}
+        choice: dict = {"index": 0, **content, "finish_reason": finish_reason}
         payload = {
             "id": self.id,
             "object": "chat.completion.chunk" if self.chat else "text_completion",
@@ -111,7 +113,7 @@ async def write_stream(reply: StreamReply, writer) -> None:
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Cache-Control: no-cache\r\n"
-        "Connection: keep-alive\r\n\r\n"
+        "Connection: close\r\n\r\n"
     ).encode(LATIN1)
     writer.write(head)
     await asyncio.wait_for(writer.drain(), BODY_TIMEOUT)
@@ -142,7 +144,7 @@ async def write_stream(reply: StreamReply, writer) -> None:
                 break
             key = "content" if reply.chat else "text"
             await send(reply.chunk({key: delta}, None))
-        generated = await asyncio.wrap_future(reply.future)
+        generated, _ = await asyncio.wrap_future(reply.future)
         finish = "length" if len(generated) >= reply.max_tokens else "stop"
         await send(reply.chunk({}, finish))
         await send(b"data: [DONE]\n\n")
@@ -578,8 +580,11 @@ def main():
                         payload = await loop.run_in_executor(executor, ROUTES[path], body)
                     if isinstance(payload, StreamReply):
                         await write_stream(payload, writer)
-                    else:
-                        await reply(writer, 200, payload, keep)
+                        # The stream head carries no Content-Length, so closing
+                        # is the body's only terminator: without it every
+                        # client blocks on EOF after [DONE].
+                        return
+                    await reply(writer, 200, payload, keep)
                 except Exception as failure:
                     await reply(
                         writer,
