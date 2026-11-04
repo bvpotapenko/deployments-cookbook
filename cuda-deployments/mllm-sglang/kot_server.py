@@ -42,12 +42,12 @@ Numerics of the score path, in one place:
   request's sampling object is applied exactly as given (temperature, top_p,
   top_k, min_p; all four are native engine knobs), the request's seed, every
   penalty at its neutral value. ``allow_eos`` gates the stop exactly as the
-  contract states. Rows are stashed at the sampler's entry -- the raw
-  pre-sampling distributions, one per emitted token, before any penalty or
-  temperature touches the logits. ``input_ids.npy`` stores the raw template
-  plus the generated ids, so a replay prefill teacher-forces over exactly
-  what the request carried: the pre-expansion sequence, with its single
-  video placeholder.
+  contract states. Rows are stashed at ``ModelRunner.sample``'s entry -- the
+  raw pre-sampling distributions, one per emitted token, before the EOS
+  suppression, any penalty or temperature touches the logits.
+  ``input_ids.npy`` stores the raw template plus the generated ids, so a
+  replay prefill teacher-forces over exactly what the request carried: the
+  pre-expansion sequence, with its single video placeholder.
 
 Rows land on disk through ``open_memmap`` at the final shape, filled block by
 block as the engine's stash arrives: the full-vocabulary log-softmax of a
@@ -435,12 +435,12 @@ async def _score_decode(engine, body: dict) -> dict:
     )
     _consumed_guard(done, ids, engine, raw_ids, video_path)
     output_ids = [int(token) for token in done["output_ids"]]
-    # The decode's own sampler rows: the probe below would pollute the stash
+    # The decode's own rows: the probe below would pollute the stash
     # with prefill rows, so collect before probing.
     blocks = await _collect_stash("decode")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
-    # One sampler call per generated id, with the overlap scheduler off. Any
+    # One sample call per generated id, with the overlap scheduler off. Any
     # other count is a request sharing the batch, and its rows carry no id.
     if rows != len(output_ids):
         raise ScoreFailure(

@@ -19,21 +19,23 @@ distribution of the scored positions where ``kot_server.py`` collects it.
   For a prefill over an expanded prompt of N positions the stashed matrix has
   N rows; ``kot_server.py`` keeps the transcript's rows and drops the rest.
 
-* ``Sampler.forward`` is where every sampled token comes from, extend and
+* ``ModelRunner.sample`` is where every sampled token comes from, extend and
   decode steps alike. The patch stashes a float32 log-softmax of
-  ``logits_output.next_token_logits`` at the call's ENTRY -- before the
-  sampler's own pipeline (penalties, temperature, top-k, top-p, grammar
-  masks) touches the logits -- one row per request in the batch, gated on the
-  call's ``return_logprob`` flag so speed-harness traffic (which asks for no
-  logprobs) writes nothing. This family's decodes generate until EOS, so
-  ``min_new_tokens`` is 0 and the min-new-tokens penalizer never exists; the
-  sampler entry is the only point every generated token passes through. For
-  a decode of g tokens that is g rows (the first comes from the extend
-  forward that emits the first token).
+  ``logits_output.next_token_logits`` at the call's ENTRY, one row per request
+  in the batch, gated on ``forward_batch.return_logprob`` so speed-harness
+  traffic (which asks for no logprobs) writes nothing. The entry comes before
+  everything that touches the logits: ``_preprocess_logits``, whose bias adds
+  the min-new-tokens -inf over the stop tokens in place when ``allow_eos`` is
+  false, and the sampler's own pipeline (custom processors, temperature,
+  top-k, top-p). ``Sampler.forward`` is too late, the penalizer does not run
+  when ``allow_eos`` is true, and ``_preprocess_logits`` is not told
+  ``return_logprob``. The row is written before the call goes on, so nothing
+  is cloned. For a decode of g tokens that is g rows (the first comes from
+  the extend forward that emits the first token).
 
-Under tensor parallelism every rank runs LogitsProcessor and the Sampler
-with identical post-all-gather logits; both patches gate on the tensor
-parallel rank so exactly one rank stashes. Files are named
+Under tensor parallelism every rank runs LogitsProcessor and
+ModelRunner.sample with identical post-all-gather logits; both patches gate
+on the tensor parallel rank so exactly one rank stashes. Files are named
 ``<kind>_<pid>_<counter>.npz`` -- the pid makes cross-process collisions
 impossible, the per-process counter preserves write order -- and a
 ``.done.json`` beside each archive marks it complete, because ``np.savez``
@@ -68,10 +70,6 @@ def _already_patched(module) -> bool:
         "_kot_patched",
         False,
     )
-
-
-def _sampler_patched(module) -> bool:
-    return getattr(module.Sampler.forward, "_kot_patched", False)
 
 
 def _is_stash_rank() -> bool:
@@ -160,7 +158,7 @@ class _PatchOnLoadFinder:
     TARGETS = {
         "sglang.srt.layers.logits_processor",
         "sglang.srt.layers.logprob_processor",
-        "sglang.srt.layers.sampler",
+        "sglang.srt.model_executor.model_runner",
         "sglang.srt.multimodal.processors.deepseek_ocr",
     }
 
@@ -220,8 +218,8 @@ def _apply_patch(fullname: str) -> None:
             _patch_logits_processor(torch, module)
         elif fullname == "sglang.srt.layers.logprob_processor":
             _patch_input_logprob(torch, module)
-        elif fullname == "sglang.srt.layers.sampler":
-            _patch_sampler(torch, module)
+        elif fullname == "sglang.srt.model_executor.model_runner":
+            _patch_model_runner(torch, module)
         elif fullname == "sglang.srt.multimodal.processors.deepseek_ocr":
             _patch_ocr_processor(module)
         _patch_log(f"applied: {fullname}")
@@ -310,27 +308,25 @@ def _patch_input_logprob(torch, module) -> None:
     module.InputLogprobProcessor.forward = forward_with_stash
 
 
-def _patch_sampler(torch, module) -> None:
-    if _sampler_patched(module):
+def _patch_model_runner(torch, module) -> None:
+    if getattr(module.ModelRunner.sample, "_kot_patched", False):
         return
     counter = [0]
-    original = module.Sampler.forward
+    original = module.ModelRunner.sample
 
-    def forward_with_stash(self, logits_output, sampling_info, return_logprob,
-                           *args, **kwargs):
+    def sample_with_stash(self, logits_output, forward_batch, *args, **kwargs):
         try:
-            if return_logprob:
+            if forward_batch.return_logprob:
                 probs = torch.log_softmax(
                     logits_output.next_token_logits.to(torch.float32), dim=-1
                 )
                 _stash("decode", probs, counter)
         except Exception:
             pass
-        return original(self, logits_output, sampling_info, return_logprob,
-                        *args, **kwargs)
+        return original(self, logits_output, forward_batch, *args, **kwargs)
 
-    forward_with_stash._kot_patched = True
-    module.Sampler.forward = forward_with_stash
+    sample_with_stash._kot_patched = True
+    module.ModelRunner.sample = sample_with_stash
 
 
 def _trace(message: str) -> None:
@@ -434,6 +430,6 @@ if CAPTURE_MODE:
 
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     # Ahead of PathFinder: appended finders never run, because PathFinder
-    # answers first. This finder only claims its two targets and asks
+    # answers first. This finder only claims its targets and asks
     # PathFinder for their real specs, so being first is safe.
     sys.meta_path.insert(0, _PatchOnLoadFinder())
