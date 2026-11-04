@@ -53,7 +53,11 @@ file holds one.
 Concurrency: one event loop; the Engine is created inside it. /kot/score is
 serialised by a lock -- the runner sends one at a time, and
 one-request-at-a-time is what makes the stash collection sound (see
-sitecustomize.py).
+sitecustomize.py). /v1/chat/completions takes no lock. Chat asks for no
+logprobs, so alone it writes no stash. A score that shares a batch with chat
+traffic stashes their rows too, with no request id, so the row counts
+(``prompt_tokens`` on a prefill, the generated ids on a decode) fail that score
+loudly; the chat is untouched. The runner must not overlap the two.
 """
 
 from __future__ import annotations
@@ -63,6 +67,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 import traceback
 import urllib.parse
@@ -214,21 +219,21 @@ def _write_array(out_dir: Path, name: str, array: np.ndarray) -> str:
     return path.name
 
 
-def _open_image(path: str):
-    """The attachment as an RGB PIL image: what the engine's processor takes."""
-    from PIL import Image
+def _decode_image(source):
+    """A path or file object as the RGB PIL image the engine's processor takes,
+    by the checkpoint's own recipe on every route: EXIF orientation applied, then
+    ``.convert("RGB")`` (``modeling_deepseekocr2.py``, ``load_image``)."""
+    from PIL import Image, ImageOps
 
-    return Image.open(path).convert("RGB")
+    return ImageOps.exif_transpose(Image.open(source)).convert("RGB")
 
 
 def _decode_data_uri(uri: str):
-    """An image_url data URI as an RGB PIL image: what the chat surface gets."""
-    from PIL import Image
-
+    """An image_url data URI, decoded as an attachment is: what the chat surface gets."""
     comma = uri.find(",")
     if comma < 0 or not uri[:5].lower() == "data:":
         raise ScoreFailure("an image part must be a data URI")
-    return Image.open(BytesIO(base64.b64decode(uri[comma + 1:]))).convert("RGB")
+    return _decode_image(BytesIO(base64.b64decode(uri[comma + 1:])))
 
 
 def _consumed_guard(done: dict, ids: list[int], engine) -> None:
@@ -289,7 +294,7 @@ async def _score_prefill(engine, body: dict) -> dict:
     out_dir = Path(body["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(body.get("seed", 42))
-    image = _open_image(image_path)
+    image = _decode_image(image_path)
     ids = list(transcript)
 
     _clean_stash()
@@ -304,6 +309,15 @@ async def _score_prefill(engine, body: dict) -> dict:
     blocks = await _collect_stash("prefill")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
+    # Alone, a prefill stashes one row per position of the expanded prompt, and
+    # prompt_tokens counts those positions. A request sharing the forward adds
+    # rows with no id, which would move the tail below in the correct shape.
+    prompt_tokens = int(done.get("meta_info", {}).get("prompt_tokens", 0) or 0)
+    if rows != prompt_tokens:
+        raise ScoreFailure(
+            f"{rows} stashed prefill rows for this request's {prompt_tokens} prompt "
+            "tokens: a mixed batch (another request shared the forward) or a lost stash"
+        )
     if rows <= len(ids):
         raise ScoreFailure(
             f"the engine stashed {rows} prefill rows for {len(ids)} raw ids: the "
@@ -352,7 +366,7 @@ async def _score_decode(engine, body: dict) -> dict:
     template_ids = [int(token) for token in body["input_ids"]]
     if not template_ids:
         raise ScoreFailure("empty input_ids: the version's frozen template is missing")
-    image = _open_image(image_path)
+    image = _decode_image(image_path)
     ids = list(template_ids)
 
     _clean_stash()
@@ -373,17 +387,13 @@ async def _score_decode(engine, body: dict) -> dict:
     blocks = await _collect_stash("decode")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
-    if rows == len(output_ids) + 1:
-        # The overlap scheduler launches one more decode forward for a request
-        # that finished in the previous iteration: a distribution for a token
-        # nobody emits. The sampler calls are stashed in order, so the phantom
-        # is the last row.
-        *blocks, last = blocks
-        if last.shape[0] > 1:
-            blocks.append(np.ascontiguousarray(last[:-1]))
-        print("[kot_server] trimmed 1 overlap phantom decode row", flush=True)
-    elif rows != len(output_ids):
-        raise ScoreFailure(f"{rows} stashed rows for {len(output_ids)} generated ids")
+    # One sampler call per generated id, with the overlap scheduler off. Any
+    # other count is a request sharing the batch, and its rows carry no id.
+    if rows != len(output_ids):
+        raise ScoreFailure(
+            f"{rows} stashed rows for {len(output_ids)} generated ids: a mixed batch "
+            "(another request shared a forward) or a lost stash"
+        )
     if not 0 < len(output_ids) <= max_new_tokens:
         raise ScoreFailure(
             f"decode produced {len(output_ids)} ids for a cap of {max_new_tokens}"
@@ -662,7 +672,7 @@ class KotEngine:
             # The overlap scheduler launches one more decode forward for a
             # request that finished in the previous iteration; single-request
             # scoring gets nothing from overlap, and the phantom row would
-            # need trimming every time.
+            # fail the decode's row count.
             "disable_overlap_schedule": True,
             "max_prefill_tokens": 8192,
             # Explicit, because sglang's heuristic reserves
@@ -686,6 +696,15 @@ class KotEngine:
         self.tokenizer_id = str(self.tokenizer.name_or_path) if self.tokenizer else model_dir
         self.model_id, self.model_revision = _resolve_identity(model_dir)
         self.engine_name = f"sglang {sglang.__version__}"
+        self.torch_version = torch.__version__
+        self.toolkit_version = torch.version.cuda or ""
+        # Where the engine's schedulers run, by its own placement rule; read
+        # from its arguments, because the model lives in those processes.
+        server_args = self.engine.server_args
+        self.device = "+".join(
+            f"cuda:{server_args.base_gpu_id + rank * server_args.gpu_id_step}"
+            for rank in range(server_args.tp_size)
+        ) if is_cuda else "cpu"
         image_token = (
             self.tokenizer.convert_tokens_to_ids(IMAGE_TAG)
             if self.tokenizer is not None else None
@@ -731,7 +750,17 @@ class KotEngine:
         return await self.engine.async_generate(**kwargs)
 
 
-def _engine_info(engine, device: str) -> dict:
+def _nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text(encoding=UTF8).splitlines()[0]
+    except (OSError, IndexError, ValueError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
+def _engine_info(engine) -> dict:
     return {
         "contract_version": CONTRACT_VERSION,
         "model_id": engine.model_id,
@@ -739,8 +768,12 @@ def _engine_info(engine, device: str) -> dict:
         "tokenizer_id": engine.tokenizer_id,
         "engine": engine.engine_name,
         "dtype": engine.dtype_name,
-        "device": f"{device}:0" if ":" not in device else device,
+        "device": engine.device,
         "vocab_size": engine.vocab_size,
+        "torch_version": engine.torch_version,
+        "plugin_version": "",
+        "driver_version": _nvidia_driver(),
+        "toolkit_version": engine.toolkit_version,
         "started_at": _utc_stamp(),
     }
 
@@ -903,7 +936,7 @@ async def run_server(port: int, model: str, device: str) -> None:
     # Created inside the running loop, the Engine adopts it: tokenizer
     # manager, HTTP server and every generation stream share one loop.
     engine = KotEngine(model, device)
-    info = _engine_info(engine, device)
+    info = _engine_info(engine)
     print(f"[kot_server] serving: {info}", flush=True)
 
     # One tiny image-driven generation so the first real request does not pay

@@ -60,9 +60,11 @@ one-request-at-a-time is what makes the stash collection sound (see
 sitecustomize.py). /v1/chat/completions takes no lock: each connection awaits
 the engine on its own, video decoding and the HF pass run off the event loop
 (the patch layer, ``mm_processor_worker_num``), and the scheduler batches what
-arrives. Chat asks for no logprobs, so alone it writes no stash; a score that
-shares a batch with chat traffic would stash their rows too, so the runner must
-not overlap the two, and nothing here enforces that.
+arrives. Chat asks for no logprobs, so alone it writes no stash. A score that
+shares a batch with chat traffic stashes their rows too, with no request id, so
+the row counts (``prompt_tokens`` on a prefill, the generated ids on a decode)
+fail that score loudly; the chat is untouched. The runner must not overlap the
+two.
 """
 
 from __future__ import annotations
@@ -71,6 +73,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 import traceback
 import urllib.parse
@@ -346,6 +349,15 @@ async def _score_prefill(engine, body: dict) -> dict:
     blocks = await _collect_stash("prefill")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
+    # Alone, a prefill stashes one row per position of the expanded prompt, and
+    # prompt_tokens counts those positions. A request sharing the forward adds
+    # rows with no id, which would move the tail below in the correct shape.
+    prompt_tokens = int(done.get("meta_info", {}).get("prompt_tokens", 0) or 0)
+    if rows != prompt_tokens:
+        raise ScoreFailure(
+            f"{rows} stashed prefill rows for this request's {prompt_tokens} prompt "
+            "tokens: a mixed batch (another request shared the forward) or a lost stash"
+        )
     if rows <= len(ids):
         raise ScoreFailure(
             f"the engine stashed {rows} prefill rows for {len(ids)} raw ids: the "
@@ -428,17 +440,13 @@ async def _score_decode(engine, body: dict) -> dict:
     blocks = await _collect_stash("decode")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
-    if rows == len(output_ids) + 1:
-        # The overlap scheduler launches one more decode forward for a request
-        # that finished in the previous iteration: a distribution for a token
-        # nobody emits. The sampler calls are stashed in order, so the phantom
-        # is the last row.
-        *blocks, last = blocks
-        if last.shape[0] > 1:
-            blocks.append(np.ascontiguousarray(last[:-1]))
-        print("[kot_server] trimmed 1 overlap phantom decode row", flush=True)
-    elif rows != len(output_ids):
-        raise ScoreFailure(f"{rows} stashed rows for {len(output_ids)} generated ids")
+    # One sampler call per generated id, with the overlap scheduler off. Any
+    # other count is a request sharing the batch, and its rows carry no id.
+    if rows != len(output_ids):
+        raise ScoreFailure(
+            f"{rows} stashed rows for {len(output_ids)} generated ids: a mixed batch "
+            "(another request shared a forward) or a lost stash"
+        )
     if not 0 < len(output_ids) <= max_new_tokens:
         raise ScoreFailure(
             f"decode produced {len(output_ids)} ids for a cap of {max_new_tokens}"
@@ -694,7 +702,7 @@ class KotEngine:
             # The overlap scheduler launches one more decode forward for a
             # request that finished in the previous iteration; single-request
             # scoring gets nothing from overlap, and the phantom row would
-            # need trimming every time.
+            # fail the decode's row count.
             "disable_overlap_schedule": True,
             # The video units run at most ~12.4k-token prompts (the checkpoint's
             # own pixel budget) plus a 4,096-token decode.
@@ -736,6 +744,15 @@ class KotEngine:
         self.processor = self.engine.tokenizer_manager.processor
         self.model_id, self.model_revision = _resolve_identity(model_dir)
         self.engine_name = f"sglang {sglang.__version__}"
+        self.torch_version = torch.__version__
+        self.toolkit_version = torch.version.cuda or ""
+        # Where the engine's schedulers run, by its own placement rule; read
+        # from its arguments, because the model lives in those processes.
+        server_args = self.engine.server_args
+        self.device = "+".join(
+            f"cuda:{server_args.base_gpu_id + rank * server_args.gpu_id_step}"
+            for rank in range(server_args.tp_size)
+        ) if is_cuda else "cpu"
 
     def slice_vocab(self, block: np.ndarray) -> np.ndarray:
         """A padded engine's lm_head emits -inf over the pad columns; the
@@ -765,7 +782,17 @@ class KotEngine:
         return await self.engine.async_generate(**kwargs)
 
 
-def _engine_info(engine, device: str) -> dict:
+def _nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text(encoding=UTF8).splitlines()[0]
+    except (OSError, IndexError, ValueError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
+def _engine_info(engine) -> dict:
     return {
         "contract_version": CONTRACT_VERSION,
         "model_id": engine.model_id,
@@ -773,8 +800,12 @@ def _engine_info(engine, device: str) -> dict:
         "tokenizer_id": engine.tokenizer_id,
         "engine": engine.engine_name,
         "dtype": engine.dtype_name,
-        "device": f"{device}:0" if ":" not in device else device,
+        "device": engine.device,
         "vocab_size": engine.vocab_size,
+        "torch_version": engine.torch_version,
+        "plugin_version": "",
+        "driver_version": _nvidia_driver(),
+        "toolkit_version": engine.toolkit_version,
         # The reference's block, keys and nesting, for the values pinned here.
         "media": {
             "video_fps": VIDEO_FPS,
@@ -933,7 +964,7 @@ async def run_server(port: int, model: str, device: str) -> None:
     # Created inside the running loop, the Engine adopts it: tokenizer
     # manager, HTTP server and every generation stream share one loop.
     engine = KotEngine(model, device)
-    info = _engine_info(engine, device)
+    info = _engine_info(engine)
     print(f"[kot_server] serving: {info}", flush=True)
 
     # One text-only generation over the pinned prompt so the first real

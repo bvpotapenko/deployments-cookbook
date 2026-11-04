@@ -48,7 +48,9 @@ impossible, the per-process counter preserves write order -- and a
 ``.done.json`` beside each archive marks it complete, because ``np.savez``
 to a final name is not atomic. One score request is in flight at a time
 (the adapter serialises /kot/score), so every archive newer than the ones
-seen when the request started belongs to that request.
+seen when the request started belongs to that request, or to a chat request
+in its batch: the archives carry no request id, so ``kot_server.py`` fails a
+score whose row count is off.
 """
 
 import json
@@ -343,10 +345,12 @@ def _patch_sampler(torch, module) -> None:
 def _patch_qwen_video(module) -> None:
     """Frames as the reference selects them, unresized, off the event loop.
 
-    The HF pass stays on the CPU, where the reference resizes: a bicubic resize
-    on the card is not promised the same pixels. fps comes from
-    ``mm_process_config``. The engine awaits this function on its one event
-    loop, and the decode would stall every open connection if it ran there.
+    ``video_preprocessing_device`` keeps the whole path on the CPU, where the
+    reference resizes: the engine's loader decodes on the card unless it reads
+    "cpu", and hands it to the HF pass, where a bicubic resize on the card is not
+    promised the same pixels. fps comes from ``mm_process_config``. The engine
+    awaits this function on its one event loop, and the decode would stall every
+    open connection if it ran there.
     """
     if getattr(module.preprocess_video, "_kot_patched", False):
         return

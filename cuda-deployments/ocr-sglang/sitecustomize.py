@@ -39,7 +39,9 @@ impossible, the per-process counter preserves write order -- and a
 ``.done.json`` beside each archive marks it complete, because ``np.savez``
 to a final name is not atomic. One score request is in flight at a time
 (the adapter serialises /kot/score), so every archive newer than the ones
-seen when the request started belongs to that request.
+seen when the request started belongs to that request, or to a chat request
+in its batch: the archives carry no request id, so ``kot_server.py`` fails a
+score whose row count is off.
 """
 
 import json

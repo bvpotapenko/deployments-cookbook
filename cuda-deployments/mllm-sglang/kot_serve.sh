@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Start the SGLang deployment of the kot contract, OCR family (DeepSeek-OCR-2).
+# Start the SGLang deployment of the kot contract, MLLM family (Qwen3.8-27B).
 #
-#   ./kot_serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
+#   ./kot_serve.sh --port P --model /path/to/Qwen3.8-27B --device cpu|cuda
 #
 # One process serves everything: this script launches kot_server.py, which
 # embeds sglang.Engine in-process and answers /kot/info, /kot/score,
@@ -9,9 +9,9 @@
 # document as an image_url data URI). The contract's one-server rule lives
 # here: the score path and the speed harness drive the same engine.
 #
-# The engine is sglang 0.5.21 (the first line with DeepSeek-OCR-2 support,
-# via the checkpoint's own remote code). On a CUDA host it expects to find
-# sglang, sgl-kernel and triton already installed in the interpreter named
+# The engine is sglang 0.5.23 (Qwen3.8-27B runs the native qwen3_5
+# architecture). On a CUDA host it expects to find sglang,
+# sglang-kernel and triton already installed in the interpreter named
 # by KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
 set -euo pipefail
 

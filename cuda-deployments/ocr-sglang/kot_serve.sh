@@ -9,9 +9,9 @@
 # document as an image_url data URI). The contract's one-server rule lives
 # here: the score path and the speed harness drive the same engine.
 #
-# The engine is sglang 0.5.21 (the first line with DeepSeek-OCR-2 support,
-# via the checkpoint's own remote code). On a CUDA host it expects to find
-# sglang, sgl-kernel and triton already installed in the interpreter named
+# The engine is sglang 0.5.23 (DeepSeek-OCR-2 runs through the checkpoint's
+# own remote code). On a CUDA host it expects to find sglang,
+# sglang-kernel and triton already installed in the interpreter named
 # by KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
 set -euo pipefail
 
