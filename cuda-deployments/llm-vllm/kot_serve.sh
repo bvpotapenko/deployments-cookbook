@@ -11,7 +11,7 @@
 # an old tree fails the version gate below loudly, on purpose.
 set -euo pipefail
 
-VLLM_PIN="0.32.0"
+VLLM_PIN="0.33.0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT="" MODEL="" DEVICE=""

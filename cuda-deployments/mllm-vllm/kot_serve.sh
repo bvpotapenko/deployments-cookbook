@@ -11,10 +11,10 @@
 # an old tree fails the version gate below loudly, on purpose.
 set -euo pipefail
 
-VLLM_PIN="0.32.0"
+VLLM_PIN="0.33.0"
 # The run book's video pair, on top of vllm: the PyTorch cu130 torchvision
 # build and the closure's torchcodec.
-TORCHVISION_PIN="0.28.0+cu130"
+TORCHVISION_PIN="0.29.0+cu130"
 TORCHCODEC_PIN="0.17.0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -89,5 +89,9 @@ export PYTHONUNBUFFERED=1
 # V1 floor that OOMs this box does not exist on this path. Default on;
 # VLLM_USE_V2_MODEL_RUNNER=0 boots the V1 path for a comparison run.
 export VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-1}"
+
+# vLLM's per-request decoded-media limit fails a 1080p clip longer than about
+# 57 s, on chat only: /kot/score has no such limit. 0 disables it.
+export VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES=0
 
 exec "$PY" "$DIR/kot_serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

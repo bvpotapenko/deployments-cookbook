@@ -1,6 +1,6 @@
 # Run Book: mllm-vllm
 
-This deployment serves Qwen/Qwen3.8-27B with vLLM 0.32.0. The model runs the
+This deployment serves Qwen/Qwen3.8-27B with vLLM 0.33.0. The model runs the
 native `qwen3_5` architecture; the units are short videos. One process serves
 the full-vocabulary log-probability surface over both cards, one request at a
 time.
@@ -22,25 +22,24 @@ point `KOT_PYTHON` at it.
 ```bash
 # networked host
 uv venv /scratch/kot-vllm-venv --python 3.12
-uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.32.0"
+uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.33.0"
 uv pip install --python /scratch/kot-vllm-venv/bin/python --no-deps \
-  "torchvision==0.28.0" --index-url https://download.pytorch.org/whl/cu130
+  "torchvision==0.29.0" --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python /scratch/kot-vllm-venv/bin/python --no-deps torchcodec
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-venv --python 3.12
 /scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.32.0" "torchvision==0.28.0+cu130" "torchcodec==0.17.0"
+  --find-links ./wheels "vllm==0.33.0" "torchvision==0.29.0+cu130" "torchcodec==0.17.0"
 ```
 
-vllm 0.32.0 pairs with torch 2.13.0+cu130; torchvision 0.28.x pairs with
-torch 2.13 (0.29.x needs torch 2.14 and dies at import). torchcodec decodes
-the videos; the host needs FFmpeg 6 shared libraries, and the closure does not
-carry them. The video processor (the HF Qwen3VLProcessor, transformers 5.19)
-resolves in this venv.
+vllm 0.33.0 pairs with torch 2.14.0+cu130; torchvision 0.29.x pairs with
+torch 2.14. torchcodec decodes the videos; the host needs FFmpeg 6 shared
+libraries, and the closure does not carry them. The video processor (the HF
+Qwen3VLProcessor, transformers 5.20.2) resolves in this venv.
 
-`make_wheels.sh` builds the vllm 0.32.0 closure into `wheels/` for linux
+`make_wheels.sh` builds the vllm 0.33.0 closure into `wheels/` for linux
 x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the same
 closure as `llm-vllm`; only torchvision comes from the PyTorch cu130 index, the
 build the networked recipe installs. The script downloads one wheel per pin,
@@ -105,6 +104,7 @@ every capture carries its own.
 | `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
 | `KOT_VLLM_DTYPE` | unset | numeric cross-check override |
 | `KOT_VLLM_COMPILATION` | unset | `eager` disables CUDA graphs |
+| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It fails a 1080p clip longer than about 57 s on chat only, not on `/kot/score`, so the launcher turns it off and both routes take the same clips |
 
 ### Host memory
 
@@ -145,21 +145,19 @@ text "Describe what you see in the video.") and consumes ids verbatim from
 that render: the raw form (one video placeholder) on a decode, the raw form
 plus the generated tail on a replay, the head asserted.
 
-The video decodes through the checkpoint's own HF video processor
-(torchcodec), frame-sampled at fps 2.0 with the reference per-frame pixel cap
-(`cap_pixels_per_frame`), and rides to the engine as `(frames, metadata)` with
-`do_sample_frames=False` - the frames ARE the sampled ones, the timestamps
-come from the metadata, so the frame selection is bit-identical to the
-reference's. vLLM's processor expands the placeholder into the per-frame
-timestamp structure.
+Chat and the score path load the video with the same vLLM `VideoMediaIO`, built
+from one value in the server (`MEDIA_IO_KWARGS`): the `qwen3_vl` loader, the
+torchcodec codec and fps 2.0. That loader's arithmetic and decoder settings are
+the HF sampler's, so the frame selection matches the reference's. The video
+rides to the engine as `(frames, metadata)`, under the reference per-frame pixel
+cap (`cap_pixels_per_frame`) and `do_sample_frames=False` - the frames ARE the
+sampled ones, the timestamps come from the metadata. vLLM's processor expands
+the placeholder into the per-frame timestamp structure.
 
-The chat surface is vLLM's own app, so it takes the same pins through vLLM's
-settings: `default_chat_template_kwargs` with `enable_thinking` false, and
-`media_io_kwargs` with the `qwen3_vl` loader, the torchcodec codec and fps 2.0.
-That loader's arithmetic and decoder settings are the HF sampler's, so chat
-decodes the frames the score path decodes. A `video_url` is a base64 data URI,
-or `file:///inputs/...` when `/inputs` exists; the server allows that path only
-then, because vLLM refuses all media, base64 included, on a missing one.
+The chat surface is vLLM's own app, so its prompt comes through
+`default_chat_template_kwargs` with `enable_thinking` false. A `video_url` is a
+`file://` path or a base64 data URI. The server allows any local path, and it
+binds only to 127.0.0.1.
 
 A video unit costs ~12.4k tokens (the checkpoint's own pixel budget:
 `longest_edge 25165824` per video). The stored rows are the pre-sampling
@@ -200,16 +198,16 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-A video request has the harness's shape: the text part, then the video. A host
-without `/inputs` sends `data:video/mp4;base64,...` as the `url`.
+A video request has the harness's shape: the video, then the text part.
+`data:video/mp4;base64,...` works as the `url` too.
 
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model": "Qwen3.8-27B",
        "messages": [{"role": "user", "content": [
-         {"type": "text", "text": "Describe what you see in the video."},
-         {"type": "video_url", "video_url": {"url": "file:///inputs/video.mp4"}}]}],
+         {"type": "video_url", "video_url": {"url": "file:///inputs/video.mp4"}},
+         {"type": "text", "text": "Describe what you see in the video."}]}],
        "max_completion_tokens": 64, "seed": 42,
        "temperature": 1.0, "top_p": 0.95, "top_k": 20}' \
   | python3 -m json.tool

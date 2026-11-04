@@ -48,6 +48,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -60,7 +61,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 # The V1 runner streams the per-step tensors the tap consumes. Pin the
 # runner the tap is written against.
 os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
-# torch 2.13's triton refuses the non-constexpr globals vLLM's kernels read
+# torch 2.14's triton refuses the non-constexpr globals vLLM's kernels read
 # (LOG2E et al.); triton's own documented escape hatch for exactly this.
 os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
 # FlashInfer's backend table claims sm_120 support but its JIT's own arch
@@ -71,7 +72,7 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 import numpy as np  # noqa: E402
 import vllm  # noqa: E402
 
-VLLM_PIN = "0.32.0"
+VLLM_PIN = "0.33.0"
 if not vllm.__version__.startswith(VLLM_PIN):
     sys.exit(
         f"this deployment is written against vllm {VLLM_PIN} (its logprobs tap "
@@ -80,11 +81,12 @@ if not vllm.__version__.startswith(VLLM_PIN):
 
 from fastapi import Request  # noqa: E402
 from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
+import torch  # noqa: E402
 from vllm import SamplingParams  # noqa: E402
+from vllm.entrypoints.common.cli_args import make_arg_parser  # noqa: E402
 from vllm.entrypoints.launchers.api_server.app_state import init_app_state  # noqa: E402
 from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client  # noqa: E402
 from vllm.entrypoints.launchers.app import build_app  # noqa: E402
-from vllm.entrypoints.launchers.cli_args import make_arg_parser  # noqa: E402
 from vllm.entrypoints.launchers.launcher import serve_http  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
@@ -94,7 +96,7 @@ SCORE = "/kot/score"
 CONTRACT_VERSION = 1
 SCORE_PREFIX = "kot-score-"
 # This server mounts completions and chat; generate is the only task it
-# serves. Passing it explicitly keeps 0.32's deprecation warning away and
+# serves. Passing it explicitly keeps vLLM's deprecation warning away and
 # pins the value a future vllm line will demand.
 SUPPORTED_TASKS = ("generate",)
 UTF8 = "utf-8"
@@ -120,7 +122,7 @@ def _install_logprobs_tap() -> None:
         processor = original_from_new_request(cls, tokenizer, request)
         processor.kot_prompt_tensors = []
         processor.kot_sample_lists = []
-        # 0.32 randomizes request_id (8 characters appended) and moves the
+        # vLLM randomizes request_id (8 characters appended) and moves the
         # caller's id to external_req_id; the tap keys on the caller's id,
         # which the score handlers look up. Older lines have no such field.
         rid = getattr(request, "external_req_id", None) or request.request_id
@@ -489,8 +491,6 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
         if visible and visible != "-1":
             args.tensor_parallel_size = len([item for item in visible.split(",") if item.strip()])
         else:
-            import torch
-
             args.tensor_parallel_size = max(torch.cuda.device_count(), 1)
     return args
 
@@ -519,9 +519,31 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
     # One deployment, one engine: served_model_name carries both the hub id
     # and the weights path, so OpenAI requests may name either (the speed
     # harness echoes the runner's --model-id), and a request without a model
-    # field is answered by the sole served model. vLLM 0.32 builds the
+    # field is answered by the sole served model. vLLM builds the
     # middleware stack inside build_app, so no middleware may be added here;
     # none is needed.
+
+
+def _nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text(errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
+def _placed_devices(device: str, parallel_config) -> str:
+    """Where the weights are, ordinals included, one per engine worker:
+    cuda:0, or cuda:0+cuda:1 over two cards.
+
+    The count is the engine's own config. A torch.cuda call could initialize
+    CUDA in this API-server process, and that flips vLLM's fork to spawn.
+    """
+    if device != "cuda":
+        return device
+    return "+".join(f"cuda:{rank}" for rank in range(parallel_config.world_size))
 
 
 def main() -> int:
@@ -546,8 +568,12 @@ def main() -> int:
                 "tokenizer_id": model_id,
                 "engine": f"vllm {vllm.__version__}",
                 "dtype": str(model_config.dtype).removeprefix("torch."),
-                "device": cli.device,
+                "device": _placed_devices(cli.device, engine.vllm_config.parallel_config),
                 "vocab_size": int(model_config.hf_config.vocab_size),
+                "torch_version": torch.__version__,
+                "plugin_version": "",
+                "driver_version": _nvidia_driver(),
+                "toolkit_version": torch.version.cuda or "",
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             # Routes go on before init_app_state, so the app starts with the

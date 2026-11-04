@@ -11,7 +11,7 @@
 # an old tree fails the version gate below loudly, on purpose.
 set -euo pipefail
 
-VLLM_PIN="0.32.0"
+VLLM_PIN="0.33.0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT="" MODEL="" DEVICE=""
@@ -80,5 +80,9 @@ echo "[kot-vllm-ocr] python: $PY" >&2
 SITE_PACKAGES="$("$PY" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")"
 cp "$DIR/kot_ngram.py" "$SITE_PACKAGES/kot_ngram.py"
 echo "[kot-vllm-ocr] ngram rule installed into $SITE_PACKAGES"
+
+# vLLM's per-request decoded-media limit applies on chat only: /kot/score has
+# no such limit. 0 disables it, so the two routes take the same documents.
+export VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES=0
 
 exec "$PY" "$DIR/kot_serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
