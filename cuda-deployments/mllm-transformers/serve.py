@@ -23,7 +23,11 @@ frames), so the deployment renders the pinned chat prompt itself - the raw
 form (one video placeholder) is what a capture stores, and a replay prefill
 re-renders it, asserts the stored head matches, and scores the stored tail
 (n_rows). The decode's rows come from generate's own per-step logits
-(output_logits), the raw pre-warper distribution.
+(output_logits), the raw pre-warper distribution. allow_eos shapes a video
+decode's stop as the contract states: false, the default, is exactly
+max_new_tokens ids with EOS suppressed through min_new_tokens, and the rows
+are still taken before that suppression; true stops at EOS, at most that many,
+and the EOS id stays in output_ids with its row.
 """
 
 from __future__ import annotations
@@ -242,6 +246,8 @@ def main() -> int:
                 "presence_penalty is unsupported on the transformers engine: "
                 "it is an OpenAI-surface knob (vllm and sglang apply it)"
             )
+        max_new_tokens = int(body["max_new_tokens"])
+        allow_eos = bool(body.get("allow_eos", False))
         with torch.no_grad():
             out = model.generate(
                 input_ids=torch.tensor([expanded], device=model.device),
@@ -249,7 +255,8 @@ def main() -> int:
                 temperature=float(sampling.get("temperature", 1.0) or 1.0),
                 top_p=float(sampling.get("top_p", 0.95) or 0.95),
                 top_k=int(sampling.get("top_k", 20) or 20),
-                max_new_tokens=int(body["max_new_tokens"]),
+                min_new_tokens=0 if allow_eos else max_new_tokens,
+                max_new_tokens=max_new_tokens,
                 pad_token_id=processor.tokenizer.eos_token_id,
                 use_cache=True,
                 return_dict_in_generate=True,

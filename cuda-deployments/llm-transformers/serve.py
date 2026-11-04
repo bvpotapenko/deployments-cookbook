@@ -17,6 +17,9 @@ Numerics contract, implemented exactly:
   (temperature, top_p, top_k, min_p, repetition_penalty; generate() takes all
   five natively), seed planted immediately before the call, and the stored
   logits are the raw ones before any warper (output_logits=True gives those).
+  allow_eos false, the default, is exactly max_new_tokens ids with EOS
+  suppressed through min_new_tokens; true stops at EOS, at most that many, and
+  the EOS id stays in output_ids with its row.
   presence_penalty is an OpenAI-surface knob with no generate() equivalent,
   so a request that sets it above 0 is refused naming the field rather than
   silently ignoring it;
@@ -351,12 +354,12 @@ def main():
 
     def generate_ids(
         prompt_ids: list[int], max_new_tokens: int, seed: int, sampling: dict,
-        min_new_tokens: int | None = None, streamer: TextIteratorStreamer | None = None,
+        min_new_tokens: int, streamer: TextIteratorStreamer | None = None,
     ):
         """Sample with the request's sampling knobs; the raw per-step logits
         are returned before any warper touched them. The score path forces
-        exactly max_new_tokens (min_new_tokens equal to it); the chat surface
-        applies only what the request carried."""
+        exactly max_new_tokens (min_new_tokens equal to it) unless the request
+        allows EOS; the chat surface applies only what the request carried."""
         ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         set_seed(seed)
         with torch.no_grad():
@@ -369,7 +372,7 @@ def main():
                 top_p=sampling["top_p"],
                 min_p=sampling["min_p"],
                 repetition_penalty=sampling["repetition_penalty"],
-                min_new_tokens=max_new_tokens if min_new_tokens is None else min_new_tokens,
+                min_new_tokens=min_new_tokens,
                 max_new_tokens=max_new_tokens,
                 pad_token_id=pad_token_id,
                 use_cache=True,
@@ -388,8 +391,12 @@ def main():
         write_log_probs(rows, out_dir, int(rows.shape[0]), vocab_size)
         return int(rows.shape[0])
 
-    def decode(prompt_ids: list[int], max_new_tokens: int, seed: int, sampling: dict):
-        generated, logits = generate_ids(prompt_ids, max_new_tokens, seed, sampling)
+    def decode(
+        prompt_ids: list[int], max_new_tokens: int, seed: int, sampling: dict, allow_eos: bool,
+    ):
+        generated, logits = generate_ids(
+            prompt_ids, max_new_tokens, seed, sampling, 0 if allow_eos else max_new_tokens,
+        )
         rows = log_softmax(logits, vocab_size)
         consumed = [*prompt_ids, *generated]
         text = tokenizer.decode(generated, skip_special_tokens=True)
@@ -410,6 +417,7 @@ def main():
                 int(body["max_new_tokens"]),
                 int(body.get("seed", DEFAULT_SEED)),
                 resolve_sampling(body),
+                bool(body.get("allow_eos", False)),
             )
             n_rows = int(rows.shape[0])
             np.save(out_dir / "log_probs.npy", rows, allow_pickle=False)

@@ -27,10 +27,11 @@ Numerics, the whole point of this deployment:
     cannot sneak pad rows past that check.
   * decode applies the request's sampling object exactly as given
     (temperature, top_p, top_k, min_p; all four are native SamplingParams
-    knobs) with the request's seed and no penalties, and min_tokens =
-    max_new_tokens so the reply has exactly max_new_tokens rows (same
-    convention as the reference server: EOS suppressed for the whole
-    generation, raw logprobs unaffected).
+    knobs) with the request's seed and no penalties. allow_eos false, the
+    default, sets min_tokens = max_new_tokens so the reply has exactly
+    max_new_tokens rows (same convention as the reference server: EOS
+    suppressed for the whole generation, raw logprobs unaffected). True stops
+    at EOS, at most that many, and the EOS id stays in output_ids with its row.
   * prefix caching is OFF: with prompt_logprobs requested, a cache hit would
     leave the rows of the cached prefix never computed. Off, there is no such
     state at all.
@@ -217,17 +218,18 @@ def _sampling_params(body: dict, vocab_size: int) -> SamplingParams:
     are native SamplingParams knobs): they steer what the sampler draws and
     never touch the reported logprobs, which are the raw logits' log-softmax.
     No penalties are set, and the only logits processor that can appear is
-    min_tokens (EOS suppression), which changes which token is sampled, never
-    the reported raw logprobs.
+    min_tokens (EOS suppression under allow_eos=false), which changes which
+    token is sampled, never the reported raw logprobs.
     """
     if body["mode"] == "prefill":
         return SamplingParams(max_tokens=1, temperature=1.0, prompt_logprobs=vocab_size)
     sampling = _resolve_sampling(body)
     max_new_tokens = int(body["max_new_tokens"])
+    allow_eos = bool(body.get("allow_eos", False))
     seed = body.get("seed")
     return SamplingParams(
         max_tokens=max_new_tokens,
-        min_tokens=max_new_tokens,
+        min_tokens=0 if allow_eos else max_new_tokens,
         temperature=sampling["temperature"],
         top_p=sampling["top_p"],
         top_k=sampling["top_k"],
@@ -323,14 +325,17 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
 
     The engine's per-step tensors are drained while the request runs,
     scattered into token-id order and written block-wise into a memmap of the
-    final shape, so memory holds one block instead of the whole unit and the
-    client sees rows for as long as the generation lasts.
+    cap shape, so memory holds one block instead of the whole unit and the
+    client sees rows for as long as the generation lasts. Under allow_eos the
+    sampler may stop early; the file is compacted to the rows actually
+    produced before the reply names it.
     """
     input_ids = [int(token) for token in body["input_ids"]]
     if not input_ids:
         yield _line({"error": "ValueError", "detail": "empty input_ids"})
         return
     max_new_tokens = int(body["max_new_tokens"])
+    allow_eos = bool(body.get("allow_eos", False))
     out_dir = Path(body["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     request_id = f"{SCORE_PREFIX}{uuid.uuid4().hex}"
@@ -381,7 +386,7 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
             written += block.shape[0]
             yield _line({"block": consumed // BLOCK_ROWS, "rows": written})
         output_ids = [int(token) for token in final.outputs[0].token_ids]
-        if written != len(output_ids) or written != max_new_tokens:
+        if written != len(output_ids) or (not allow_eos and written != max_new_tokens):
             yield _line(
                 {"error": "ValueError",
                  "detail": f"decode produced {written} rows for {len(output_ids)} sampled "
@@ -389,7 +394,16 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
                            "distribution token t was sampled from"}
             )
             return
+        # Compact to the rows actually produced (allow_eos may stop early).
+        # A real copy, not a view: np.load(mmap_mode)[:n] stays memory-mapped,
+        # and rewriting the file under a live mmap is a short write.
         log_probs.flush()
+        del log_probs
+        if written < max_new_tokens:
+            mapped = np.load(out_dir / "log_probs.npy", mmap_mode="r")
+            compact = np.array(mapped[:written])
+            del mapped
+            np.save(out_dir / "log_probs.npy", compact, allow_pickle=False)
         np.save(
             out_dir / "input_ids.npy",
             np.ascontiguousarray(np.asarray(input_ids + output_ids, dtype=np.int32)),
