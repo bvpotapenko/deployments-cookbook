@@ -71,6 +71,9 @@ VIDEO_FPS = 2.0
 VIDEO_DO_SAMPLE_FRAMES = True
 CAP_PIXELS_PER_FRAME = True
 
+# Rows per log-softmax block. At vocabulary 248320 a block is 0.24 GiB of float32.
+BLOCK_ROWS = 256
+
 
 def nvidia_driver() -> str:
     """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
@@ -231,9 +234,21 @@ def main() -> int:
         }
         return raw, expanded, media
 
-    def _store_rows(out_dir: Path, rows: torch.Tensor, ids: list[int]) -> None:
+    def _store_rows(out_dir: Path, logits: tuple[torch.Tensor, ...], ids: list[int]) -> None:
+        """Write one log_probs.npy row per logits tensor, block by block: the
+        log-softmax on the logits' device, each finished block copied to host
+        and into the file, so a whole unit's float32 rows never exist at once."""
         out_dir.mkdir(parents=True, exist_ok=True)
-        np.save(out_dir / "log_probs.npy", rows.cpu().numpy(), allow_pickle=False)
+        rows = np.lib.format.open_memmap(
+            out_dir / "log_probs.npy", mode="w+", dtype=np.float32, shape=(len(logits), vocab_size)
+        )
+        for start in range(0, len(logits), BLOCK_ROWS):
+            # One expression: no name keeps a block alive, so its memory is back
+            # in the allocator for the next one, without an empty_cache.
+            rows[start:start + BLOCK_ROWS] = torch.log_softmax(
+                torch.vstack(logits[start:start + BLOCK_ROWS]).float(), dim=-1
+            )[:, :vocab_size].cpu().numpy()
+        rows.flush()
         np.save(out_dir / "input_ids.npy", np.asarray(ids, dtype=np.int32), allow_pickle=False)
 
     def _video_decode(body: dict, path: str) -> dict:
@@ -268,9 +283,10 @@ def main() -> int:
                 **media,
             )
         generated = out.sequences[0][len(expanded):].tolist()
-        rows = torch.log_softmax(torch.cat(list(out.logits)).float(), dim=-1)[:, :vocab_size]
+        logits = out.logits
+        del out  # it holds the KV cache: off both cards before the rows
         out_dir = Path(body["out_dir"])
-        _store_rows(out_dir, rows, [*raw, *generated])
+        _store_rows(out_dir, logits, [*raw, *generated])
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
@@ -306,9 +322,8 @@ def main() -> int:
             # the weights and the KV cache. The first n_rows of the block are
             # the tail's predictors (row t predicts position t+1).
             block = model(**media, input_ids=full, logits_to_keep=n_rows + 1).logits[0]
-        rows = torch.log_softmax(block[:n_rows].float(), dim=-1)[:, :vocab_size]
         out_dir = Path(body["out_dir"])
-        _store_rows(out_dir, rows, ids)
+        _store_rows(out_dir, block[:n_rows].unbind(), ids)
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
@@ -366,15 +381,9 @@ def main() -> int:
             pad_token_id=processor.tokenizer.eos_token_id,
         )[0][len(ids):].tolist()
         logits = _forward([*ids, *generated])
-        rows = torch.log_softmax(logits[len(ids) - 1 : len(ids) - 1 + len(generated)].float(), dim=-1)
         out_dir = Path(body["out_dir"])
-        out_dir.mkdir(parents=True, exist_ok=True)
-        np.save(out_dir / "log_probs.npy", rows[:, :vocab_size].cpu().numpy(), allow_pickle=False)
-        np.save(
-            out_dir / "input_ids.npy",
-            np.asarray([*ids, *generated], dtype=np.int32),
-            allow_pickle=False,
-        )
+        rows = logits[len(ids) - 1 : len(ids) - 1 + len(generated)].unbind()
+        _store_rows(out_dir, rows, [*ids, *generated])
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
@@ -388,13 +397,8 @@ def main() -> int:
         if n_rows < 1:
             raise RuntimeError("the mllm prefill stores the decode's rows: set n_rows")
         logits = _forward(ids)
-        rows = torch.log_softmax(
-            logits[len(ids) - 1 - n_rows : len(ids) - 1].float(), dim=-1
-        )
         out_dir = Path(body["out_dir"])
-        out_dir.mkdir(parents=True, exist_ok=True)
-        np.save(out_dir / "log_probs.npy", rows[:, :vocab_size].cpu().numpy(), allow_pickle=False)
-        np.save(out_dir / "input_ids.npy", np.asarray(ids, dtype=np.int32), allow_pickle=False)
+        _store_rows(out_dir, logits[len(ids) - 1 - n_rows : len(ids) - 1].unbind(), ids)
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
