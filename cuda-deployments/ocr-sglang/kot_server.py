@@ -409,7 +409,10 @@ async def _score_decode(engine, body: dict) -> dict:
         np.asarray([*template_ids, *output_ids], dtype=np.int32),
     )
     if output_ids and engine.tokenizer is not None:
-        text = engine.tokenizer.decode(output_ids, skip_special_tokens=True)
+        # The checkpoint's own decode: only the stop token goes. Its table tags
+        # (<td>, <tr>) are flagged special, so skip_special_tokens=True deletes them.
+        text = engine.tokenizer.decode(output_ids, skip_special_tokens=False)
+        text = text.removesuffix(engine.tokenizer.eos_token)
         (out_dir / "text.txt").write_text(text, encoding=UTF8)
     return {
         "prompt_id": body["prompt_id"],
