@@ -31,12 +31,14 @@ Numerics of the score path, in one place:
   row (which predicts a token that is not there) is dropped, so n ids
   produce exactly n-1 rows.
 * decode: the request's sampling object applied exactly as given
-  (temperature, top_p, top_k, min_p; all four are native engine knobs), the
-  request's seed, every penalty at its neutral value,
-  ``min_new_tokens=max_new_tokens`` and ``ignore_eos`` so exactly the
-  requested number of tokens come out, one row per generated token. Rows are
-  stashed before the sampler touches the logits, so they are the model's own
-  distribution; the emitted ids come from SGLang's own sampler.
+  (temperature, top_p, top_k, min_p, repetition_penalty, presence_penalty; all
+  native engine knobs) and the request's seed. ``allow_eos`` false, the default,
+  sets ``min_new_tokens=max_new_tokens`` and ``ignore_eos``, so exactly the
+  requested number of tokens come out. True stops at EOS, at most that many;
+  the EOS id stays in ``output_ids`` and keeps its row. One row per generated
+  token either way. Rows are stashed before the sampler touches the logits, so
+  they are the model's own distribution; the emitted ids come from SGLang's own
+  sampler.
 
 Rows land on disk through ``open_memmap`` at the final shape, filled block by
 block as the engine's stash arrives: the full-vocabulary log-softmax of an
@@ -179,8 +181,15 @@ def _resolve_sampling(body: dict) -> dict:
     }
 
 
-def _sampling_params(max_new_tokens: int, seed: int, sampling: dict) -> dict:
-    """The request's sampling object with its seed and every penalty neutral."""
+def _sampling_params(max_new_tokens: int, seed: int, sampling: dict,
+                     allow_eos: bool) -> dict:
+    """The request's sampling object with its seed; ``frequency_penalty`` is no
+    sampling field, so it stays neutral.
+
+    ``allow_eos`` shapes the stop as the contract states: false demands exactly
+    ``max_new_tokens`` ids (EOS suppressed through min_new_tokens and
+    ignore_eos), true stops at EOS, at most that many.
+    """
     return {
         "max_new_tokens": max_new_tokens,
         "temperature": sampling["temperature"],
@@ -190,8 +199,8 @@ def _sampling_params(max_new_tokens: int, seed: int, sampling: dict) -> dict:
         "frequency_penalty": 0.0,
         "presence_penalty": sampling["presence_penalty"],
         "repetition_penalty": sampling["repetition_penalty"],
-        "min_new_tokens": max_new_tokens,
-        "ignore_eos": True,
+        "min_new_tokens": 0 if allow_eos else max_new_tokens,
+        "ignore_eos": not allow_eos,
         "sampling_seed": seed,
     }
 
@@ -201,7 +210,7 @@ async def _score_prefill(engine, input_ids: list[int], seed: int):
     _clean_stash()
     await engine.async_generate(
         input_ids=input_ids,
-        sampling_params=_sampling_params(0, seed, NEUTRAL_SAMPLING),
+        sampling_params=_sampling_params(0, seed, NEUTRAL_SAMPLING, False),
         return_logprob=True,
         logprob_start_len=0,
     )
@@ -220,19 +229,19 @@ async def _score_prefill(engine, input_ids: list[int], seed: int):
 
 
 async def _score_decode(engine, input_ids: list[int], max_new_tokens: int,
-                        seed: int, sampling: dict):
+                        seed: int, sampling: dict, allow_eos: bool):
     """Generate with the request's seed; one row per generated token."""
     _clean_stash()
     done = await engine.async_generate(
         input_ids=input_ids,
-        sampling_params=_sampling_params(max_new_tokens, seed, sampling),
+        sampling_params=_sampling_params(max_new_tokens, seed, sampling, allow_eos),
         return_logprob=True,
         logprob_start_len=-1,
     )
     output_ids = [int(token) for token in done["output_ids"]]
     blocks = await _collect_stash("decode")
     rows = sum(block.shape[0] for block in blocks)
-    # One penalizer call per generated id, with the overlap scheduler off. Any
+    # One ModelRunner.sample call per generated id, overlap scheduler off. Any
     # other count is a request sharing the batch, and its rows carry no id.
     if rows != len(output_ids):
         raise ScoreFailure(
@@ -267,7 +276,7 @@ async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
         elif body["mode"] == "decode":
             blocks, output_ids = await _score_decode(
                 engine, input_ids, int(body["max_new_tokens"]), seed,
-                _resolve_sampling(body),
+                _resolve_sampling(body), bool(body.get("allow_eos", False)),
             )
             consumed = input_ids + output_ids
         else:
