@@ -132,8 +132,9 @@ async def write_stream(reply: StreamReply, writer) -> None:
         try:
             for delta in reply.streamer:
                 loop.call_soon_threadsafe(queue.put_nowait, delta)
-        except Exception:
-            pass
+        except Exception as failure:
+            # Handed to the loop below: a stream cut short must not finish as a success.
+            loop.call_soon_threadsafe(queue.put_nowait, failure)
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -145,6 +146,8 @@ async def write_stream(reply: StreamReply, writer) -> None:
             delta = await queue.get()
             if delta is None:
                 break
+            if isinstance(delta, Exception):
+                raise delta
             key = "content" if reply.chat else "text"
             await send(reply.chunk({key: delta}, None))
         generated, _ = await asyncio.wrap_future(reply.future)
@@ -383,6 +386,18 @@ def main():
         generated = out.sequences[0, ids.shape[1] :].tolist()
         return generated, torch.cat(list(out.logits), dim=0)
 
+    def generate_stream(streamer: TextIteratorStreamer, *request):
+        """A stream's job on the model thread. generate() ends its streamer only
+        when it returns, so a failure ends it here, or the pump waits forever;
+        the failure still raises into the future, for write_stream to report."""
+        try:
+            return generate_ids(*request, streamer)
+        except Exception:
+            # Not streamer.end(): it decodes the held tokens again, and the
+            # decode may be what failed, which would lose the end signal.
+            streamer.on_finalized_text("", stream_end=True)
+            raise
+
     def prefill(prompt_ids: list[int], out_dir: Path) -> int:
         ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         with torch.no_grad():
@@ -472,9 +487,9 @@ def main():
                 tokenizer, skip_prompt=True, skip_special_tokens=True
             )
             future = executor.submit(
-                generate_ids, prompt_ids, max_tokens,
+                generate_stream, streamer, prompt_ids, max_tokens,
                 int(body.get("seed") or DEFAULT_SEED), sampling,
-                min_new_tokens, streamer,
+                min_new_tokens,
             )
             return StreamReply(
                 streamer, future, model_id, len(prompt_ids), max_tokens, chat
