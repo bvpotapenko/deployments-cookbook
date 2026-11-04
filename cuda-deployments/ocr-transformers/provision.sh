@@ -4,7 +4,7 @@
 #   ./provision.sh [python-for-uv]
 #
 # Creates /root/kotvenv-ocr with the native deepseek_ocr2 stack: transformers
-# is PINNED to 5.20.2 (the version that ships the architecture beside a
+# is PINNED to 5.22.1 (the version that ships the architecture beside a
 # Blackwell-capable torch). kot_serve.sh finds the venv by this exact path.
 # The model itself is not downloaded here: on the box run
 #   HF_HOME=/workspace/hf_ocr hf download deepseek-ai/DeepSeek-OCR-2
@@ -24,13 +24,13 @@ uv venv "$VENV" --python "$PYTHON"
 # carries the same cu13x build if it does. The torch build must carry sm_120.
 uv pip install --python "$VENV/bin/python" "torch==2.14.1"
 uv pip install --python "$VENV/bin/python" \
-  "transformers==5.20.2" numpy safetensors pillow requests tqdm \
+  "transformers==5.22.1" numpy safetensors pillow requests tqdm \
   "huggingface_hub[hf_transfer]"
 
 "$VENV/bin/python" - <<'EOF'
 import torch, transformers
 from transformers import DeepseekOcr2ForConditionalGeneration
-assert transformers.__version__.startswith("5.20."), transformers.__version__
+assert transformers.__version__.startswith("5.22."), transformers.__version__
 print("provisioned:", "torch", torch.__version__, "| transformers", transformers.__version__,
       "| cuda:", torch.cuda.is_available())
 EOF

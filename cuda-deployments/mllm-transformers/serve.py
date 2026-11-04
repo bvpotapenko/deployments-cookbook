@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from http import HTTPStatus
 from pathlib import Path
 
@@ -58,13 +59,23 @@ VIDEO_PROMPT = "Describe what you see in the video."
 # The runtime media knobs this deployment pins. The pixel budgets and the
 # patch geometry come from the checkpoint's own configs; fps and frame
 # sampling are the cookbook defaults. cap_pixels_per_frame adopts the
-# reference implementation's (qwen-vl-utils) per-frame cap: without it the
-# transformers video path costs ~12000 tokens per 30 s clip, with it the
-# worst clip so far cost 7920. A candidate deployment must report the
+# reference implementation's (qwen-vl-utils) per-frame cap. At 1080p it binds
+# below 32 frames (22 frames cost 12100 tokens without it, 7920 with it); a
+# 30 s clip costs 11700 either way. A candidate deployment must report the
 # same values or its capture compares nothing.
 VIDEO_FPS = 2.0
 VIDEO_DO_SAMPLE_FRAMES = True
 CAP_PIXELS_PER_FRAME = True
+
+
+def nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
 
 
 def pinned_media_params(checkpoint: Path, processor) -> dict:
@@ -106,7 +117,7 @@ def main() -> int:
     # The native config keeps the language model's fields under text_config.
     text_config = getattr(model.config, "text_config", None) or model.config
     vocab_size = int(getattr(model.config, "vocab_size", 0) or text_config.vocab_size)
-    devices = sorted({str(device) for device in model.hf_device_map.values()})
+    devices = sorted({str(parameter.device) for parameter in model.parameters()})
 
     info = {
         "contract_version": CONTRACT_VERSION,
@@ -117,6 +128,10 @@ def main() -> int:
         "dtype": "bfloat16",
         "device": "+".join(str(d) for d in devices),
         "vocab_size": vocab_size,
+        "torch_version": torch.__version__,
+        "plugin_version": "",
+        "driver_version": nvidia_driver(),
+        "toolkit_version": torch.version.cuda or "",
         "media": pinned_media_params(checkpoint, processor),
         "started_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -194,7 +209,7 @@ def main() -> int:
         )
         # The raw form: the rendered string tokenized by the tokenizer only -
         # ONE video placeholder. apply_chat_template(tokenize=True) runs the
-        # full processor in 5.20.2 and returns the expanded ids.
+        # full processor in 5.22.1 and returns the expanded ids.
         raw = processor.tokenizer(text, add_special_tokens=False)["input_ids"]
         video = processor(
             text=[text],

@@ -34,6 +34,7 @@ import asyncio
 import argparse
 import json
 import os
+import re
 import resource
 import sys
 import threading
@@ -199,6 +200,16 @@ def fail(message: str):
     raise SystemExit(1)
 
 
+def nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
 def log_softmax(logits: torch.Tensor, vocab_size: int) -> np.ndarray:
     """Float32 log-softmax over the configured vocabulary, sliced of any padding."""
     rows = torch.log_softmax(logits[:, :vocab_size].float(), dim=-1)
@@ -328,6 +339,10 @@ def main():
         "dtype": str(parameter.dtype).removeprefix("torch."),
         "device": "+".join(sorted({str(p.device) for p in model.parameters()})),
         "vocab_size": vocab_size,
+        "torch_version": torch.__version__,
+        "plugin_version": "",
+        "driver_version": nvidia_driver(),
+        "toolkit_version": torch.version.cuda or "",
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     print(f"[llm-transformers] serving on {HOST}:{args.port}: {info}", flush=True)

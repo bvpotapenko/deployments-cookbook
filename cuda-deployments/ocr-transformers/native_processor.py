@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native transformers 5.20.2 processor for DeepSeek-OCR-2.
+"""Native transformers 5.22.1 processor for DeepSeek-OCR-2.
 
 build_processor(dir) wraps the checkpoint's own LlamaTokenizerFast and the
 native PIL image processor into the native DeepseekOcr2Processor. The knobs
@@ -50,6 +50,7 @@ import math
 import sys
 from pathlib import Path
 
+from PIL import Image, ImageOps
 from transformers import LlamaTokenizerFast
 from transformers.models.deepseek_ocr2.image_processing_pil_deepseek_ocr2 import (
     DeepseekOcr2ImageProcessorPil,
@@ -68,6 +69,12 @@ PAD_COLOR = (127, 127, 127)  # int(0.5 * 255) per channel, as the reference pads
 TEMPLATE = "<image>\nFree OCR."  # the checkpoint's plain sft format; its recipe adds BOS
 GLOBAL_QUERIES = (GLOBAL_SIZE // PATCH_SIZE // DOWNSAMPLE) ** 2  # 256
 TILE_QUERIES = (MAX_SINGLE_VIEW // PATCH_SIZE // DOWNSAMPLE) ** 2  # 144
+
+
+def load_image(path):
+    """The checkpoint's own decode: EXIF rotation, then RGB (its load_image and load_pil_images)."""
+    with Image.open(path) as opened:
+        return ImageOps.exif_transpose(opened).convert("RGB")
 
 
 def build_processor(dir):
@@ -211,7 +218,6 @@ def _main(argv=None):
     args = parser.parse_args(argv)
 
     import transformers
-    from PIL import Image
 
     print(f"transformers {transformers.__version__}")
     processor = build_processor(args.dir)
@@ -240,8 +246,7 @@ def _main(argv=None):
     failed += _run_one(processor, large, "1600x1200 (b)")
 
     if args.image:
-        with Image.open(args.image) as opened:
-            extra = opened.convert("RGB")
+        extra = load_image(args.image)
         failed += _run_one(processor, extra, f"{args.image} {extra.size[0]}x{extra.size[1]}")
 
     if failed:

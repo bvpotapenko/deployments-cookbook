@@ -1,9 +1,9 @@
 # Run Book: ocr-transformers
 
-This deployment serves DeepSeek-OCR-2 with transformers 5.20.2. One process
+This deployment serves DeepSeek-OCR-2 with transformers 5.22.1. One process
 serves the full-vocabulary log-probability surface on one port, one request
 at a time. The checkpoint loads through the native DeepseekOCR2 architecture
-that transformers 5.20.2 ships. The remote code is not used. Generation
+that transformers 5.22.1 ships. The remote code is not used. Generation
 applies the checkpoint's own no-repeat n-gram rule.
 
 ## Model parameters
@@ -17,7 +17,7 @@ a comparison fails.
 |---|---|---|---|---|
 | deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | bfloat16 | temperature 0.0001, top_p 1.0 |
 
-One stack serves every model: CPython 3.12, transformers 5.20.2, and the
+One stack serves every model: CPython 3.12, transformers 5.22.1, and the
 torch build from the cu128 index that carries sm_120. The seed arrives with
 the request; 42 is the convention.
 
@@ -31,11 +31,11 @@ The stack runs on CPython 3.12.
 uv venv /root/kotvenv-ocr --python 3.12
 uv pip install --python /root/kotvenv-ocr/bin/python torch==2.14.1
 uv pip install --python /root/kotvenv-ocr/bin/python \
-  transformers==5.20.2 numpy safetensors pillow huggingface_hub pydantic pyyaml
+  transformers==5.22.1 numpy safetensors pillow huggingface_hub pydantic pyyaml
 ```
 
 `provision.sh` groups these commands, installs uv when it is missing, and
-ends with an import self-check. Transformers 5.20.2 ships the configuration,
+ends with an import self-check. Transformers 5.22.1 ships the configuration,
 the image processing, the processing and the modeling for this checkpoint.
 The deployment's image processor is the PIL variant, so torchvision is not
 needed; the torch build must still carry sm_120 (PyPI's default for 2.14.x
@@ -62,8 +62,9 @@ from_pretrained with that config (transformers applies its registered
 deepseek_ocr2 conversion in memory, renames and stacks only) and checks
 0 missing / 0 unexpected keys plus a bitwise comparison of every checkpoint
 tensor against the loaded model; build_processor reproduces the reference
-image path (257 global tokens, 144 per 768x768 tile). The gates' report is
-stamped into /kot/info.
+image path (257 global tokens, 144 per 768x768 tile). An image decodes by the
+checkpoint's own recipe: EXIF rotation, then `.convert("RGB")`, which drops
+alpha. The gates' report is stamped into /kot/info.
 
 ### Transfer
 

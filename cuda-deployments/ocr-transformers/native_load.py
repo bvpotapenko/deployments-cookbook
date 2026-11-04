@@ -1,11 +1,11 @@
-"""Native weight loader for DeepSeek-OCR-2 on transformers 5.20.2.
+"""Native weight loader for DeepSeek-OCR-2 on transformers 5.22.1.
 
 load_native(dir, cfg) returns (model, report). The config comes from
 native_config.build_config; from_pretrained receives it with the explicit
 class, so config.json's model_type "deepseek_vl_v2" is never parsed and the
 native deepseek_ocr2 architecture is used.
 
-Transformers 5.20.2 registers a deepseek_ocr2 conversion mapping
+Transformers 5.22.1 registers a deepseek_ocr2 conversion mapping
 (conversion_mapping.py) whose source keys are this checkpoint's own names
 (model.sam_model.*, model.qwen2_model.*, model.projector.*, model.layers.*,
 lm_head, view_seperator). Applied to the checkpoint it is 2577 pure renames

@@ -7,7 +7,7 @@ Layout: this file beside the three builder modules it imports and never
 implements - native_config (build_config), native_load (load_native),
 native_processor (build_processor) - serving a weights directory that is a
 hub snapshot plus two patched files (run-book.md holds the list and the
-hashes). The checkpoint loads through transformers 5.20.2's built-in
+hashes). The checkpoint loads through transformers 5.22.1's built-in
 deepseek_ocr2 architecture; the checkpoint's own remote code is not used.
 
 Numerics contract, implemented exactly as our reference server's deepseek
@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -72,7 +73,7 @@ from transformers import set_seed
 
 from native_config import build_config
 from native_load import load_native
-from native_processor import build_processor
+from native_processor import build_processor, load_image
 
 HOST = "127.0.0.1"
 INFO = "/kot/info"
@@ -207,6 +208,10 @@ def main():
         "dtype": str(parameter.dtype).removeprefix("torch."),
         "device": str(parameter.device),
         "vocab_size": vocab_size,
+        "torch_version": torch.__version__,
+        "plugin_version": "",
+        "driver_version": nvidia_driver(),
+        "toolkit_version": torch.version.cuda or "",
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         # What load_native loaded and checked, stamped verbatim.
         "load_report": report,
@@ -223,10 +228,7 @@ def main():
         finds the image positions itself, so the block is only a count of
         128815 - and the count is the reference's.
         """
-        from PIL import Image
-
-        image = Image.open(image_path).convert("RGB")
-        features = processor.image_processor(images=[image], return_tensors="pt")
+        features = processor.image_processor(images=[load_image(image_path)], return_tensors="pt")
         local = features.get("pixel_values_local")
         tiles = int(features["num_local_patches"][0])
         return (
@@ -438,6 +440,16 @@ def main():
 
 def fail(message: str):
     raise RuntimeError(message)
+
+
+def nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
 
 
 if __name__ == "__main__":
