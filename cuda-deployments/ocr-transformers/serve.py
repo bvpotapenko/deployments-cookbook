@@ -354,7 +354,10 @@ def main():
             )
         emitted = out.sequences[0, prompt_len:].tolist()
         write_log_probs(torch.cat(list(out.logits), dim=0), out_dir, len(emitted))
-        text = processor.tokenizer.decode(emitted, skip_special_tokens=True)
+        # The checkpoint's own decode: only the stop token goes. Its table tags
+        # (<td>, <tr>) are flagged special, so skip_special_tokens=True deletes them.
+        tokenizer = processor.tokenizer
+        text = tokenizer.decode(emitted, skip_special_tokens=False).removesuffix(tokenizer.eos_token)
         return emitted, text
 
     @route(SCORE)
