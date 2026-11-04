@@ -8,7 +8,7 @@
 # /v1/completions and /v1/chat/completions. The contract's one-server rule
 # lives here: the score path and the speed harness drive the same engine.
 #
-# The engine is sglang 0.5.22. On a CUDA host it expects to find sglang,
+# The engine is sglang 0.5.23. On a CUDA host it expects to find sglang,
 # sglang-kernel and triton already installed in the interpreter named by
 # KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
 set -euo pipefail

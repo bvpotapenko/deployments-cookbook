@@ -48,10 +48,9 @@ Logprob objects per position on the frontend. The tap below keeps the raw
 tensors instead and leaves cheap placeholders in vLLM's own lists, so its
 invariants hold and nothing else changes.
 
-The chat template (the checkpoint's tokenizer ships none) is this
-directory's chat_template.jinja: it renders the same plain format the score
-path builds, image placeholder first, so both surfaces feed the model the
-same shape of prompt.
+The chat template (the checkpoint's tokenizer ships none) is vLLM's own
+template_deepseek_ocr.jinja: BOS, image placeholder, newline, instruction,
+the plain format the score path carries.
 """
 
 from __future__ import annotations
@@ -60,6 +59,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -72,7 +72,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 # runner streams the per-step tensors the tap consumes. Pin the runner the
 # tap is written against; the n-gram processor is a V1-interface plugin too.
 os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
-# torch 2.13's triton refuses the non-constexpr globals vLLM's kernels read
+# torch 2.14's triton refuses the non-constexpr globals vLLM's kernels read
 # (LOG2E et al.); triton's own documented escape hatch for exactly this.
 os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
 # FlashInfer's backend table claims sm_120 support but its JIT's own arch
@@ -83,7 +83,7 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 import numpy as np  # noqa: E402
 import vllm  # noqa: E402
 
-VLLM_PIN = "0.32.0"
+VLLM_PIN = "0.33.0"
 if not vllm.__version__.startswith(VLLM_PIN):
     sys.exit(
         f"this deployment is written against vllm {VLLM_PIN} (its logprobs tap "
@@ -93,13 +93,15 @@ if not vllm.__version__.startswith(VLLM_PIN):
 from fastapi import Request  # noqa: E402
 from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
 from PIL import Image  # noqa: E402
+import torch  # noqa: E402
 from vllm import SamplingParams  # noqa: E402
+from vllm.entrypoints.common.cli_args import make_arg_parser  # noqa: E402
 from vllm.entrypoints.launchers.launcher import serve_http  # noqa: E402
 from vllm.entrypoints.launchers.api_server.app_state import init_app_state  # noqa: E402
 from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client  # noqa: E402
 from vllm.entrypoints.launchers.app import build_app  # noqa: E402
-from vllm.entrypoints.launchers.cli_args import make_arg_parser  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
+from vllm.multimodal.media.image import ImageMediaIO  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
 INFO = "/kot/info"
@@ -112,6 +114,9 @@ BLOCK_ROWS = 256  # one streamed line per block of decode rows: bounded memory, 
 
 IMAGE = "image"
 IMAGE_TAG = "<image>"
+# The image loader's one settings value. args.media_io_kwargs hands it to
+# chat's media connector; _load_image builds the same ImageMediaIO from it.
+MEDIA_IO_KWARGS = {"image": {"image_mode": "RGB"}}
 
 SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
 
@@ -266,9 +271,9 @@ def _sampling_params(body: dict, vocab_size: int) -> SamplingParams:
 def _pop_sink(request_id: str) -> LogprobsProcessor | None:
     """The processor for a score request, by prefix.
 
-    vLLM 0.30 appends its own sub-request suffix to the ids it passes down
-    ("-xxxxxxxx"), so the exact id we generated never matches; the contract
-    serves one score request at a time, so a prefix match is unambiguous.
+    vLLM appends its own suffix to the ids it passes down ("-xxxxxxxx"), so
+    the exact id we generated never matches; the contract serves one score
+    request at a time, so a prefix match is unambiguous.
     """
     processor = SINKS.pop(request_id, None)
     if processor is None:
@@ -292,6 +297,14 @@ def _line(message: dict) -> str:
     return json.dumps(message) + "\n"
 
 
+def _load_image(image_path: str) -> Image.Image:
+    """The document as the loader chat calls gives it: ImageMediaIO, built as
+    vLLM's media connector builds it, from the value chat's connector gets.
+    It applies the EXIF rotation and composites alpha on white. No decode
+    budget: the launcher turns chat's off, so neither route has one."""
+    return ImageMediaIO(**MEDIA_IO_KWARGS["image"]).load_file(Path(image_path)).media
+
+
 def _score_prompt(body: dict) -> tuple[TokensPrompt, list[int]]:
     """The score request as an engine prompt: the ids verbatim, plus the image.
 
@@ -309,7 +322,7 @@ def _score_prompt(body: dict) -> tuple[TokensPrompt, list[int]]:
             f"got {len(transcript)}"
         )
     ids = list(transcript)
-    image = Image.open(image_path).convert("RGB")
+    image = _load_image(image_path)
     prompt = TokensPrompt(prompt_token_ids=ids, multi_modal_data={"image": image})
     return prompt, transcript
 
@@ -337,7 +350,7 @@ def _image_only_prompt(image_path: str, template_ids: list[int]) -> TokensPrompt
     """The decode's prompt: the frozen template ids the request carried, and the image."""
     if not template_ids:
         raise ValueError("empty input_ids: the version's frozen template is missing")
-    image = Image.open(image_path).convert("RGB")
+    image = _load_image(image_path)
     return TokensPrompt(prompt_token_ids=template_ids, multi_modal_data={"image": image})
 
 
@@ -537,7 +550,7 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     return model_id, override_revision or revision
 
 
-def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -> argparse.Namespace:
+def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.Namespace:
     """The vLLM server's own CLI namespace, pinned the way this contract needs.
 
     vLLM's arg parser passes ``deprecated=True`` to argparse on some versions,
@@ -562,12 +575,13 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     args.host = "127.0.0.1"
     args.port = port
     args.served_model_name = [model_id, model]
-    # The checkpoint's tokenizer ships no chat template; this deployment's
-    # own jinja renders the same plain format the score path builds, so the
-    # chat and score surfaces feed the model the same shape of prompt.
-    args.chat_template = str(Path(here) / "chat_template.jinja")
+    # The checkpoint's tokenizer ships no chat template, and vLLM's fallback for
+    # its model_type (deepseek_vl_v2) adds role tags. vLLM's OCR template renders
+    # the plain format: BOS, <image>, newline, instruction.
+    args.chat_template = "template_deepseek_ocr.jinja"
     # One document per request, exactly one image in it.
     args.limit_mm_per_prompt = {"image": 1}
+    args.media_io_kwargs = MEDIA_IO_KWARGS
     # The model's own max_position_embeddings (8192) covers template +
     # transcript + decode; override only if a task ever needs more.
     if os.environ.get("KOT_VLLM_MAX_MODEL_LEN"):
@@ -606,8 +620,6 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
         if visible and visible != "-1":
             args.tensor_parallel_size = len([item for item in visible.split(",") if item.strip()])
         else:
-            import torch
-
             args.tensor_parallel_size = max(torch.cuda.device_count(), 1)
     return args
 
@@ -648,6 +660,28 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict, image_token_i
     # sole served model. No model-name rewriting is needed.
 
 
+def _nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text(errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
+def _placed_devices(device: str, parallel_config) -> str:
+    """Where the weights are, ordinals included, one per engine worker:
+    cuda:0, or cuda:0+cuda:1 over two cards.
+
+    The count is the engine's own config. A torch.cuda call could initialize
+    CUDA in this API-server process, and that flips vLLM's fork to spawn.
+    """
+    if device != "cuda":
+        return device
+    return "+".join(f"cuda:{rank}" for rank in range(parallel_config.world_size))
+
+
 def main() -> int:
     global _MODEL_DIR
     parser = argparse.ArgumentParser(prog="kot_serve.py", description=__doc__)
@@ -659,8 +693,7 @@ def main() -> int:
 
     _install_logprobs_tap()
     model_id, model_revision = _resolve_identity(cli.model)
-    here = str(Path(__file__).resolve().parent)
-    args = _openai_args(cli.model, cli.device, cli.port, model_id, here)
+    args = _openai_args(cli.model, cli.device, cli.port, model_id)
     app = build_app(args, supported_tasks=SUPPORTED_TASKS)
 
     async def run() -> None:
@@ -676,8 +709,12 @@ def main() -> int:
                 "tokenizer_id": model_id,
                 "engine": f"vllm {vllm.__version__}",
                 "dtype": str(model_config.dtype).removeprefix("torch."),
-                "device": cli.device,
+                "device": _placed_devices(cli.device, engine.vllm_config.parallel_config),
                 "vocab_size": int(model_config.hf_config.vocab_size),
+                "torch_version": torch.__version__,
+                "plugin_version": "",
+                "driver_version": _nvidia_driver(),
+                "toolkit_version": torch.version.cuda or "",
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
             # Routes and middleware go on before init_app_state: it starts the

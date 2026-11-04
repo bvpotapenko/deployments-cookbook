@@ -1,6 +1,6 @@
 # Run Book: llm-vllm
 
-This deployment serves text models with vLLM 0.32. One process serves the
+This deployment serves text models with vLLM 0.33.0. One process serves the
 OpenAI chat surface and the full-vocabulary log-probability surface on one
 port. The full-vocabulary tap is version-pinned, so the server refuses to
 start on any other vllm version.
@@ -18,8 +18,8 @@ a comparison fails.
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.60 | 1024 | unset | bfloat16 | temperature 0.3, top_p 0.95 |
 | state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
-One stack serves every model: CPython 3.12, vLLM 0.32, the torch build that
-carries sm_120, and the transformers line the vLLM 0.32 resolver takes. The
+One stack serves every model: CPython 3.12, vLLM 0.33.0, the torch build that
+carries sm_120, and the transformers line the vLLM 0.33.0 resolver takes. The
 seed arrives with the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
@@ -31,15 +31,15 @@ CPython 3.12.
 ```bash
 # networked host
 uv venv /scratch/kot-vllm-venv --python 3.12
-uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.32"
+uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.33.0"
 
 # offline host: rebuild the closure, then install from it
 ./make_wheels.sh
 /scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.32"
+  --find-links ./wheels "vllm==0.33.0"
 ```
 
-Verify: `/scratch/kot-vllm-venv/bin/python -c "import vllm; print(vllm.__version__)"` prints `0.32.0`.
+Verify: `/scratch/kot-vllm-venv/bin/python -c "import vllm; print(vllm.__version__)"` prints `0.33.0`.
 
 Run long installs inside tmux; an ssh drop then costs nothing. Export
 `UV_CACHE_DIR=/workspace/uvcache` and `UV_HTTP_TIMEOUT=600` in the same
@@ -47,7 +47,7 @@ shell and verify with `ls -d /workspace/uvcache` after the first download.
 Where PyPI stalls, retry with
 `--index-url https://mirrors.aliyun.com/pypi/simple/`.
 
-The torch build must carry sm_120. The vLLM 0.32 resolver pairs one on its
+The torch build must carry sm_120. The vLLM 0.33.0 resolver pairs one on its
 own. A torch without Blackwell support dies at the first prefill on these
 cards.
 

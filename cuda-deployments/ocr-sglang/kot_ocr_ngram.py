@@ -8,12 +8,12 @@ the class with ``to_str()`` and passes it per request as
 empty ``custom_params`` dict, which the scheduler fills with ``__req__``.
 
 sglang applies custom processors inside ``Sampler.forward``, after the
-stash sitecustomize.py writes at that call's entry, so the stashed rows
-stay the raw pre-processing distributions; this rule changes which token
-is sampled, never what is reported. The values are DeepSeek's own (their
-DeepSeek-OCR2-vllm run scripts; sglang ships the same as its native
-default): a token that would complete a 30-gram that already occurred
-within a 90-token lookback is banned, except the table tokens.
+stash sitecustomize.py writes at ``ModelRunner.sample``'s entry, so the
+stashed rows stay the raw pre-processing distributions; this rule changes
+which token is sampled, never what is reported. The values are DeepSeek's
+own (their DeepSeek-OCR2-vllm run scripts; sglang ships the same as its
+native default): a token that would complete a 30-gram that already
+occurred within a 90-token lookback is banned, except the table tokens.
 """
 
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor

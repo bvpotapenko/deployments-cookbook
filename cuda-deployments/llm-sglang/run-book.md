@@ -1,6 +1,6 @@
 # Run Book: llm-sglang
 
-This deployment serves text models with SGLang 0.5.22. One process serves the
+This deployment serves text models with SGLang 0.5.23. One process serves the
 OpenAI chat surface and the full-vocabulary log-probability surface on one
 port. A patch layer (`sitecustomize.py`) stashes the full-vocabulary float32
 log-softmax rows of the raw logits at engine-internal entry points, so the
@@ -19,9 +19,9 @@ first suspect when a comparison fails.
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.70 | 12288 | temperature 0.3, top_p 0.95 |
 | state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | default | default | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
-One stack serves every model: CPython 3.12, sglang 0.5.22, torch 2.14.1,
-sglang-kernel 0.4.9, flashinfer-python 0.7.1 and transformers 5.19.0, the
-lines the sglang 0.5.22 resolver pairs. The seed arrives with the request.
+One stack serves every model: CPython 3.12, sglang 0.5.23, torch 2.14.1,
+sglang-kernel 0.4.10, flashinfer-python 0.7.2 and transformers 5.19.0, the
+lines the sglang 0.5.23 resolver pairs. The seed arrives with the request.
 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
@@ -33,10 +33,10 @@ The interpreter is CPython 3.12. Both sglang deployments share one venv,
 
 ```bash
 uv venv /root/kotvenv-sglang-ocr --python 3.12
-uv pip install --python /root/kotvenv-sglang-ocr/bin/python "sglang==0.5.22"
+uv pip install --python /root/kotvenv-sglang-ocr/bin/python "sglang==0.5.23" "flash-attn-4>=4.0.0b18"
 ```
 
-Verify: `/root/kotvenv-sglang-ocr/bin/python -c "import sglang; print(sglang.__version__)"` prints `0.5.22`.
+Verify: `/root/kotvenv-sglang-ocr/bin/python -c "import sglang; print(sglang.__version__)"` prints `0.5.23`.
 
 Run long installs inside tmux; an ssh drop then costs nothing. Export
 `UV_CACHE_DIR=/workspace/uvcache` and `UV_HTTP_TIMEOUT=600` in the same
@@ -44,7 +44,9 @@ shell and verify with `ls -d /workspace/uvcache` after the first download.
 Where PyPI stalls, retry with
 `--index-url https://mirrors.aliyun.com/pypi/simple/`.
 
-The resolver pairs the whole line at once. The flashinfer requirement carries
+The resolver pairs the whole line at once. sglang requires a flash-attn-4
+prerelease, which uv takes only as a direct requirement; `--prerelease=allow`
+would pull other prereleases too. The flashinfer requirement carries
 the cu13 extra, so the stack is CUDA 13. The torch wheel carries
 sm_120. A torch without Blackwell support dies at the first prefill on these
 cards. The kernel wheels link against this torch line and do not load against
@@ -169,7 +171,7 @@ KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
 
 ### state-spaces/mamba-2.8b-hf
 
-This model runs on one card at the deployment defaults. The 0.5.22 line
+This model runs on one card at the deployment defaults. The 0.5.23 line
 needs no kernel build: the mamba kernels are in-tree triton, and the model
 chain imports no `mamba_ssm` or `causal-conv1d`. The patch layer caps the
 persistent matmul's pipeline stages on sm_120 (commit 4639952); the

@@ -17,6 +17,9 @@ Numerics contract, implemented exactly:
   (temperature, top_p, top_k, min_p, repetition_penalty; generate() takes all
   five natively), seed planted immediately before the call, and the stored
   logits are the raw ones before any warper (output_logits=True gives those).
+  allow_eos false, the default, is exactly max_new_tokens ids with EOS
+  suppressed through min_new_tokens; true stops at EOS, at most that many, and
+  the EOS id stays in output_ids with its row.
   presence_penalty is an OpenAI-surface knob with no generate() equivalent,
   so a request that sets it above 0 is refused naming the field rather than
   silently ignoring it;
@@ -34,6 +37,7 @@ import asyncio
 import argparse
 import json
 import os
+import re
 import resource
 import sys
 import threading
@@ -89,11 +93,13 @@ class StreamReply:
         self.prompt_tokens = prompt_tokens
         self.max_tokens = max_tokens
         self.chat = chat
-        self.id = (f"chatcmpl-{uuid4().hex}" if chat else f"cmpl-{uuid4().hex()}")
+        self.id = f"chatcmpl-{uuid4().hex}" if chat else f"cmpl-{uuid4().hex}"
         self.created = int(datetime.now(timezone.utc).timestamp())
 
     def chunk(self, delta: dict, finish_reason: str | None) -> bytes:
-        choice: dict = {"index": 0, "delta": delta, "finish_reason": finish_reason}
+        # A completion carries its text on the choice, as the non-streaming reply does.
+        content = {"delta": delta} if self.chat else {"text": delta.get("text", "")}
+        choice: dict = {"index": 0, **content, "finish_reason": finish_reason}
         payload = {
             "id": self.id,
             "object": "chat.completion.chunk" if self.chat else "text_completion",
@@ -110,7 +116,7 @@ async def write_stream(reply: StreamReply, writer) -> None:
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Cache-Control: no-cache\r\n"
-        "Connection: keep-alive\r\n\r\n"
+        "Connection: close\r\n\r\n"
     ).encode(LATIN1)
     writer.write(head)
     await asyncio.wait_for(writer.drain(), BODY_TIMEOUT)
@@ -141,7 +147,7 @@ async def write_stream(reply: StreamReply, writer) -> None:
                 break
             key = "content" if reply.chat else "text"
             await send(reply.chunk({key: delta}, None))
-        generated = await asyncio.wrap_future(reply.future)
+        generated, _ = await asyncio.wrap_future(reply.future)
         finish = "length" if len(generated) >= reply.max_tokens else "stop"
         await send(reply.chunk({}, finish))
         await send(b"data: [DONE]\n\n")
@@ -197,6 +203,16 @@ def resolve_weights(model: str) -> tuple[Path, str]:
 def fail(message: str):
     print(f"[llm-transformers] {message}", file=sys.stderr, flush=True)
     raise SystemExit(1)
+
+
+def nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
 
 
 def log_softmax(logits: torch.Tensor, vocab_size: int) -> np.ndarray:
@@ -328,18 +344,22 @@ def main():
         "dtype": str(parameter.dtype).removeprefix("torch."),
         "device": "+".join(sorted({str(p.device) for p in model.parameters()})),
         "vocab_size": vocab_size,
+        "torch_version": torch.__version__,
+        "plugin_version": "",
+        "driver_version": nvidia_driver(),
+        "toolkit_version": torch.version.cuda or "",
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     print(f"[llm-transformers] serving on {HOST}:{args.port}: {info}", flush=True)
 
     def generate_ids(
         prompt_ids: list[int], max_new_tokens: int, seed: int, sampling: dict,
-        min_new_tokens: int | None = None, streamer: TextIteratorStreamer | None = None,
+        min_new_tokens: int, streamer: TextIteratorStreamer | None = None,
     ):
         """Sample with the request's sampling knobs; the raw per-step logits
         are returned before any warper touched them. The score path forces
-        exactly max_new_tokens (min_new_tokens equal to it); the chat surface
-        applies only what the request carried."""
+        exactly max_new_tokens (min_new_tokens equal to it) unless the request
+        allows EOS; the chat surface applies only what the request carried."""
         ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         set_seed(seed)
         with torch.no_grad():
@@ -352,7 +372,7 @@ def main():
                 top_p=sampling["top_p"],
                 min_p=sampling["min_p"],
                 repetition_penalty=sampling["repetition_penalty"],
-                min_new_tokens=max_new_tokens if min_new_tokens is None else min_new_tokens,
+                min_new_tokens=min_new_tokens,
                 max_new_tokens=max_new_tokens,
                 pad_token_id=pad_token_id,
                 use_cache=True,
@@ -371,8 +391,12 @@ def main():
         write_log_probs(rows, out_dir, int(rows.shape[0]), vocab_size)
         return int(rows.shape[0])
 
-    def decode(prompt_ids: list[int], max_new_tokens: int, seed: int, sampling: dict):
-        generated, logits = generate_ids(prompt_ids, max_new_tokens, seed, sampling)
+    def decode(
+        prompt_ids: list[int], max_new_tokens: int, seed: int, sampling: dict, allow_eos: bool,
+    ):
+        generated, logits = generate_ids(
+            prompt_ids, max_new_tokens, seed, sampling, 0 if allow_eos else max_new_tokens,
+        )
         rows = log_softmax(logits, vocab_size)
         consumed = [*prompt_ids, *generated]
         text = tokenizer.decode(generated, skip_special_tokens=True)
@@ -393,6 +417,7 @@ def main():
                 int(body["max_new_tokens"]),
                 int(body.get("seed", DEFAULT_SEED)),
                 resolve_sampling(body),
+                bool(body.get("allow_eos", False)),
             )
             n_rows = int(rows.shape[0])
             np.save(out_dir / "log_probs.npy", rows, allow_pickle=False)
@@ -563,8 +588,11 @@ def main():
                         payload = await loop.run_in_executor(executor, ROUTES[path], body)
                     if isinstance(payload, StreamReply):
                         await write_stream(payload, writer)
-                    else:
-                        await reply(writer, 200, payload, keep)
+                        # The stream head carries no Content-Length, so closing
+                        # is the body's only terminator: without it every
+                        # client blocks on EOF after [DONE].
+                        return
+                    await reply(writer, 200, payload, keep)
                 except Exception as failure:
                     await reply(
                         writer,

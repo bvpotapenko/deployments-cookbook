@@ -31,12 +31,14 @@ Numerics of the score path, in one place:
   row (which predicts a token that is not there) is dropped, so n ids
   produce exactly n-1 rows.
 * decode: the request's sampling object applied exactly as given
-  (temperature, top_p, top_k, min_p; all four are native engine knobs), the
-  request's seed, every penalty at its neutral value,
-  ``min_new_tokens=max_new_tokens`` and ``ignore_eos`` so exactly the
-  requested number of tokens come out, one row per generated token. Rows are
-  stashed before the sampler touches the logits, so they are the model's own
-  distribution; the emitted ids come from SGLang's own sampler.
+  (temperature, top_p, top_k, min_p, repetition_penalty, presence_penalty; all
+  native engine knobs) and the request's seed. ``allow_eos`` false, the default,
+  sets ``min_new_tokens=max_new_tokens`` and ``ignore_eos``, so exactly the
+  requested number of tokens come out. True stops at EOS, at most that many;
+  the EOS id stays in ``output_ids`` and keeps its row. One row per generated
+  token either way. Rows are stashed before the sampler touches the logits, so
+  they are the model's own distribution; the emitted ids come from SGLang's own
+  sampler.
 
 Rows land on disk through ``open_memmap`` at the final shape, filled block by
 block as the engine's stash arrives: the full-vocabulary log-softmax of an
@@ -46,7 +48,11 @@ Concurrency: one event loop; the Engine is created inside it, so the
 tokenizer manager, the HTTP server and every generation stream share the
 loop and the engine batches whatever is in flight. /kot/score is serialised
 by a lock -- the runner sends one at a time, and one-request-at-a-time is
-also what makes the stash collection sound (see sitecustomize.py).
+also what makes the stash collection sound (see sitecustomize.py). The OpenAI
+routes take no lock. A score that shares a batch with chat traffic stashes
+their rows too, with no request id, so the row counts (the ids on a prefill, the
+generated ids on a decode) fail that score loudly; the chat is untouched. The
+runner must not overlap the two.
 """
 
 from __future__ import annotations
@@ -55,6 +61,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 import traceback
 import urllib.parse
@@ -174,8 +181,15 @@ def _resolve_sampling(body: dict) -> dict:
     }
 
 
-def _sampling_params(max_new_tokens: int, seed: int, sampling: dict) -> dict:
-    """The request's sampling object with its seed and every penalty neutral."""
+def _sampling_params(max_new_tokens: int, seed: int, sampling: dict,
+                     allow_eos: bool) -> dict:
+    """The request's sampling object with its seed; ``frequency_penalty`` is no
+    sampling field, so it stays neutral.
+
+    ``allow_eos`` shapes the stop as the contract states: false demands exactly
+    ``max_new_tokens`` ids (EOS suppressed through min_new_tokens and
+    ignore_eos), true stops at EOS, at most that many.
+    """
     return {
         "max_new_tokens": max_new_tokens,
         "temperature": sampling["temperature"],
@@ -185,8 +199,8 @@ def _sampling_params(max_new_tokens: int, seed: int, sampling: dict) -> dict:
         "frequency_penalty": 0.0,
         "presence_penalty": sampling["presence_penalty"],
         "repetition_penalty": sampling["repetition_penalty"],
-        "min_new_tokens": max_new_tokens,
-        "ignore_eos": True,
+        "min_new_tokens": 0 if allow_eos else max_new_tokens,
+        "ignore_eos": not allow_eos,
         "sampling_seed": seed,
     }
 
@@ -196,7 +210,7 @@ async def _score_prefill(engine, input_ids: list[int], seed: int):
     _clean_stash()
     await engine.async_generate(
         input_ids=input_ids,
-        sampling_params=_sampling_params(0, seed, NEUTRAL_SAMPLING),
+        sampling_params=_sampling_params(0, seed, NEUTRAL_SAMPLING, False),
         return_logprob=True,
         logprob_start_len=0,
     )
@@ -215,30 +229,25 @@ async def _score_prefill(engine, input_ids: list[int], seed: int):
 
 
 async def _score_decode(engine, input_ids: list[int], max_new_tokens: int,
-                        seed: int, sampling: dict):
+                        seed: int, sampling: dict, allow_eos: bool):
     """Generate with the request's seed; one row per generated token."""
     _clean_stash()
     done = await engine.async_generate(
         input_ids=input_ids,
-        sampling_params=_sampling_params(max_new_tokens, seed, sampling),
+        sampling_params=_sampling_params(max_new_tokens, seed, sampling, allow_eos),
         return_logprob=True,
         logprob_start_len=-1,
     )
     output_ids = [int(token) for token in done["output_ids"]]
     blocks = await _collect_stash("decode")
     rows = sum(block.shape[0] for block in blocks)
-    if rows == len(output_ids) + 1:
-        # The overlap scheduler launches one more decode forward for a request
-        # that finished in the previous iteration: a distribution for a token
-        # nobody emits. The sampler calls are stashed in order, so the phantom
-        # is the last row; the contract's g rows are the g before-token
-        # distributions of the g emitted ids.
-        *blocks, last = blocks
-        if last.shape[0] > 1:
-            blocks.append(np.ascontiguousarray(last[:-1]))
-        print("[kot_server] trimmed 1 overlap phantom decode row", flush=True)
-    elif rows != len(output_ids):
-        raise ScoreFailure(f"{rows} stashed rows for {len(output_ids)} generated ids")
+    # One ModelRunner.sample call per generated id, overlap scheduler off. Any
+    # other count is a request sharing the batch, and its rows carry no id.
+    if rows != len(output_ids):
+        raise ScoreFailure(
+            f"{rows} stashed rows for {len(output_ids)} generated ids: a mixed batch "
+            "(another request shared a forward) or a lost stash"
+        )
     return blocks, output_ids
 
 
@@ -267,7 +276,7 @@ async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
         elif body["mode"] == "decode":
             blocks, output_ids = await _score_decode(
                 engine, input_ids, int(body["max_new_tokens"]), seed,
-                _resolve_sampling(body),
+                _resolve_sampling(body), bool(body.get("allow_eos", False)),
             )
             consumed = input_ids + output_ids
         else:
@@ -474,7 +483,7 @@ class KotEngine:
             # The overlap scheduler launches one more decode forward for a
             # request that finished in the previous iteration; single-request
             # scoring gets nothing from overlap, and the phantom row would
-            # need trimming every time.
+            # fail the decode's row count.
             "disable_overlap_schedule": True,
             # The 8192 default fits most families; a family with longer
             # prompts (the llm replay longform is 8,494 ids) overrides it.
@@ -503,6 +512,15 @@ class KotEngine:
         self.tokenizer_id = str(self.tokenizer.name_or_path) if self.tokenizer else model_dir
         self.model_id, self.model_revision = _model_identity(Path(model_dir), config)
         self.engine_name = f"sglang {sglang.__version__}"
+        self.torch_version = torch.__version__
+        self.toolkit_version = torch.version.cuda or ""
+        # Where the engine's schedulers run, by its own placement rule; read
+        # from its arguments, because the model lives in those processes.
+        server_args = self.engine.server_args
+        self.device = "+".join(
+            f"cuda:{server_args.base_gpu_id + rank * server_args.gpu_id_step}"
+            for rank in range(server_args.tp_size)
+        ) if is_cuda else "cpu"
 
     def encode_prompt(self, prompt: str) -> list[int]:
         """The OpenAI text surface goes through the engine's own tokenizer."""
@@ -533,7 +551,17 @@ class KotEngine:
         return await self.engine.async_generate(**kwargs)
 
 
-def _engine_info(engine, device: str) -> dict:
+def _nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text(encoding=UTF8).splitlines()[0]
+    except (OSError, IndexError, ValueError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
+def _engine_info(engine) -> dict:
     return {
         "contract_version": CONTRACT_VERSION,
         "model_id": engine.model_id,
@@ -541,8 +569,12 @@ def _engine_info(engine, device: str) -> dict:
         "tokenizer_id": engine.tokenizer_id,
         "engine": engine.engine_name,
         "dtype": engine.dtype_name,
-        "device": f"{device}:0" if ":" not in device else device,
+        "device": engine.device,
         "vocab_size": engine.vocab_size,
+        "torch_version": engine.torch_version,
+        "plugin_version": "",
+        "driver_version": _nvidia_driver(),
+        "toolkit_version": engine.toolkit_version,
         "started_at": _utc_stamp(),
     }
 
@@ -701,7 +733,7 @@ async def run_server(port: int, model: str, device: str) -> None:
     # Created inside the running loop, the Engine adopts it: tokenizer
     # manager, HTTP server and every generation stream share one loop.
     engine = KotEngine(model, device)
-    info = _engine_info(engine, device)
+    info = _engine_info(engine)
     print(f"[kot_server] serving: {info}", flush=True)
 
     # One tiny generation so the first real request does not pay compile and

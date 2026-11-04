@@ -1,6 +1,6 @@
 # Run Book: llm-transformers
 
-This deployment serves text models with transformers 5.20.2. One process
+This deployment serves text models with transformers 5.22.1. One process
 serves the OpenAI chat and completions routes and the full-vocabulary
 log-probability surface on one port. The model thread runs one generation at
 a time, whatever many connections are held open.
@@ -21,7 +21,7 @@ between engines is the first suspect when a comparison fails.
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | bfloat16 | temperature 0.3, top_p 0.95 |
 | state-spaces/mamba-2.8b-hf | `96c48e0292b63f5346b6d30061af2551f7101e26` | 1 | bfloat16 | temperature 0.7, top_p 0.9, repetition_penalty 1.2 |
 
-One stack serves every model: CPython 3.12, transformers 5.20.2, and the
+One stack serves every model: CPython 3.12, transformers 5.22.1, and the
 torch build from the cu128 index that carries sm_120. The seed arrives with
 the request; 42 is the convention.
 
@@ -37,7 +37,7 @@ uv venv /root/kotvenv --python 3.12
 uv pip install --python /root/kotvenv/bin/python \
   torch --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python /root/kotvenv/bin/python \
-  transformers==5.20.2 accelerate numpy pydantic pyyaml
+  transformers==5.22.1 accelerate numpy pydantic pyyaml
 ```
 
 Run long installs inside tmux; an ssh drop then costs nothing. Export
@@ -49,8 +49,8 @@ keeps its own index.
 
 torch must come from the cu130 index. That build carries the sm_120 kernels;
 a torch without them stalls silently on these cards. The venv pins
-transformers 5.20.2. A different transformers line runs different attention
-kernels and computes different outputs.
+transformers 5.22.1. Another version can run different attention kernels and
+compute different outputs.
 
 accelerate is not optional. The loader spreads a multi-card model's layers
 with `device_map="auto"`, and that call is accelerate's. DeepSeek-V2-Lite
@@ -137,7 +137,7 @@ or `device_map="auto"` spreads the layers over every visible card.
 
 The weights take 29.3 GB in bfloat16. The model needs both cards.
 
-transformers 5.20.2 applies YaRN's mscale^2 natively. The pinned line is the
+transformers 5.22.1 applies YaRN's mscale^2 natively. The pinned line is the
 guarantee; the restoration the server once carried died with the lines that
 needed it (4.54 through 5.14, issue #12).
 
@@ -153,7 +153,8 @@ error that names the field. The OpenAI routes do not read the field.
 
 ## Check
 
-One curl per model, each carrying its table row's sampling.
+One curl per model, each carrying its table row's sampling. The mamba
+checkpoint ships no chat template, so its curl posts to `/v1/completions`.
 
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
@@ -172,10 +173,10 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
        "temperature": 0.3, "top_p": 0.95}' \
   | python3 -m json.tool
 
-curl -s http://127.0.0.1:8090/v1/chat/completions \
+curl -s http://127.0.0.1:8090/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"model": "state-spaces/mamba-2.8b-hf",
-       "messages": [{"role": "user", "content": "ping"}],
+       "prompt": "ping",
        "max_tokens": 50,
        "temperature": 0.7, "top_p": 0.9,
        "repetition_penalty": 1.2}' \

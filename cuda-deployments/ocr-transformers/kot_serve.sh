@@ -24,7 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # The interpreter is named explicitly, with PATH only as a late fallback: the
 # process that starts us may run inside an environment that is not ours, and
-# the stack needs the pinned transformers 5.20.2 venv on a provisioned host.
+# the stack needs the pinned transformers 5.22.1 venv on a provisioned host.
 # In the graded container the image carries the family stack and PATH
 # resolves to it.
 if [ -n "${KOT_OCR_PY:-}" ]; then

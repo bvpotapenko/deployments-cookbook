@@ -18,11 +18,16 @@ Endpoints:
   checkpoint's chat template, ``enable_thinking`` false, one video
   placeholder) and consumes ids verbatim from there - the raw form on a
   decode, the raw form plus the generated tail on a replay, the head
-  asserted. The video rides to the engine as an attachment path and the
-  engine's own multimodal processor samples the frames (fps 2.0, pinned)
-  and expands the placeholder into the per-frame timestamp structure.
+  asserted. The video rides to the engine as an attachment path; the patch
+  layer samples the frames as the reference does (fps 2.0, pinned) and the
+  checkpoint's HF processor, inside the engine, resizes them under the
+  per-frame cap and expands the placeholder into the per-frame timestamp
+  structure.
 * ``POST /kot/infer`` -- the speed surface: one video decode, the
   description written as ``text.txt`` into ``out_dir``, the file named back.
+* ``POST /v1/chat/completions`` -- the OpenAI-shaped surface the speed harness
+  drives: one user message, a text part and an optional video part, rendered
+  and pinned as /kot/score renders and pins them; streams on ``stream: true``.
 
 Numerics of the score path, in one place:
 
@@ -37,12 +42,12 @@ Numerics of the score path, in one place:
   request's sampling object is applied exactly as given (temperature, top_p,
   top_k, min_p; all four are native engine knobs), the request's seed, every
   penalty at its neutral value. ``allow_eos`` gates the stop exactly as the
-  contract states. Rows are stashed at the sampler's entry -- the raw
-  pre-sampling distributions, one per emitted token, before any penalty or
-  temperature touches the logits. ``input_ids.npy`` stores the raw template
-  plus the generated ids, so a replay prefill teacher-forces over exactly
-  what the request carried: the pre-expansion sequence, with its single
-  video placeholder.
+  contract states. Rows are stashed at ``ModelRunner.sample``'s entry -- the
+  raw pre-sampling distributions, one per emitted token, before the EOS
+  suppression, any penalty or temperature touches the logits.
+  ``input_ids.npy`` stores the raw template plus the generated ids, so a
+  replay prefill teacher-forces over exactly what the request carried: the
+  pre-expansion sequence, with its single video placeholder.
 
 Rows land on disk through ``open_memmap`` at the final shape, filled block by
 block as the engine's stash arrives: the full-vocabulary log-softmax of a
@@ -52,7 +57,14 @@ of this file holds one.
 Concurrency: one event loop; the Engine is created inside it. /kot/score is
 serialised by a lock -- the runner sends one at a time, and
 one-request-at-a-time is what makes the stash collection sound (see
-sitecustomize.py).
+sitecustomize.py). /v1/chat/completions takes no lock: each connection awaits
+the engine on its own, video decoding and the HF pass run off the event loop
+(the patch layer, ``mm_processor_worker_num``), and the scheduler batches what
+arrives. Chat asks for no logprobs, so alone it writes no stash. A score that
+shares a batch with chat traffic stashes their rows too, with no request id, so
+the row counts (``prompt_tokens`` on a prefill, the generated ids on a decode)
+fail that score loudly; the chat is untouched. The runner must not overlap the
+two.
 """
 
 from __future__ import annotations
@@ -61,6 +73,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 import traceback
 import urllib.parse
@@ -76,10 +89,14 @@ MEMMAP_BLOCK_ROWS = 512
 
 VIDEO = "video"
 # The pinned media pipeline, the same values the transformers reference
-# serves. The processor's own frame sampling defaults to fps 2.0; pinned
-# here and carried per request, so a candidate must report the same values.
+# serves (mllm-transformers/serve.py). The processor's own frame sampling
+# defaults to fps 2.0, its per-frame cap to off; both pinned here, for this
+# file's own processor call and for the engine (mm_process_config), so a
+# candidate must report the same values.
 VIDEO_PROMPT = "Describe what you see in the video."
 VIDEO_FPS = 2.0
+VIDEO_DO_SAMPLE_FRAMES = True
+CAP_PIXELS_PER_FRAME = True
 
 
 class ScoreFailure(RuntimeError):
@@ -218,38 +235,23 @@ def _consumed_guard(done: dict, ids: list[int], engine, raw: list[int], video_pa
     """The engine must consume the request ids verbatim, plus the video block.
 
     The expected consumed count is known before the request: the request ids
-    minus the one video placeholder, plus the video block's token count. The
-    block's count comes from the patch layer's note (``last_counts.json`` in
-    the stash dir) when it recorded one, else from this deployment's own
-    processor rendering of the same video - the HF expansion, the same code
-    the reference runs. A mismatch means the engine retokenized the request
-    or sampled different frames; the self-agreement would read that only as
-    numbers.
+    grown by what the expansion adds to the raw template. That growth comes
+    from this deployment's own processor rendering of the same video at the
+    reference's pins - the HF expansion, the same code the reference runs. A
+    mismatch means the engine retokenized the request or sampled different
+    frames; the self-agreement would read that only as numbers.
     """
     meta = done.get("meta_info", {}) if isinstance(done, dict) else {}
     prompt_tokens = int(meta.get("prompt_tokens", 0) or 0)
     if not prompt_tokens:
         return
-    video_token = engine.model_config.hf_config.video_token_id
-    placeholders = sum(1 for token in ids if int(token) == video_token)
-    try:
-        counts = json.loads(
-            (Path(os.environ["KOT_SGLANG_STASH_DIR"]) / "last_counts.json").read_text(
-                encoding="utf-8"
-            )
-        ).get("counts", [])
-    except Exception:
-        counts = None
-    if counts is not None:
-        expected = len(ids) - placeholders + sum(counts)
-    else:
-        expanded = _expanded_template_ids(engine, video_path)
-        expected = len(ids) - placeholders + len(expanded) - len(raw)
+    expanded = _expanded_template_ids(engine, video_path)
+    expected = len(ids) + len(expanded) - len(raw)
     if prompt_tokens != expected:
         raise ScoreFailure(
-            f"the engine consumed {prompt_tokens} tokens for {len(ids)} ids with "
-            f"{placeholders} placeholder(s) and counts {counts}; expected {expected}: "
-            "the request did not stay verbatim"
+            f"the engine consumed {prompt_tokens} tokens for {len(ids)} ids; the raw "
+            f"template's {len(raw)} expand to {len(expanded)}, so {expected} were "
+            "expected: the request did not stay verbatim"
         )
 
 
@@ -262,42 +264,43 @@ def _expanded_template_ids(engine, video_path: str) -> list[int]:
     timestamp structure the reference runs, at the same pins. Cached per
     video; a CPU pass of a second or two."""
     if video_path not in _EXPANDED_CACHE:
-        processor = engine.processor
-        messages = [{"role": "user", "content": [
-            {"type": "video", "video": video_path},
-            {"type": "text", "text": VIDEO_PROMPT},
-        ]}]
-        video = processor(
-            text=[processor.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )],
+        video = engine.processor(
+            text=[_render_prompt(engine, VIDEO_PROMPT, video_path)],
             videos=[[video_path]],
             fps=VIDEO_FPS,
+            do_sample_frames=VIDEO_DO_SAMPLE_FRAMES,
+            cap_pixels_per_frame=CAP_PIXELS_PER_FRAME,
             return_tensors=None,
         )
         _EXPANDED_CACHE[video_path] = list(map(int, video["input_ids"][0]))
     return _EXPANDED_CACHE[video_path]
 
 
-def _raw_template_ids(engine, video_path: str) -> list[int]:
-    """The pinned prompt's raw ids: the chat template rendered with ONE video
-    placeholder, tokenized by the tokenizer only. This is the form a capture
-    stores; the engine's expansion happens inside sglang."""
-    processor = engine.processor
-    messages = [{"role": "user", "content": [
-        {"type": "video", "video": video_path},
-        {"type": "text", "text": VIDEO_PROMPT},
-    ]}]
-    text = processor.apply_chat_template(
-        messages,
+def _render_prompt(engine, text: str, video: str | None) -> str:
+    """One user turn through the checkpoint's chat template, ``enable_thinking``
+    false: the video placeholder first when there is a video, then the text.
+    The template reads only that a video is there, never its value."""
+    content = [{"type": "text", "text": text}]
+    if video is not None:
+        content.insert(0, {"type": "video", "video": video})
+    return engine.processor.apply_chat_template(
+        [{"role": "user", "content": content}],
         tokenize=False,
         add_generation_prompt=True,
         enable_thinking=False,
     )
-    return list(processor.tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+def _prompt_ids(engine, text: str, video: str | None) -> list[int]:
+    """A rendered turn's raw ids, tokenized by the tokenizer only: ONE video
+    placeholder. The engine's expansion happens inside sglang."""
+    rendered = _render_prompt(engine, text, video)
+    return list(engine.processor.tokenizer(rendered, add_special_tokens=False)["input_ids"])
+
+
+def _raw_template_ids(engine, video_path: str) -> list[int]:
+    """The pinned prompt's raw ids: the form a capture stores."""
+    return _prompt_ids(engine, VIDEO_PROMPT, video_path)
 
 
 async def _score_prefill(engine, body: dict) -> dict:
@@ -346,6 +349,15 @@ async def _score_prefill(engine, body: dict) -> dict:
     blocks = await _collect_stash("prefill")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
+    # Alone, a prefill stashes one row per position of the expanded prompt, and
+    # prompt_tokens counts those positions. A request sharing the forward adds
+    # rows with no id, which would move the tail below in the correct shape.
+    prompt_tokens = int(done.get("meta_info", {}).get("prompt_tokens", 0) or 0)
+    if rows != prompt_tokens:
+        raise ScoreFailure(
+            f"{rows} stashed prefill rows for this request's {prompt_tokens} prompt "
+            "tokens: a mixed batch (another request shared the forward) or a lost stash"
+        )
     if rows <= len(ids):
         raise ScoreFailure(
             f"the engine stashed {rows} prefill rows for {len(ids)} raw ids: the "
@@ -423,22 +435,18 @@ async def _score_decode(engine, body: dict) -> dict:
     )
     _consumed_guard(done, ids, engine, raw_ids, video_path)
     output_ids = [int(token) for token in done["output_ids"]]
-    # The decode's own sampler rows: the probe below would pollute the stash
+    # The decode's own rows: the probe below would pollute the stash
     # with prefill rows, so collect before probing.
     blocks = await _collect_stash("decode")
     blocks = [engine.slice_vocab(block) for block in blocks]
     rows = sum(block.shape[0] for block in blocks)
-    if rows == len(output_ids) + 1:
-        # The overlap scheduler launches one more decode forward for a request
-        # that finished in the previous iteration: a distribution for a token
-        # nobody emits. The sampler calls are stashed in order, so the phantom
-        # is the last row.
-        *blocks, last = blocks
-        if last.shape[0] > 1:
-            blocks.append(np.ascontiguousarray(last[:-1]))
-        print("[kot_server] trimmed 1 overlap phantom decode row", flush=True)
-    elif rows != len(output_ids):
-        raise ScoreFailure(f"{rows} stashed rows for {len(output_ids)} generated ids")
+    # One sample call per generated id, with the overlap scheduler off. Any
+    # other count is a request sharing the batch, and its rows carry no id.
+    if rows != len(output_ids):
+        raise ScoreFailure(
+            f"{rows} stashed rows for {len(output_ids)} generated ids: a mixed batch "
+            "(another request shared a forward) or a lost stash"
+        )
     if not 0 < len(output_ids) <= max_new_tokens:
         raise ScoreFailure(
             f"decode produced {len(output_ids)} ids for a cap of {max_new_tokens}"
@@ -508,6 +516,147 @@ async def kot_infer(engine, body: dict, lock: asyncio.Lock) -> dict:
     return {"prompt_id": body["prompt_id"], "files": ["text.txt"]}
 
 
+def _video_source(url: str) -> str:
+    """A video_url part's url in the form the engine's loader takes.
+
+    The loader reads ``file://`` and decodes ``data:`` itself, in its IO
+    workers, so neither needs a temp file. A plain path travels as ``file://``:
+    the loader tests a plain path by parsing it as a URL, which would cut it at
+    a ``#`` or a ``?``.
+    """
+    if url.startswith(("file://", "data:")):
+        return url
+    if url.startswith("/"):
+        return "file://" + urllib.parse.quote(url)
+    raise ScoreFailure(
+        f"a video_url must be file://, an absolute path or a data URI; got {url[:64]!r}"
+    )
+
+
+def _chat_parts(messages: list[dict]) -> tuple[str, str | None]:
+    """The user turn as (text, video source or None). The score path's prompt
+    shape decides the order, so the parts' order here does not. Any other part
+    or role is ignored."""
+    text_parts: list[str] = []
+    video = None
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            text_parts.append(content)
+            continue
+        for part in content or []:
+            kind = part.get("type")
+            if kind == "text":
+                text_parts.append(str(part.get("text", "")))
+            elif kind == "video_url":
+                if video is not None:
+                    raise ScoreFailure("one video per request: the harness sends one clip")
+                video = _video_source(str((part.get("video_url") or {}).get("url", "")))
+    return "".join(text_parts), video
+
+
+def _chat_sampling(body: dict) -> dict:
+    """The knobs a chat request may carry, in engine terms. A field left out or
+    null takes the checkpoint's own generation_config value, as /kot/infer does."""
+
+    def field(name: str, default):
+        value = body.get(name)
+        return default if value is None else value
+
+    return {
+        "max_new_tokens": int(field("max_completion_tokens", field("max_tokens", 16))),
+        "temperature": float(field("temperature", 1.0)),
+        "top_p": float(field("top_p", 0.95)),
+        "top_k": int(field("top_k", 20)) or -1,  # the contract's 0 is "off": sglang's -1
+        "sampling_seed": int(field("seed", 42)),
+    }
+
+
+def _finish_reason(done: dict) -> str:
+    """The engine's finish_reason is a dict; OpenAI's is its type."""
+    finish = done.get("meta_info", {}).get("finish_reason")
+    kind = finish.get("type") if isinstance(finish, dict) else finish
+    return "length" if kind == "length" else "stop"
+
+
+async def _chat_completions(engine, body: dict, _lock: asyncio.Lock) -> dict:
+    """POST /v1/chat/completions: same prompt and frame pins as /kot/score, no
+    lock, no logprobs. ``model`` in the reply is what /kot/info reports."""
+    text, video = _chat_parts(list(body["messages"]))
+    ids = _prompt_ids(engine, text, video)
+    params = _chat_sampling(body)
+    if body.get("stream"):
+        return SseResponse(engine, ids, video, params)
+    done = await engine.async_generate(input_ids=ids, video_data=video, sampling_params=params)
+    meta = done.get("meta_info", {})
+    prompt_tokens = int(meta.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(meta.get("completion_tokens", 0) or 0)
+    return {
+        "id": f"chatcmpl-{os.urandom(12).hex()}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": engine.model_id,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": str(done.get("text", ""))},
+                "finish_reason": _finish_reason(done),
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+def _sse_chunk(payload: dict) -> bytes:
+    return f"data: {json.dumps(payload)}\n\n".encode(UTF8)
+
+
+class SseResponse:
+    """One generation rendered as a stream of OpenAI-shaped SSE chunks."""
+
+    def __init__(self, engine, input_ids: list[int], video: str | None, params: dict):
+        self.engine = engine
+        self.input_ids = input_ids
+        self.video = video
+        self.params = params
+        self.id = f"chatcmpl-{os.urandom(12).hex()}"
+        self.created = int(time.time())
+
+    def _chunk(self, delta: dict, finish_reason: str | None) -> bytes:
+        return _sse_chunk({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.engine.model_id,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        })
+
+    async def run(self, write) -> None:
+        generator = await self.engine.async_generate(
+            input_ids=self.input_ids,
+            video_data=self.video,
+            sampling_params=self.params,
+            stream=True,
+        )
+        await write(self._chunk({"role": "assistant", "content": ""}, None))
+        previous = 0
+        done: dict = {}
+        async for update in generator:
+            done = update
+            text = str(update.get("text", ""))
+            if len(text) > previous:
+                await write(self._chunk({"content": text[previous:]}, None))
+                previous = len(text)
+        await write(self._chunk({}, _finish_reason(done)))
+        await write(b"data: [DONE]\n\n")
+
+
 def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
@@ -553,10 +702,10 @@ class KotEngine:
             # The overlap scheduler launches one more decode forward for a
             # request that finished in the previous iteration; single-request
             # scoring gets nothing from overlap, and the phantom row would
-            # need trimming every time.
+            # fail the decode's row count.
             "disable_overlap_schedule": True,
-            # The video units run ~12.4k-token prompts (the checkpoint's own
-            # pixel budget) plus a 4,096-token decode.
+            # The video units run at most ~12.4k-token prompts (the checkpoint's
+            # own pixel budget) plus a 4,096-token decode.
             "max_prefill_tokens": 16384,
             "context_length": 20480,
             # Explicit, because sglang's heuristic reserves
@@ -568,6 +717,16 @@ class KotEngine:
             # and 0.45 of a 32G card starves the budget before the cache is
             # sized. KOT_SGLANG_MEM_FRACTION overrides for models that big.
             "mem_fraction_static": float(os.environ.get("KOT_SGLANG_MEM_FRACTION", "0.45")),
+            # The patch layer's frame step reads fps; the engine hands the cap
+            # to the HF processor's videos_kwargs.
+            "mm_process_config": {
+                "video": {"fps": VIDEO_FPS, "cap_pixels_per_frame": CAP_PIXELS_PER_FRAME},
+            },
+            # On CUDA the engine's default is one worker, and one worker runs
+            # the HF pass on the event loop, stalling every open connection for
+            # as long as a clip takes. Two is qwen_vl's own number for CPU
+            # preprocessing, which is what the patch layer pins.
+            "mm_processor_worker_num": 2,
             "log_level": "info",
         }
         if is_cuda:
@@ -585,6 +744,15 @@ class KotEngine:
         self.processor = self.engine.tokenizer_manager.processor
         self.model_id, self.model_revision = _resolve_identity(model_dir)
         self.engine_name = f"sglang {sglang.__version__}"
+        self.torch_version = torch.__version__
+        self.toolkit_version = torch.version.cuda or ""
+        # Where the engine's schedulers run, by its own placement rule; read
+        # from its arguments, because the model lives in those processes.
+        server_args = self.engine.server_args
+        self.device = "+".join(
+            f"cuda:{server_args.base_gpu_id + rank * server_args.gpu_id_step}"
+            for rank in range(server_args.tp_size)
+        ) if is_cuda else "cpu"
 
     def slice_vocab(self, block: np.ndarray) -> np.ndarray:
         """A padded engine's lm_head emits -inf over the pad columns; the
@@ -614,7 +782,17 @@ class KotEngine:
         return await self.engine.async_generate(**kwargs)
 
 
-def _engine_info(engine, device: str) -> dict:
+def _nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text(encoding=UTF8).splitlines()[0]
+    except (OSError, IndexError, ValueError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
+def _engine_info(engine) -> dict:
     return {
         "contract_version": CONTRACT_VERSION,
         "model_id": engine.model_id,
@@ -622,14 +800,25 @@ def _engine_info(engine, device: str) -> dict:
         "tokenizer_id": engine.tokenizer_id,
         "engine": engine.engine_name,
         "dtype": engine.dtype_name,
-        "device": f"{device}:0" if ":" not in device else device,
+        "device": engine.device,
         "vocab_size": engine.vocab_size,
+        "torch_version": engine.torch_version,
+        "plugin_version": "",
+        "driver_version": _nvidia_driver(),
+        "toolkit_version": engine.toolkit_version,
+        # The reference's block, keys and nesting, for the values pinned here.
+        "media": {
+            "video_fps": VIDEO_FPS,
+            "video_do_sample_frames": VIDEO_DO_SAMPLE_FRAMES,
+            "video_cap_pixels_per_frame": CAP_PIXELS_PER_FRAME,
+        },
         "started_at": _utc_stamp(),
     }
 
 
 ROUTES = {
     "/kot/infer": kot_infer,
+    "/v1/chat/completions": _chat_completions,
 }
 
 IDLE_TIMEOUT_S = 300.0
@@ -701,6 +890,42 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                 elif method == "POST" and path in ROUTES:
                     payload = json.loads(body or b"{}")
                     result = await ROUTES[path](engine, payload, score_lock)
+                    if isinstance(result, SseResponse):
+                        head = (
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: text/event-stream\r\n"
+                            "Cache-Control: no-cache\r\n"
+                            "Connection: keep-alive\r\n\r\n"
+                        )
+                        writer.write(head.encode("latin-1"))
+                        await writer.drain()
+
+                        async def write(chunk: bytes) -> None:
+                            writer.write(chunk)
+                            await writer.drain()
+
+                        try:
+                            await result.run(write)
+                        except Exception as stream_failure:
+                            # The 200 and the event-stream content type are
+                            # already on the wire: the failure travels as an
+                            # event, then the connection closes.
+                            traceback.print_exc()
+                            print(f"[kot_server] stream {path} failed", flush=True)
+                            payload = {
+                                "error": type(stream_failure).__name__,
+                                "detail": str(stream_failure),
+                            }
+                            try:
+                                writer.write(b"event: error\n")
+                                writer.write(_sse_chunk(payload))
+                                writer.write(b"data: [DONE]\n\n")
+                                await writer.drain()
+                            except ConnectionError:
+                                pass
+                        # The stream head carries no Content-Length, so the
+                        # body's only terminator is connection close.
+                        break
                     writer.write(_json_bytes(200, result))
                     await writer.drain()
                 elif method == "POST" and path == "/kot/score":
@@ -739,7 +964,7 @@ async def run_server(port: int, model: str, device: str) -> None:
     # Created inside the running loop, the Engine adopts it: tokenizer
     # manager, HTTP server and every generation stream share one loop.
     engine = KotEngine(model, device)
-    info = _engine_info(engine, device)
+    info = _engine_info(engine)
     print(f"[kot_server] serving: {info}", flush=True)
 
     # One text-only generation over the pinned prompt so the first real

@@ -1,6 +1,6 @@
 # Run Book: ocr-sglang
 
-This deployment serves one vision-language model with SGLang 0.5.22. One
+This deployment serves one vision-language model with SGLang 0.5.23. One
 process serves the multimodal OpenAI chat surface and the full-vocabulary
 log-probability surface on one port. A chat request carries a text part and
 the document as an image data URI. The environment and the launcher are
@@ -25,8 +25,9 @@ override for them.
 ### Environment
 
 The environment is llm-sglang's. Both deployments share one venv,
-/root/kotvenv-sglang-ocr, on CPython 3.12 with sglang 0.5.22, torch 2.14.1
-and flashinfer-python 0.7.1. The llm-sglang run book holds the install.
+/root/kotvenv-sglang-ocr, on CPython 3.12 with sglang 0.5.23, torch 2.14.1,
+transformers 5.19.0 and flashinfer-python 0.7.2. The llm-sglang run book holds
+the install.
 
 ### Layout
 
@@ -124,8 +125,10 @@ the `_commit_hash` that the weights' `config.json` carries.
 
 The prompt is the checkpoint's plain format. BOS comes first, then one
 `<image>` placeholder, then a newline and the instruction. Each request
-carries one image. The processor expands the placeholder into 257 tokens for
-a 620x620 image. A larger image adds crop tiles, and the block grows.
+carries one image, decoded on both routes by the checkpoint's own recipe: EXIF
+orientation applied, then `.convert("RGB")`. The processor expands the
+placeholder into 257 tokens for a 620x620 image. A larger image adds crop tiles,
+and the block grows.
 
 Generation applies a no-repeat ngram rule through a per-request custom logits
 processor, `kot_ocr_ngram.py`. The rule bans a token that would complete a

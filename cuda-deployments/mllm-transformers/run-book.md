@@ -1,6 +1,6 @@
 # Run Book: mllm-transformers
 
-This deployment serves Qwen/Qwen3.8-27B with transformers 5.20.2. The model
+This deployment serves Qwen/Qwen3.8-27B with transformers 5.22.1. The model
 runs the `qwen3_5` architecture and takes text, image and video input. One
 process holds the model in bfloat16 over both cards. The server pins every
 media-processing parameter and reports the full set in one line at startup.
@@ -16,7 +16,7 @@ checkpoint's own `generation_config.json`.
 |---|---|---|---|
 | Qwen/Qwen3.8-27B | 2 | bfloat16 | temperature 1.0, top_p 0.95, top_k 20 |
 
-One stack serves the model: CPython 3.12, transformers 5.20.2, torch
+One stack serves the model: CPython 3.12, transformers 5.22.1, torch
 2.14.1+cu130, torchvision 0.29.1+cu130, torchcodec 0.17. The seed arrives
 with the request; 42 is the convention.
 
@@ -36,7 +36,7 @@ uv pip install --python /root/kotvenv-mllm/bin/python --no-deps \
 uv pip install --python /root/kotvenv-mllm/bin/python --no-deps \
   torchcodec==0.17
 uv pip install --python /root/kotvenv-mllm/bin/python \
-  transformers==5.20.2 accelerate numpy pydantic pyyaml pillow \
+  transformers==5.22.1 accelerate numpy pydantic pyyaml pillow \
   einops flash-linear-attention==0.2.2
 ```
 
@@ -145,8 +145,9 @@ changes the pixels the model sees.
 | patch geometry | patch 16, temporal patch 2, merge size 2 | the checkpoint's configs |
 | instruct mode | `enable_thinking` false in the chat-template rendering | the model's non-thinking mode |
 
-Without the per-frame cap a 30-second clip costs about 12,000 video tokens;
-with it the worst clip so far costs 7,920. The count drives the KV cache and
+The per-frame cap binds on short clips. At 1080p, 22 frames cost 12,100 video
+tokens without it and 7,920 with it; from 32 frames on it changes nothing, and
+a 30-second clip costs 11,700 either way. The count drives the KV cache and
 the prompt length of every request.
 
 The server reads the pixel budgets and the patch geometry from the checkpoint
@@ -169,8 +170,10 @@ through a float32 log-softmax. A replay prefill re-renders the same prompt
 from the attachment, asserts the stored ids' head matches, and scores the
 stored tail (`n_rows` rows) with `logits_to_keep`.
 
-`POST /kot/infer` is the speed surface: one video decode, the description
-written as `text.txt` into the request's `out_dir`, the file names returned.
+`POST /kot/infer` runs one video decode, the description written as `text.txt`
+into the request's `out_dir`, the file names returned. The benchmark's speed
+harness drives a chat route and this deployment serves none, so speed lands
+`speed_absent`.
 
 The server plants the request's seed before each decode. The same seed gives
 the same output.

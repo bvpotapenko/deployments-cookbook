@@ -4,9 +4,9 @@
 
 The model is Qwen/Qwen3.8-27B (the native qwen3_5 architecture). It serves
 video units: the checkpoint's own instruct chat prompt rendered around the
-video, decoded and frame-sampled by the checkpoint's own HF video processor
-(torchcodec; fps 2.0, the reference per-frame pixel cap), then handed to
-vLLM as (frames, metadata). vLLM's processor expands the single video
+video, decoded and frame-sampled by vLLM's own loader, the one chat calls
+(torchcodec; fps 2.0), then handed to vLLM as (frames, metadata) under the
+reference per-frame pixel cap. vLLM's processor expands the single video
 placeholder into the per-frame timestamp structure and feeds the model.
 
 The vLLM OpenAI app is mounted as-is for /v1/chat/completions (the speed
@@ -50,7 +50,7 @@ Numerics, the whole point of this deployment:
 The one patch: vLLM pythonizes those full-vocab tensors into ~vocab_size
 Logprob objects per position on the frontend. The tap below keeps the raw
 tensors instead and leaves cheap placeholders in vLLM's own lists, so its
-invariants hold and nothing else changes. vLLM 0.32 keeps the prompt-logprob
+invariants hold and nothing else changes. vLLM keeps the prompt-logprob
 tensors on the CPU per chunk (in_progress_prompt_logprobs_cpu), so the stash
 never holds GPU memory.
 """
@@ -60,9 +60,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import faulthandler
-import functools
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -80,7 +80,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 # byte-identical). The launcher exports 1; this setdefault covers a direct
 # python launch.
 os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "1")
-# torch 2.13's triton refuses the non-constexpr globals vLLM's kernels read
+# torch 2.14's triton refuses the non-constexpr globals vLLM's kernels read
 # (LOG2E et al.); triton's own documented escape hatch for exactly this.
 os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
 # FlashInfer's backend table claims sm_120 support but its JIT's own arch
@@ -91,7 +91,7 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 import numpy as np  # noqa: E402
 import vllm  # noqa: E402
 
-VLLM_PIN = "0.32.0"
+VLLM_PIN = "0.33.0"
 if not vllm.__version__.startswith(VLLM_PIN):
     sys.exit(
         f"this deployment is written against vllm {VLLM_PIN} (its logprobs tap "
@@ -100,14 +100,16 @@ if not vllm.__version__.startswith(VLLM_PIN):
 
 from fastapi import Request  # noqa: E402
 from fastapi.responses import JSONResponse, StreamingResponse  # noqa: E402
-from PIL import Image  # noqa: E402
+import torch  # noqa: E402
 from vllm import SamplingParams  # noqa: E402
+from vllm.entrypoints.common.cli_args import make_arg_parser  # noqa: E402
 from vllm.entrypoints.launchers.launcher import serve_http  # noqa: E402
 from vllm.entrypoints.launchers.api_server.app_state import init_app_state  # noqa: E402
 from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client  # noqa: E402
 from vllm.entrypoints.launchers.app import build_app  # noqa: E402
-from vllm.entrypoints.launchers.cli_args import make_arg_parser  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
+from vllm.multimodal.media.image import ImageMediaIO  # noqa: E402
+from vllm.multimodal.media.video import VideoMediaIO  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
 INFO = "/kot/info"
@@ -128,6 +130,15 @@ VIDEO_TAG = "<|video_pad|>"
 VIDEO_PROMPT = "Describe what you see in the video."
 VIDEO_FPS = 2.0
 CAP_PIXELS_PER_FRAME = True
+# The video loader's one settings value. args.media_io_kwargs hands it to
+# chat's media connector; _video_prompt builds the same VideoMediaIO from it.
+# The qwen3_vl loader runs the arithmetic of the HF sampler the reference
+# calls and ignores VideoMediaIO's num_frames=32. torchcodec is the reference's
+# decoder, so the frame count and fps that arithmetic reads are the same too;
+# vLLM's default codec is OpenCV, whose metadata and pixels are not.
+MEDIA_IO_KWARGS = {
+    "video": {"video_backend": "qwen3_vl", "backend": "torchcodec", "fps": VIDEO_FPS},
+}
 
 SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
 
@@ -321,9 +332,9 @@ def _sampling_params(body: dict, vocab_size: int) -> SamplingParams:
 def _pop_sink(request_id: str) -> LogprobsProcessor | None:
     """The processor for a score request, by prefix.
 
-    vLLM 0.30 appends its own sub-request suffix to the ids it passes down
-    ("-xxxxxxxx"), so the exact id we generated never matches; the contract
-    serves one score request at a time, so a prefix match is unambiguous.
+    vLLM appends its own suffix to the ids it passes down ("-xxxxxxxx"), so
+    the exact id we generated never matches; the contract serves one score
+    request at a time, so a prefix match is unambiguous.
     """
     processor = SINKS.pop(request_id, None)
     if processor is None:
@@ -377,9 +388,9 @@ _PROCESSOR_CACHE: object = None
 
 
 def _processor():
-    """The checkpoint's HF processor: the video decode (torchcodec), the
-    pixel budgets and the placeholder expansion - the same pieces the
-    transformers reference runs, at the same pins."""
+    """The checkpoint's HF processor: the chat template and the count guard's
+    placeholder expansion - the same pieces the transformers reference runs,
+    at the same pins. The engine's frames come from _video_prompt, not here."""
     global _PROCESSOR_CACHE
     if _PROCESSOR_CACHE is None:
         from transformers import AutoProcessor
@@ -434,9 +445,9 @@ def _expanded_template_ids(video_path: str) -> list[int]:
             )],
             videos=[[video_path]],
             fps=VIDEO_FPS,
-            # The same pin _video_prompt hands the engine: without it the
-            # count matches only videos whose frames sit under the cap, and
-            # the engine's rows check rejects the start index for the rest.
+            # The same pin the engine holds: without it the count matches only
+            # videos whose frames sit under the cap, and the engine's rows check
+            # rejects the start index for the rest.
             cap_pixels_per_frame=CAP_PIXELS_PER_FRAME,
             return_tensors=None,
         )
@@ -445,27 +456,15 @@ def _expanded_template_ids(video_path: str) -> list[int]:
 
 
 def _video_prompt(ids: list[int], video_path: str) -> TokensPrompt:
-    """The engine prompt: the ids verbatim, plus the video as
-    (frames, metadata) decoded by the checkpoint's own video processor at
-    the pinned fps. do_sample_frames=False: the frames ARE the sampled ones;
-    the timestamps come from the metadata, exactly as the reference's do."""
-    processor = _processor()
-    frames, metadata = processor.video_processor.fetch_videos(
-        video_path,
-        # The same hook the reference builds for itself: the sampler takes
-        # metadata by keyword and absorbs extra kwargs, so no parameter
-        # name to get wrong.
-        sample_indices_fn=functools.partial(
-            processor.video_processor.sample_frames, fps=VIDEO_FPS
-        ),
-    )
-    if not isinstance(frames, np.ndarray):
-        frames = frames.numpy() if hasattr(frames, "numpy") else np.asarray(frames)
-    return TokensPrompt(
-        prompt_token_ids=ids,
-        multi_modal_data={"video": (frames, metadata)},
-        mm_processor_kwargs={"do_sample_frames": False, "cap_pixels_per_frame": CAP_PIXELS_PER_FRAME},
-    )
+    """The engine prompt: the ids verbatim, plus the video as (frames, metadata)
+    from the loader chat calls: VideoMediaIO, built as vLLM's media connector
+    builds it, from the value chat's connector gets. No frame budget: the
+    launcher turns chat's off, so neither route has one. The processor's
+    pins are the engine's (args.mm_processor_kwargs), the ones chat runs under.
+    """
+    loader = VideoMediaIO(ImageMediaIO(), **MEDIA_IO_KWARGS["video"])
+    frames_and_metadata = loader.load_file(Path(video_path)).media
+    return TokensPrompt(prompt_token_ids=ids, multi_modal_data={"video": frames_and_metadata})
 
 
 _MODEL_DIR = ""
@@ -764,14 +763,21 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     args.max_logprobs = 1_000_000
     args.enable_prefix_caching = False
     args.disable_log_requests = True
-    # The video preprocessing pins, applied at the engine level: the frames
-    # arrive pre-sampled by the deployment's own HF video processor call
-    # (do_sample_frames false), so the frame selection is bit-identical to
-    # the reference's; the cap is the reference implementation's.
+    # The video preprocessing pins, applied at the engine level, so both routes
+    # run under them: the loader has already sampled the frames (do_sample_frames
+    # false keeps the HF processor from resampling), and the cap is the reference
+    # implementation's.
     args.mm_processor_kwargs = {
         "do_sample_frames": False,
         "cap_pixels_per_frame": CAP_PIXELS_PER_FRAME,
     }
+    # Chat's prompt, the one _raw_template_ids renders for the score path: the
+    # template's default adds a system message and an open think block.
+    args.default_chat_template_kwargs = {"enable_thinking": False}
+    args.media_io_kwargs = MEDIA_IO_KWARGS
+    # file:// URLs from anywhere, since a --no-container run has no /inputs
+    # mount. "/" is safe here because the server binds only to 127.0.0.1.
+    args.allowed_local_media_path = "/"
     # "auto" picks flashinfer's cutlass MoE on Blackwell, whose JIT needs
     # nvcc - absent on serving hosts - and dies at engine init. The triton
     # MoE backend runs sm_120 fine. KOT_VLLM_MOE_BACKEND overrides for
@@ -798,8 +804,6 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
         if visible and visible != "-1":
             args.tensor_parallel_size = len([item for item in visible.split(",") if item.strip()])
         else:
-            import torch
-
             args.tensor_parallel_size = max(torch.cuda.device_count(), 1)
     return args
 
@@ -878,6 +882,28 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
     # sole served model. No model-name rewriting is needed.
 
 
+def _nvidia_driver() -> str:
+    """The kernel driver's version, as the driver itself reports it; empty when unreadable."""
+    try:
+        first_line = Path("/proc/driver/nvidia/version").read_text(errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        return ""
+    match = re.search(r"\s(\d+\.\d+(?:\.\d+)?)\s", first_line)
+    return match.group(1) if match else ""
+
+
+def _placed_devices(device: str, parallel_config) -> str:
+    """Where the weights are, ordinals included, one per engine worker:
+    cuda:0, or cuda:0+cuda:1 over two cards.
+
+    The count is the engine's own config. A torch.cuda call could initialize
+    CUDA in this API-server process, and that flips vLLM's fork to spawn.
+    """
+    if device != "cuda":
+        return device
+    return "+".join(f"cuda:{rank}" for rank in range(parallel_config.world_size))
+
+
 def main() -> int:
     global _MODEL_DIR
     parser = argparse.ArgumentParser(prog="kot_serve.py", description=__doc__)
@@ -912,8 +938,12 @@ def main() -> int:
                 "tokenizer_id": model_id,
                 "engine": f"vllm {vllm.__version__}",
                 "dtype": str(model_config.dtype).removeprefix("torch."),
-                "device": cli.device,
+                "device": _placed_devices(cli.device, engine.vllm_config.parallel_config),
                 "vocab_size": vocab_size,
+                "torch_version": torch.__version__,
+                "plugin_version": "",
+                "driver_version": _nvidia_driver(),
+                "toolkit_version": torch.version.cuda or "",
                 # The chunk size is part of the numerics: a chunked prefill
                 # splits the attention and state passes at chunk boundaries,
                 # so rows produced at one size need not be bit-identical to
@@ -929,7 +959,7 @@ def main() -> int:
             # app, and Starlette refuses middleware on a started application.
             _register_kot_routes(app, engine, vocab_size, info)
             await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
-            print(f"[kot-vllm-ocr] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
+            print(f"[kot-vllm-mllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(
                 app, sock=None, host=args.host, port=args.port, log_level="warning",
             )

@@ -23,17 +23,20 @@ writes the full-vocabulary distribution of the scored positions where
   (row t predicts input_ids[t+1]) and row n-1 is the sampling row, which
   ``kot_server.py`` drops.
 
-* ``BatchedMinNewTokensPenalizer._apply`` is where the min-new-tokens ban
-  writes -inf over the stop tokens, in place, on the logits a decode step
-  samples from. The patch stashes a float32 log-softmax of the logits at the
-  call's entry -- before the ban and before every other sampler mutation
-  (temperature, top-k, top-p, further penalties and grammar masks all happen
-  downstream) -- because the contract wants the model's own distribution,
-  not the banned one the samples come from. One stashed row per penalized
-  sampling call; for a decode of g tokens that is g rows (the first comes
-  from the extend forward, which emits the first generated token). The
-  penalizer only exists for requests that set min_new_tokens > 0 -- the
-  score path's decodes -- so speed-harness traffic writes nothing.
+* ``ModelRunner.sample`` is where every sampled token comes from, extend and
+  decode steps alike. The patch stashes a float32 log-softmax of
+  ``logits_output.next_token_logits`` at the call's entry, gated on
+  ``forward_batch.return_logprob``, which only the score path's requests set,
+  so speed-harness traffic writes nothing. The entry comes before everything
+  that touches the logits, because the contract wants the model's own
+  distribution, not the one the samples come from: ``_preprocess_logits``,
+  whose penalizers write in place in the iteration order of a set of classes,
+  which can differ per process (so no tap inside one of them is clean), and
+  the sampler's own pipeline (temperature, top-k, top-p). The row is written
+  before the call goes on, so nothing is cloned. One stashed row per sampling
+  call; for a decode of g tokens that is g rows (the first comes from the
+  extend forward, which emits the first generated token). A prefill-only batch
+  never reaches ``sample``, so a prefill writes no decode row.
 
 Files are named ``<kind>_<pid>_<counter>.npz`` -- under tensor parallelism
 every rank runs the patched code with identical post-all-gather logits, so
@@ -45,7 +48,8 @@ counter preserves write order. A ``.done.json`` beside each archive marks it
 complete, because ``np.savez`` to a final name is not atomic. One score
 request is in flight at a time (the adapter's HTTP server is single-threaded),
 so "every archive newer than the ones seen when the request started" belongs
-to that request -- no rid needs to travel into the scheduler.
+to that request, or to a chat request in its batch: the archives carry no rid,
+so ``kot_server.py`` fails a score whose row count is off.
 """
 
 import json
@@ -150,7 +154,7 @@ class _PatchOnLoadFinder:
 
     TARGETS = {
         "sglang.srt.layers.logprob_processor",
-        "sglang.srt.sampling.penaltylib.min_new_tokens",
+        "sglang.srt.model_executor.model_runner",
         "sglang.srt.batch_invariant_ops.batch_invariant_ops",
     }
 
@@ -217,8 +221,8 @@ def _apply_patch(fullname: str) -> None:
         module = sys.modules[fullname]
         if fullname == "sglang.srt.layers.logprob_processor":
             _patch_input_logprob(torch, module)
-        elif fullname == "sglang.srt.sampling.penaltylib.min_new_tokens":
-            _patch_min_new_tokens(torch, module)
+        elif fullname == "sglang.srt.model_executor.model_runner":
+            _patch_model_runner(torch, module)
         elif fullname == "sglang.srt.batch_invariant_ops.batch_invariant_ops":
             _patch_batch_invariant_matmul(torch, module)
         _patch_log(f"applied: {fullname}")
@@ -318,22 +322,25 @@ def _patch_batch_invariant_matmul(torch, module) -> None:
     module.matmul_kernel_persistent = _StageCappedKernel()
 
 
-def _patch_min_new_tokens(torch, module) -> None:
-    if getattr(module.BatchedMinNewTokensPenalizer._apply, "_kot_patched", False):
+def _patch_model_runner(torch, module) -> None:
+    if getattr(module.ModelRunner.sample, "_kot_patched", False):
         return
     counter = [0]
-    original = module.BatchedMinNewTokensPenalizer._apply
+    original = module.ModelRunner.sample
 
-    def apply_with_stash(self, logits):
+    def sample_with_stash(self, logits_output, forward_batch, *args, **kwargs):
         try:
-            probs = torch.log_softmax(logits.to(torch.float32), dim=-1)
-            _stash("decode", probs, counter)
+            if forward_batch.return_logprob:
+                probs = torch.log_softmax(
+                    logits_output.next_token_logits.to(torch.float32), dim=-1
+                )
+                _stash("decode", probs, counter)
         except Exception:
             pass
-        return original(self, logits)
+        return original(self, logits_output, forward_batch, *args, **kwargs)
 
-    apply_with_stash._kot_patched = True
-    module.BatchedMinNewTokensPenalizer._apply = apply_with_stash
+    sample_with_stash._kot_patched = True
+    module.ModelRunner.sample = sample_with_stash
 
 
 _stub_sgl_kernel_finder()
@@ -346,6 +353,6 @@ if CAPTURE_MODE:
 
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     # Ahead of PathFinder: appended finders never run, because PathFinder
-    # answers first. This finder only claims its two targets and asks
+    # answers first. This finder only claims its targets and asks
     # PathFinder for their real specs, so being first is safe.
     sys.meta_path.insert(0, _PatchOnLoadFinder())

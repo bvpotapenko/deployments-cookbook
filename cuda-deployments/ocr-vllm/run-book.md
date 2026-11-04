@@ -1,6 +1,6 @@
 # Run Book: ocr-vllm
 
-This deployment serves DeepSeek-OCR-2 with vLLM 0.32.0. One process serves the
+This deployment serves DeepSeek-OCR-2 with vLLM 0.33.0. One process serves the
 OpenAI chat surface and the full-vocabulary log-probability surface on one
 port. The full-vocabulary tap is version-pinned, so the server refuses to
 start on any other vllm version. The engine applies the checkpoint's own
@@ -17,8 +17,8 @@ a comparison fails.
 |---|---|---|---|---|---|---|---|
 | deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.0001, top_p 1.0 |
 
-One stack serves every model: CPython 3.12, vLLM 0.32.0, the torch build that
-carries sm_120, and the transformers line the vLLM 0.32.0 resolver takes. The
+One stack serves every model: CPython 3.12, vLLM 0.33.0, the torch build that
+carries sm_120, and the transformers line the vLLM 0.33.0 resolver takes. The
 seed arrives with the request; 42 is the convention.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
@@ -30,22 +30,22 @@ The stack runs on CPython 3.12.
 ```bash
 # networked host
 uv venv /root/kotvenv-vllm-ocr --python 3.12
-uv pip install --python /root/kotvenv-vllm-ocr/bin/python "vllm==0.32.0"
+uv pip install --python /root/kotvenv-vllm-ocr/bin/python "vllm==0.33.0"
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-ocr-venv --python 3.12
 /scratch/kot-vllm-ocr-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.32.0"
+  --find-links ./wheels "vllm==0.33.0"
 ```
 
-The torch build must carry sm_120. The vLLM 0.32.0 resolver pairs one on its
+The torch build must carry sm_120. The vLLM 0.33.0 resolver pairs one on its
 own. A torch without Blackwell support dies at the first prefill on these
 cards.
 
-`make_wheels.sh` builds the vllm 0.32.0 closure into `wheels/` for linux
-x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the pip
-freeze of a working venv. The script downloads one wheel per
+`make_wheels.sh` builds the vllm 0.33.0 closure into `wheels/` for linux
+x86_64, cp312. The exact pins live in `wheels-requirements.txt`, the same
+closure as `llm-vllm`. The script downloads one wheel per
 pin, eight in parallel, each with `--no-deps`. Files already present are
 skipped, so a rerun resumes. Rerun the script until the two counts it
 prints match. The repository does not carry `wheels/`.
@@ -57,7 +57,6 @@ offline install itself, into `KOT_VENV`.
 
 ```text
 /opt/engines/ocr-vllm     this directory
-  chat_template.jinja     the chat template; the checkpoint ships none
   kot_ngram.py            copied into the venv's site-packages at every start
   wheels/                 the offline closure, built by make_wheels.sh, not committed
 /models/DeepSeek-OCR-2    weights; a hub snapshot plus one patched file
@@ -122,7 +121,7 @@ requested rows of the cached prefix never computed.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_PYTHON` | ambient `python3` | interpreter that carries vllm 0.32.0. The launcher's search never finds `/root/kotvenv-vllm-ocr`; set the variable. |
+| `KOT_PYTHON` | ambient `python3` | interpreter that carries vllm 0.33.0. The launcher's search never finds `/root/kotvenv-vllm-ocr`; set the variable. |
 | `KOT_VENV` | `/scratch/kot-vllm-ocr-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-ocr-venv`. |
 | `KOT_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom is needed for the log-probability pass. |
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | caps the per-step transient of that pass. |
@@ -131,6 +130,7 @@ requested rows of the cached prefix never computed.
 | `KOT_VLLM_DTYPE` | engine auto | compute dtype, for example `float32` for a cross-check. |
 | `KOT_VLLM_COMPILATION` | engine default | `eager` disables torch.compile. |
 | `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived | override the reported identity. |
+| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It applies on chat only, not on `/kot/score`, so the launcher turns it off and both routes take the same documents. |
 
 ## Models
 
@@ -155,12 +155,19 @@ The sampling temperature 0.0001 is near-greedy by design. Every decode
 runs through the engine's real sampler. The checkpoint's own recipe names
 0.0.
 
-The checkpoint's tokenizer ships no chat template. The deployment carries
-`chat_template.jinja` and applies it. The template renders the checkpoint's
-plain prompt format, the image placeholder first and the instruction after.
-The tokenizer adds BOS itself. Exactly one image rides a request.
+The checkpoint's tokenizer ships no chat template, and vLLM's fallback for its
+`model_type` adds role tags. The server names vLLM's own
+`template_deepseek_ocr.jinja` instead. It renders the checkpoint's plain prompt
+format: BOS, the image placeholder, a newline, the instruction. Exactly one
+image rides a request.
+
+Chat and `/kot/score` load the image with the same vLLM `ImageMediaIO`, which
+applies the EXIF rotation and composites alpha on white; the checkpoint's own
+recipe also rotates but drops alpha, so a transparent image differs from it.
 
 ## Check
+
+The text path, then the image path. `doc.png` is any document page.
 
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
@@ -170,9 +177,21 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
        "max_tokens": 8,
        "temperature": 0.0001, "top_p": 1.0}' \
   | python3 -m json.tool
+
+printf '{"model": "/models/DeepSeek-OCR-2",
+  "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "Free OCR."},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,%s"}}]}],
+  "max_completion_tokens": 64, "seed": 42,
+  "temperature": 0.0001, "top_p": 1.0, "return_token_ids": true}' \
+  "$(base64 -w0 doc.png)" \
+  | curl -s http://127.0.0.1:8090/v1/chat/completions \
+      -H 'Content-Type: application/json' -d @- \
+  | python3 -c 'import json, sys; r = json.load(sys.stdin); r["prompt_token_ids"] = r.get("prompt_token_ids", [])[:2]; print(json.dumps(r, indent=1))'
 ```
+
+The image answer carries the page's text, and `prompt_token_ids` starts
+`[0, 128815]`: BOS, then the image placeholder.
 
 The `model` field accepts the weights path and the identity the server
 prints at startup. The identity comes from the checkpoint's `config.json`.
-A bare text prompt carries no image. A document request carries the image
-as one `image_url` data-URI part.

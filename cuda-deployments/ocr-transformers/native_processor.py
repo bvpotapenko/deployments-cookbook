@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Native transformers 5.20.2 processor for DeepSeek-OCR-2.
+"""Native transformers 5.22.1 processor for DeepSeek-OCR-2.
 
-build_processor(dir) wraps the checkpoint's own LlamaTokenizerFast and the
-native PIL image processor into the native DeepseekOcr2Processor. The knobs
+build_processor(dir) wraps the checkpoint's own tokenizer and the native PIL
+image processor into the native DeepseekOcr2Processor. The knobs
 reproduce the 4.46.3 reference server's image path (serve.py) exactly:
 
 * global view: bicubic resize so the longest side is 1024, centered pad to
@@ -13,8 +13,12 @@ reproduce the 4.46.3 reference server's image path (serve.py) exactly:
   dynamic_preprocess (2..6 tiles of 768x768, closest aspect ratio), each tile
   costing 144 queries, so the block is 257 + 144 * tiles.
 
-The tokenizer is loaded as LlamaTokenizerFast directly. AutoTokenizer is not
-used: it follows config.json's auto_map into the checkpoint's remote code.
+The tokenizer is TokenizersBackend, loaded directly: it runs tokenizer.json as
+written. LlamaTokenizerFast, the class tokenizer_config.json declares, forces a
+Metaspace pre-tokenizer and decoder onto this ByteLevel vocabulary: it decodes
+with Ġ markers and encodes other ids. Their added vocabularies are identical.
+AutoTokenizer resolves to the same class, but only after reading config.json's
+auto_map, and it asks to run the checkpoint's remote code unless told not to.
 
 Values the checkpoint's processor_config.json pins (image_mean, image_std,
 patch_size, downsample_ratio, candidate_resolutions, image_token) are read
@@ -50,7 +54,8 @@ import math
 import sys
 from pathlib import Path
 
-from transformers import LlamaTokenizerFast
+from PIL import Image, ImageOps
+from transformers import TokenizersBackend
 from transformers.models.deepseek_ocr2.image_processing_pil_deepseek_ocr2 import (
     DeepseekOcr2ImageProcessorPil,
 )
@@ -65,9 +70,15 @@ PATCH_SIZE = 16
 DOWNSAMPLE = 4
 NORM = (0.5, 0.5, 0.5)
 PAD_COLOR = (127, 127, 127)  # int(0.5 * 255) per channel, as the reference pads
-TEMPLATE = "<|User|>:\n<image>\nFree OCR."  # the checkpoint's plain sft format
+TEMPLATE = "<image>\nFree OCR."  # the checkpoint's plain sft format; its recipe adds BOS
 GLOBAL_QUERIES = (GLOBAL_SIZE // PATCH_SIZE // DOWNSAMPLE) ** 2  # 256
 TILE_QUERIES = (MAX_SINGLE_VIEW // PATCH_SIZE // DOWNSAMPLE) ** 2  # 144
+
+
+def load_image(path):
+    """The checkpoint's own decode: EXIF rotation, then RGB (its load_image and load_pil_images)."""
+    with Image.open(path) as opened:
+        return ImageOps.exif_transpose(opened).convert("RGB")
 
 
 def build_processor(dir):
@@ -85,9 +96,7 @@ def build_processor(dir):
     if width != height:
         raise ValueError(f"candidate_resolutions {resolutions} is not square: the global view must be square")
 
-    # LlamaTokenizerFast directly: never AutoTokenizer, which follows
-    # config.json's auto_map back into the checkpoint's remote code.
-    tokenizer = LlamaTokenizerFast.from_pretrained(str(checkpoint))
+    tokenizer = TokenizersBackend.from_pretrained(str(checkpoint))
 
     image_processor = DeepseekOcr2ImageProcessorPil(
         size={"height": height, "width": width},
@@ -211,7 +220,6 @@ def _main(argv=None):
     args = parser.parse_args(argv)
 
     import transformers
-    from PIL import Image
 
     print(f"transformers {transformers.__version__}")
     processor = build_processor(args.dir)
@@ -240,8 +248,7 @@ def _main(argv=None):
     failed += _run_one(processor, large, "1600x1200 (b)")
 
     if args.image:
-        with Image.open(args.image) as opened:
-            extra = opened.convert("RGB")
+        extra = load_image(args.image)
         failed += _run_one(processor, extra, f"{args.image} {extra.size[0]}x{extra.size[1]}")
 
     if failed:

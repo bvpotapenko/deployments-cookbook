@@ -6,9 +6,10 @@ copies this file into the engine venv's site-packages, where site.py finds it
 without any PYTHONPATH. It imports nothing heavy at startup; the patches are
 applied when SGLang's own modules finish loading.
 
-Two monkeypatches, both additive: the original computation still runs and
-feeds SGLang's own logprob plumbing; the patch writes the full-vocabulary
-distribution of the scored positions where ``kot_server.py`` collects it.
+Three monkeypatches. The first two are additive: the original computation
+still runs and feeds SGLang's own logprob plumbing; the patch writes the
+full-vocabulary distribution of the scored positions where ``kot_server.py``
+collects it. The third replaces a step: ``qwen_vl.preprocess_video``.
 
 * ``LogitsProcessor.compute_temp_top_p_normalized_logprobs`` is where the
   log-softmax over the whole vocabulary exists for prefill positions. It is
@@ -19,27 +20,39 @@ distribution of the scored positions where ``kot_server.py`` collects it.
   For a prefill over an expanded prompt of N positions the stashed matrix has
   N rows; ``kot_server.py`` keeps the transcript's rows and drops the rest.
 
-* ``Sampler.forward`` is where every sampled token comes from, extend and
+* ``ModelRunner.sample`` is where every sampled token comes from, extend and
   decode steps alike. The patch stashes a float32 log-softmax of
-  ``logits_output.next_token_logits`` at the call's ENTRY -- before the
-  sampler's own pipeline (penalties, temperature, top-k, top-p, grammar
-  masks) touches the logits -- one row per request in the batch, gated on the
-  call's ``return_logprob`` flag so speed-harness traffic (which asks for no
-  logprobs) writes nothing. This family's decodes generate until EOS, so
-  ``min_new_tokens`` is 0 and the min-new-tokens penalizer never exists; the
-  sampler entry is the only point every generated token passes through. For
-  a decode of g tokens that is g rows (the first comes from the extend
-  forward that emits the first token).
+  ``logits_output.next_token_logits`` at the call's ENTRY, one row per request
+  in the batch, gated on ``forward_batch.return_logprob`` so speed-harness
+  traffic (which asks for no logprobs) writes nothing. The entry comes before
+  everything that touches the logits: ``_preprocess_logits``, whose bias adds
+  the min-new-tokens -inf over the stop tokens in place when ``allow_eos`` is
+  false, and the sampler's own pipeline (custom processors, temperature,
+  top-k, top-p). ``Sampler.forward`` is too late, the penalizer does not run
+  when ``allow_eos`` is true, and ``_preprocess_logits`` is not told
+  ``return_logprob``. The row is written before the call goes on, so nothing
+  is cloned. For a decode of g tokens that is g rows (the first comes from
+  the extend forward that emits the first token).
 
-Under tensor parallelism every rank runs LogitsProcessor and the Sampler
-with identical post-all-gather logits; both patches gate on the tensor
-parallel rank so exactly one rank stashes. Files are named
+* ``qwen_vl.preprocess_video`` runs ahead of the HF processor on its own rules:
+  an even frame count, truncated indices, and a BILINEAR pre-resize to a 28-px
+  grid under 768 * 28 * 28 pixels. The replacement selects frames through
+  ``Qwen3VLVideoProcessor.sample_frames`` and leaves their size alone, so what
+  the HF processor receives is what the reference's own call decodes, and its
+  resize, under the cap ``mm_process_config`` carries, is the only one. Those
+  rules are constants and module code: no engine kwarg reaches them.
+
+Under tensor parallelism every rank runs LogitsProcessor and
+ModelRunner.sample with identical post-all-gather logits; both patches gate
+on the tensor parallel rank so exactly one rank stashes. Files are named
 ``<kind>_<pid>_<counter>.npz`` -- the pid makes cross-process collisions
 impossible, the per-process counter preserves write order -- and a
 ``.done.json`` beside each archive marks it complete, because ``np.savez``
 to a final name is not atomic. One score request is in flight at a time
 (the adapter serialises /kot/score), so every archive newer than the ones
-seen when the request started belongs to that request.
+seen when the request started belongs to that request, or to a chat request
+in its batch: the archives carry no request id, so ``kot_server.py`` fails a
+score whose row count is off.
 """
 
 import json
@@ -66,10 +79,6 @@ def _already_patched(module) -> bool:
         "_kot_patched",
         False,
     )
-
-
-def _sampler_patched(module) -> bool:
-    return getattr(module.Sampler.forward, "_kot_patched", False)
 
 
 def _is_stash_rank() -> bool:
@@ -158,7 +167,8 @@ class _PatchOnLoadFinder:
     TARGETS = {
         "sglang.srt.layers.logits_processor",
         "sglang.srt.layers.logprob_processor",
-        "sglang.srt.layers.sampler",
+        "sglang.srt.model_executor.model_runner",
+        "sglang.srt.multimodal.processors.qwen_vl",
     }
 
     def __init__(self) -> None:
@@ -217,8 +227,10 @@ def _apply_patch(fullname: str) -> None:
             _patch_logits_processor(torch, module)
         elif fullname == "sglang.srt.layers.logprob_processor":
             _patch_input_logprob(torch, module)
-        elif fullname == "sglang.srt.layers.sampler":
-            _patch_sampler(torch, module)
+        elif fullname == "sglang.srt.model_executor.model_runner":
+            _patch_model_runner(torch, module)
+        elif fullname == "sglang.srt.multimodal.processors.qwen_vl":
+            _patch_qwen_video(module)
         _patch_log(f"applied: {fullname}")
     except Exception as failure:
         _patch_log(f"FAILED: {fullname}: {type(failure).__name__}: {failure}")
@@ -305,27 +317,69 @@ def _patch_input_logprob(torch, module) -> None:
     module.InputLogprobProcessor.forward = forward_with_stash
 
 
-def _patch_sampler(torch, module) -> None:
-    if _sampler_patched(module):
+def _patch_model_runner(torch, module) -> None:
+    if getattr(module.ModelRunner.sample, "_kot_patched", False):
         return
     counter = [0]
-    original = module.Sampler.forward
+    original = module.ModelRunner.sample
 
-    def forward_with_stash(self, logits_output, sampling_info, return_logprob,
-                           *args, **kwargs):
+    def sample_with_stash(self, logits_output, forward_batch, *args, **kwargs):
         try:
-            if return_logprob:
+            if forward_batch.return_logprob:
                 probs = torch.log_softmax(
                     logits_output.next_token_logits.to(torch.float32), dim=-1
                 )
                 _stash("decode", probs, counter)
         except Exception:
             pass
-        return original(self, logits_output, sampling_info, return_logprob,
-                        *args, **kwargs)
+        return original(self, logits_output, forward_batch, *args, **kwargs)
 
-    forward_with_stash._kot_patched = True
-    module.Sampler.forward = forward_with_stash
+    sample_with_stash._kot_patched = True
+    module.ModelRunner.sample = sample_with_stash
+
+
+def _patch_qwen_video(module) -> None:
+    """Frames as the reference selects them, unresized, off the event loop.
+
+    ``video_preprocessing_device`` keeps the whole path on the CPU, where the
+    reference resizes: the engine's loader decodes on the card unless it reads
+    "cpu", and hands it to the HF pass, where a bicubic resize on the card is not
+    promised the same pixels. fps comes from ``mm_process_config``. The engine
+    awaits this function on its one event loop, and the decode would stall every
+    open connection if it ran there.
+    """
+    if getattr(module.preprocess_video, "_kot_patched", False):
+        return
+    import asyncio
+
+    from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
+    from transformers.video_utils import VideoMetadata
+
+    # sample_frames reads min_frames, max_frames and fps off the instance; the
+    # checkpoint's video_preprocessor_config.json sets none of them.
+    sampler = Qwen3VLVideoProcessor()
+    original = module.preprocess_video
+
+    async def preprocess_video_pinned(vr, image_factor=module.IMAGE_FACTOR, video_config={}):
+        if not isinstance(vr, module.VideoDecoderWrapper):
+            return await original(vr, image_factor, video_config)
+        total_frames, video_fps = len(vr), vr.avg_fps
+        indices = sampler.sample_frames(
+            VideoMetadata(total_num_frames=total_frames, fps=video_fps),
+            fps=video_config["fps"],
+        )
+        frames = await asyncio.to_thread(vr.get_frames_as_tensor, indices.tolist())
+        return frames.permute(0, 3, 1, 2), {  # NHWC -> TCHW
+            "fps": video_fps,
+            "duration": total_frames / video_fps,
+            "total_num_frames": total_frames,
+            "frames_indices": indices,
+            "video_backend": "torchcodec",
+        }
+
+    preprocess_video_pinned._kot_patched = True
+    module.preprocess_video = preprocess_video_pinned
+    module.QwenVLImageProcessor.video_preprocessing_device = "cpu"
 
 
 def _trace(message: str) -> None:
@@ -336,4 +390,18 @@ def _trace(message: str) -> None:
             trace.write(message + "\n")
     except Exception:
         pass
+
+
+_stub_sgl_kernel_finder()
+if CAPTURE_MODE:
+    # On demand: kill -USR1 <pid> dumps every thread's stack to stderr --
+    # the hang diagnosis path where ptrace is unavailable.
+    import faulthandler
+    import signal
+
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    # Ahead of PathFinder: appended finders never run, because PathFinder
+    # answers first. This finder only claims its targets and asks PathFinder
+    # for their real specs, so being first is safe.
+    sys.meta_path.insert(0, _PatchOnLoadFinder())
 
