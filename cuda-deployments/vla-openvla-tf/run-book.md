@@ -1,6 +1,6 @@
 # Run Book: vla-openvla-tf
 
-This deployment serves openvla/openvla-7b with transformers 5.20.2. One
+This deployment serves openvla/openvla-7b with transformers 5.22.1. One
 process serves `GET /kot/info`, `POST /kot/infer` and `POST /kot/score` on
 one port. One request runs at a time: one robot, one card. A request names
 one observation file. `/kot/infer` predicts one action and writes it as
@@ -17,7 +17,7 @@ weights; its docstring gives the reason.
 |---|---|---|---|---|
 | openvla/openvla-7b | `47a0ec7fc4ec123775a391911046cf33cf9ed83f` | 1 | bfloat16 | greedy, 7 tokens |
 
-One stack serves the model: CPython 3.12, transformers 5.20.2, timm 0.9.16,
+One stack serves the model: CPython 3.12, transformers 5.22.1, timm 0.9.16,
 torch 2.14.1+cu130, torchvision 0.29.1+cu130. Greedy decoding uses no seed.
 
 ## Server: NVIDIA RTX 5090 (sm_120)
@@ -33,7 +33,7 @@ uv pip install --python /root/kotvenv-vla/bin/python \
 uv pip install --python /root/kotvenv-vla/bin/python --no-deps \
   torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu130
 uv pip install --python /root/kotvenv-vla/bin/python \
-  transformers==5.20.2 timm==0.9.16 numpy pillow
+  transformers==5.22.1 timm==0.9.16 numpy pillow
 ```
 
 The torch build must carry sm_120; cu130 does. torchvision 0.29.x pairs with
