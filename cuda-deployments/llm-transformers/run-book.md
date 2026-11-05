@@ -106,8 +106,8 @@ The process listens on 127.0.0.1 only.
 When the model path holds a `hub/` directory, the launcher exports HF_HOME to
 that path and sets HF_HUB_OFFLINE=1. The server resolves the one snapshot
 under it. Two or more repositories there stop the start with an error that
-names them. The model identity comes from the directory or snapshot name,
-never from a request.
+names them. The model identity comes from the directory name or the snapshot
+path, never from a request.
 
 The loader keeps a three-step ladder. It loads the native architecture first,
 without `trust_remote_code`. A ValueError that names trust_remote_code retries

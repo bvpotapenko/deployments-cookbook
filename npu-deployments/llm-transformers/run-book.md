@@ -166,4 +166,4 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 The server applies the checkpoint's own chat template. `stream: true` is
 refused, because the route is non-streaming. The `model` field in the reply
 is the identity the server prints at start: the checkpoint directory's name,
-or the repository id parsed from a single-snapshot cache.
+or the repository id parsed from a snapshot directory or a single-snapshot cache.

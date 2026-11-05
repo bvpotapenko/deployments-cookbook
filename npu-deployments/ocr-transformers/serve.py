@@ -75,6 +75,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -280,10 +281,11 @@ def main():
     vocab_size = int(model.config.vocab_size)
 
     parameter = next(model.parameters())
+    model_id, model_revision = snapshot_identity(args.model)
     info = {
         "contract_version": 1,
-        "model_id": Path(args.model).name,
-        "model_revision": getattr(model.config, "_commit_hash", None) or "",
+        "model_id": model_id,
+        "model_revision": model_revision,
         "tokenizer_id": str(tokenizer.name_or_path),
         "engine": f"transformers {metadata.version('transformers')}",
         "dtype": str(parameter.dtype).removeprefix("torch."),
@@ -535,6 +537,16 @@ def main():
 
     HTTPServer.request_queue_size = BACKLOG
     HTTPServer((HOST, args.port), Handler).serve_forever()
+
+
+def snapshot_identity(model: str) -> tuple[str, str]:
+    """(model id, revision): a hub snapshot's path names both, and its directory
+    is named by its commit. Any other directory gives its name and no revision."""
+    path = Path(model).resolve()
+    repo = path.parent.parent.name
+    if path.parent.name == "snapshots" and repo.startswith("models--") and re.fullmatch(r"[0-9a-f]{40}", path.name):
+        return repo.removeprefix("models--").replace("--", "/"), path.name
+    return Path(model).name, ""
 
 
 def fail(message: str):

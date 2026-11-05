@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -58,6 +59,7 @@ UTF8 = "utf-8"
 CONFIG_NAME = "config.json"
 HUB = "hub"
 SNAPSHOTS = "snapshots"
+COMMIT_HASH = re.compile(r"[0-9a-f]{40}")
 DEFAULT_SEED = 42
 DEFAULT_MAX_TOKENS = 16
 BACKLOG = 1024
@@ -94,8 +96,18 @@ def resolve_weights(model: str) -> tuple[Path, str]:
         named = ", ".join(str(s) for s in snapshots)
         fail(f"the cache {root} holds several models and this script was told none: {named}")
     snapshot = snapshots[0]
-    name = snapshot.parts[-4].removeprefix("models--").replace("--", "/")
+    name = snapshot.parts[-3].removeprefix("models--").replace("--", "/")
     return snapshot, name
+
+
+def snapshot_identity(weights: Path, name: str) -> tuple[str, str]:
+    """(model id, revision): a hub snapshot's path names both, and its directory
+    is named by its commit. Any other directory keeps its name and no revision."""
+    path = weights.resolve()
+    repo = path.parent.parent.name
+    if path.parent.name == SNAPSHOTS and repo.startswith("models--") and COMMIT_HASH.fullmatch(path.name):
+        return repo.removeprefix("models--").replace("--", "/"), path.name
+    return name, ""
 
 
 def fail(message: str):
@@ -176,7 +188,8 @@ async def main():
         attention = "eager"
     dtype = getattr(torch, os.environ.get("KOT_DTYPE", "")) if os.environ.get("KOT_DTYPE") else dtype
 
-    weights, model_id = resolve_weights(args.model)
+    weights, name = resolve_weights(args.model)
+    model_id, model_revision = snapshot_identity(weights, name)
     tokenizer = AutoTokenizer.from_pretrained(weights, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         weights,
@@ -194,7 +207,7 @@ async def main():
     info = {
         "contract_version": 1,
         "model_id": model_id,
-        "model_revision": getattr(model.config, "_commit_hash", None) or "",
+        "model_revision": model_revision,
         "tokenizer_id": str(tokenizer.name_or_path),
         "engine": f"transformers {metadata.version('transformers')}",
         "dtype": str(parameter.dtype).removeprefix("torch."),

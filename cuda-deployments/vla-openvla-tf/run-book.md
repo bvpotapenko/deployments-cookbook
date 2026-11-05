@@ -154,9 +154,10 @@ The observation is a kot `.npz`: `prompt`, a string, and one camera, float32
 `[3, H, W]` with 1.0 at full scale. The server ignores `state` and `noise`.
 Any other key is a camera; two cameras stop the request with an error.
 
-`/kot/score` decode builds the prompt from the observation's task. It writes
-7 rows, one per action token, and the ids prompt + tokens. A prefill takes
-those ids back with the same observation. It writes the teacher-forced
+`/kot/score` decode builds the prompt from the observation's task when
+`input_ids` is empty. It uses other ids as sent: at least 2 ids, `<s>` first.
+It writes 7 rows, one per action token, and the ids prompt + tokens. A prefill
+takes those ids back with the same observation. It writes the teacher-forced
 rows: n - 1, or the last `n_rows`. Every row is the float32 log-softmax of
 the raw logits over all 32064 columns. The server reads no seed and no
 sampling: decoding is greedy. `max_new_tokens` must be 7.

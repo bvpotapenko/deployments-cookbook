@@ -196,4 +196,5 @@ The image answer carries the page's text, and `prompt_token_ids` starts
 `[0, 128815]`: BOS, then the image placeholder.
 
 The `model` field accepts the weights path and the identity the server
-prints at startup. The identity comes from the checkpoint's `config.json`.
+prints at startup. The identity comes from the snapshot path, or else from
+the checkpoint's `config.json`.

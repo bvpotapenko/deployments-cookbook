@@ -1,2 +1,1 @@
-Placeholder for a future implementation of the vla.cpp engine. Target setup: Ascend 910B.
-Target models: OpenVLA 7B (OFT), Pi0.5, GR00T N1.7.
+Placeholder for the vla.cpp engine. It is not in the current plan and has no target models.
