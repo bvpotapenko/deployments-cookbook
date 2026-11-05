@@ -9,10 +9,10 @@ The network is the one the checkpoint's own modeling_prismatic.py builds:
       projector MLP 2176 -> 8704 -> 4096 -> 4096               -> 256 image tokens
     "<s>In: What action should the robot take to {task}?\\nOut:" + token 29871
       the 256 image tokens go in right after <s> -> Llama-2-7B -> 7 greedy tokens
-    token -> bin (256 bins over [-1, 1]) -> unnormalise with one dataset's q01/q99
+    token -> bin (255 centres over [-1, 1]) -> unnormalise with one dataset's q01/q99
 
 Why not the checkpoint's own code: it was written for transformers 4.40.1 and
-breaks on 5.20. Its _supports_sdpa property and its tie_weights() override
+breaks on 5.22. Its _supports_sdpa property and its tie_weights() override
 both fail at construction, its class has no generate(), and once patched past
 those, generate() hands it an empty cache on the first step: it then keeps
 only the last prompt token, never sees the image, and returns an action
@@ -58,7 +58,7 @@ class OpenVLA(nn.Module):
         vision_dim = sum(tower.embed_dim for tower in self.vision_backbone.values())
         # The checkpoint states only 4 Llama fields; the rest are LlamaConfig's
         # defaults, which are Llama-2-7B's geometry (rms_norm_eps 1e-6, rope_theta
-        # 10000), in 4.40.1 and in 5.20.2 alike.
+        # 10000), in 4.40.1 and in 5.22.1 alike.
         text = LlamaConfig(**config["text_config"], attn_implementation="sdpa")
         self.projector = nn.ModuleDict({
             "fc1": nn.Linear(vision_dim, 4 * vision_dim),
