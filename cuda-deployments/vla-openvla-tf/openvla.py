@@ -9,7 +9,7 @@ The network is the one the checkpoint's own modeling_prismatic.py builds:
       projector MLP 2176 -> 8704 -> 4096 -> 4096               -> 256 image tokens
     "<s>In: What action should the robot take to {task}?\\nOut:" + token 29871
       the 256 image tokens go in right after <s> -> Llama-2-7B -> 7 greedy tokens
-    token -> bin (256 bins over [-1, 1]) -> unnormalise with one dataset's q01/q99
+    token -> bin (255 centres over [-1, 1]) -> unnormalise with one dataset's q01/q99
 
 Why not the checkpoint's own code: it was written for transformers 4.40.1 and
 breaks on 5.22. Its _supports_sdpa property and its tie_weights() override

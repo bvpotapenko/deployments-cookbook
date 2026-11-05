@@ -127,7 +127,7 @@ holds the prompt id, the mode, the time in ms, the row count and the tokens.
 
 The model is a Prismatic VLM: DINOv2 ViT-L/14 and SigLIP SO400M/14 read the
 frame, an MLP projects their patches into Llama-2-7B, and Llama-2-7B writes
-7 action tokens. Each token is one of 256 bins over [-1, 1]. The dataset
+7 action tokens. Each token selects one of 255 bin centres over [-1, 1]. The dataset
 statistics turn the bins into robot units.
 
 The table holds the pinned parameters. A changed value changes the action.
