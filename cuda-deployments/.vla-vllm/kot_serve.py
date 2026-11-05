@@ -60,9 +60,8 @@ from importlib import metadata
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
-# vLLM's workers post usage stats to a remote server by default; the contract
-# has no network, and a deployment reaches nothing but its own loopback.
-os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
+# Only "1" turns off vLLM's usage report, so an ambient value must not win.
+os.environ["VLLM_NO_USAGE_STATS"] = "1"
 # The V2 model runner's prompt-logprob path accumulates the whole prompt's
 # full-vocabulary top-k on the GPU. The V1 runner streams the per-step tensors
 # the tap consumes. Pin the runner the tap is written against.

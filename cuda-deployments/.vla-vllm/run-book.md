@@ -84,7 +84,7 @@ carries the revision. `/kot/info` reports it. On vast, huggingface.co times
 out, so the download goes through the mirror endpoint:
 
 ```bash
-HF_ENDPOINT=https://hf-mirror.com /root/kotvenv-vllm-vla/bin/hf download \
+HF_ENDPOINT=https://hf-mirror.com HF_HUB_DISABLE_TELEMETRY=1 /root/kotvenv-vllm-vla/bin/hf download \
   openvla/openvla-7b --revision 47a0ec7fc4ec123775a391911046cf33cf9ed83f \
   --cache-dir /models/hub
 export MODEL=/models/hub/models--openvla--openvla-7b/snapshots/47a0ec7fc4ec123775a391911046cf33cf9ed83f
@@ -137,6 +137,7 @@ vLLM names each image per request, so the vision towers run for every request.
 | `KOT_VLLM_MAX_MODEL_LEN` | the checkpoint's 2048 | caps `max_model_len`. One request at 2048 positions needs about 1 GiB of KV cache. |
 | `KOT_VLLM_DTYPE` | engine auto | compute dtype, for example `float32` for a cross-check. |
 | `KOT_VLLM_COMPILATION` | engine default | `eager` disables torch.compile. |
+| `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value. |
 
 ## Models
 

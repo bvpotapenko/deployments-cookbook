@@ -76,6 +76,7 @@ carries the revision; `/kot/info` reports it. On vast, huggingface.co times
 out, so the download goes through the mirror endpoint:
 
 ```bash
+HF_HUB_DISABLE_TELEMETRY=1 \
 HF_ENDPOINT=https://hf-mirror.com /root/kotvenv-vla/bin/hf download \
   openvla/openvla-7b --revision 47a0ec7fc4ec123775a391911046cf33cf9ed83f \
   --cache-dir /models/hub
