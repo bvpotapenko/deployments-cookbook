@@ -105,6 +105,7 @@ every capture carries its own.
 | `KOT_VLLM_DTYPE` | unset | numeric cross-check override |
 | `KOT_VLLM_COMPILATION` | unset | `eager` disables CUDA graphs |
 | `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It fails a 1080p clip longer than about 57 s on chat only, not on `/kot/score`, so the launcher turns it off and both routes take the same clips |
+| `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value |
 
 ### Host memory
 

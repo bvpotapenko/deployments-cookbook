@@ -83,6 +83,7 @@ push the snapshot from the local hub cache; `--copy-links` resolves the
 cache's blob symlinks into real files:
 
 ```bash
+HF_HUB_DISABLE_TELEMETRY=1 \
 HF_ENDPOINT=https://hf-mirror.com \
   hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
@@ -131,6 +132,7 @@ requested rows of the cached prefix never computed.
 | `KOT_VLLM_COMPILATION` | engine default | `eager` disables torch.compile. |
 | `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived | override the reported identity. |
 | `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It applies on chat only, not on `/kot/score`, so the launcher turns it off and both routes take the same documents. |
+| `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value. |
 
 ## Models
 

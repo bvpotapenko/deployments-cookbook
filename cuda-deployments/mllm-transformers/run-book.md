@@ -80,6 +80,7 @@ push the snapshot from the local hub cache; `--copy-links` resolves the
 cache's blob symlinks into real files:
 
 ```bash
+HF_HUB_DISABLE_TELEMETRY=1 \
 HF_ENDPOINT=https://hf-mirror.com \
   hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
