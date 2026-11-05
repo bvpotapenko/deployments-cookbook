@@ -133,6 +133,7 @@ failed.
 | `KOT_NPU_IMAGE` | `kot-llm-ascend-910b:latest` | The image the wrap builds and runs. |
 | `KOT_OUT_MOUNTS` | unset | Output directories, mounted read-write at the same path inside the wrap. An output directory must be one of them. |
 | `KOT_UID` | unset | The invoking uid. The server hands the written output directories back to this uid. |
+| `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value. |
 
 ## Models
 

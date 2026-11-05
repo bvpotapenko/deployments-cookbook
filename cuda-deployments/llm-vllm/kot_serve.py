@@ -56,6 +56,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# Only "1" turns off vLLM's usage report, so an ambient value must not win.
+os.environ["VLLM_NO_USAGE_STATS"] = "1"
 # The V2 model runner's prompt-logprob path accumulates the whole prompt's
 # full-vocabulary top-k on the GPU - over 10 GB for an 8.5k-token prompt,
 # which dies out of memory beside the KV cache whatever the utilization.

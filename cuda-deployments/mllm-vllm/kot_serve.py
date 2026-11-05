@@ -71,6 +71,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# Only "1" turns off vLLM's usage report, so an ambient value must not win.
+os.environ["VLLM_NO_USAGE_STATS"] = "1"
 # The V2 model runner is the replay path: its tail scoring
 # (prompt_logprob_token_ids + prompt_logprob_start) scores only the kept
 # rows, with no top-k and no full-prompt buffer. The old pin-off reason -

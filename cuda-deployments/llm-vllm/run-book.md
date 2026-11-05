@@ -89,6 +89,7 @@ push the snapshot from the local hub cache; `--copy-links` resolves the
 cache's blob symlinks into real files:
 
 ```bash
+HF_HUB_DISABLE_TELEMETRY=1 \
 HF_ENDPOINT=https://hf-mirror.com \
   hf download <org>/<model> --revision <rev> --local-dir /models/<model>
 rsync -a --partial --copy-links -e "ssh -p $PORT" \
@@ -121,6 +122,7 @@ requested rows of the cached prefix never computed.
 | `KOT_VLLM_DTYPE` | engine auto | compute dtype, for example `float32` for a cross-check. |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | MoE backend. `auto` picks flashinfer's cutlass MoE on Blackwell, whose JIT needs nvcc and dies at init on hosts without it. |
 | `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived | override the reported identity. |
+| `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value. |
 
 ## Models
 

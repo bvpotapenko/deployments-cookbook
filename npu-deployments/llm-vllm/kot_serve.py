@@ -57,6 +57,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# Only "1" turns off vLLM's usage report, so an ambient value must not win.
+os.environ["VLLM_NO_USAGE_STATS"] = "1"
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
