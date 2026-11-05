@@ -9,11 +9,13 @@ OpenVLA's chunk is one action of seven dimensions (x, y, z, roll, pitch, yaw,
 gripper). POST /kot/score writes the log-probs of the action tokens, for a
 comparison of distributions instead of actions:
 
-  decode   builds the prompt from the observation's task, decodes the 7
-           greedy tokens, writes one row per token and the ids prompt + tokens
+  decode   takes the ids as sent, or builds the prompt from the observation's
+           task when they are empty, decodes the 7 greedy tokens, writes one
+           row per token and the ids prompt + tokens
   prefill  takes the ids as sent (a decode's stored ids), re-encodes the
            observation's frame, and writes the teacher-forced rows: n - 1,
-           or the last n_rows when the request names them
+           or the last n_rows when the request names them; more than n - 1
+           is an error
 
 Both read the frame from the observation; seed and sampling are not read,
 because OpenVLA decodes greedily, as its reference does. There is no chat
@@ -71,9 +73,8 @@ def read_observation(path: str) -> tuple[Image.Image, str]:
     if pixels.ndim != 3 or pixels.shape[0] != 3:
         raise ValueError(f"camera {cameras[0]!r} must be [3, H, W], got {pixels.shape}")
     # Back to the 8-bit RGB frame the model's processor takes: round to the
-    # nearest level (ties to even), then saturate. A photo's levels come back
-    # exact. kot's gradient planes 2 and 3 carry half and quarter levels, up
-    # to 255.75/255: those round, and the top ones saturate at 255.
+    # nearest level (ties to even), then saturate. A photo and kot's cameras
+    # both hold exact levels k / 255, so every level comes back exact.
     levels = np.clip(np.rint(pixels.transpose(1, 2, 0) * 255), 0, 255).astype(np.uint8)
     return Image.fromarray(levels), task
 
@@ -141,14 +142,19 @@ class Handler(BaseHTTPRequestHandler):
         if body["mode"] == "decode":
             if int(body["max_new_tokens"]) != policy.action_dim:
                 raise ValueError(f"OpenVLA decodes {policy.action_dim} tokens; max_new_tokens is {body['max_new_tokens']}")
-            prompt = policy.prompt_ids(task)
+            sent = [int(token) for token in body.get("input_ids") or []]  # verbatim: no template, no BOS added
+            if sent and (len(sent) < 2 or sent[0] != policy.tokenizer.bos_token_id):
+                raise ValueError(f"the image goes right after <s>, so the ids must start with it and hold at least one more; got {sent[:4]}")
+            prompt = sent or policy.prompt_ids(task)
             logits = policy.decode(frame, prompt)
             output_ids = logits.argmax(dim=-1).tolist()
             ids = prompt + output_ids
         elif body["mode"] == "prefill":
             ids = [int(token) for token in body["input_ids"]]  # verbatim: no template, no BOS added
-            logits = policy.prefill(frame, ids)
             n_rows = int(body.get("n_rows") or 0)
+            if n_rows and n_rows >= len(ids):
+                raise ValueError(f"n_rows {n_rows} asks for more rows than {len(ids)} ids can predict")
+            logits = policy.prefill(frame, ids)
             logits = logits[-n_rows:] if n_rows else logits
             output_ids = []
         else:
