@@ -85,6 +85,16 @@ def nvidia_driver() -> str:
     return match.group(1) if match else ""
 
 
+def snapshot_identity(checkpoint: Path) -> tuple[str, str]:
+    """(model id, revision): a hub snapshot's path names both, and its directory
+    is named by its commit. Any other directory gives its name and no revision."""
+    path = checkpoint.resolve()
+    repo = path.parent.parent.name
+    if path.parent.name == "snapshots" and repo.startswith("models--") and re.fullmatch(r"[0-9a-f]{40}", path.name):
+        return repo.removeprefix("models--").replace("--", "/"), path.name
+    return checkpoint.name, ""
+
+
 def pinned_media_params(checkpoint: Path, processor) -> dict:
     """The media processing this deployment runs, resolved from the checkpoint.
 
@@ -126,10 +136,11 @@ def main() -> int:
     vocab_size = int(getattr(model.config, "vocab_size", 0) or text_config.vocab_size)
     devices = sorted({str(parameter.device) for parameter in model.parameters()})
 
+    model_id, model_revision = snapshot_identity(checkpoint)
     info = {
         "contract_version": CONTRACT_VERSION,
-        "model_id": checkpoint.name,
-        "model_revision": "",
+        "model_id": model_id,
+        "model_revision": model_revision,
         "tokenizer_id": str(checkpoint),
         "engine": f"transformers {transformers.__version__}",
         "dtype": "bfloat16",

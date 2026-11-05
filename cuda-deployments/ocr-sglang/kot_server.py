@@ -625,11 +625,22 @@ class SseResponse:
         await write(b"data: [DONE]\n\n")
 
 
+def _snapshot_identity(model_dir: str) -> tuple[str, str]:
+    """(repo id, revision): a hub snapshot's path names both, and its directory
+    is named by its commit. Both are empty for any other directory."""
+    path = Path(model_dir).resolve()
+    repo = path.parent.parent.name
+    if path.parent.name == "snapshots" and repo.startswith("models--") and re.fullmatch(r"[0-9a-f]{40}", path.name):
+        return repo.removeprefix("models--").replace("--", "/"), path.name
+    return "", ""
+
+
 def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
-    A weights directory does not name its hub id; ``_name_or_path`` in
-    config.json usually does. KOT_MODEL_ID / KOT_MODEL_REVISION override both.
+    A hub snapshot's path names both. Any other directory does not name its
+    hub id; ``_name_or_path`` in config.json usually does. KOT_MODEL_ID /
+    KOT_MODEL_REVISION override both.
     """
     override_id = os.environ.get("KOT_MODEL_ID", "")
     override_revision = os.environ.get("KOT_MODEL_REVISION", "")
@@ -644,7 +655,8 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
         if "/" in name_or_path:
             model_id = name_or_path
         revision = str(config.get("_commit_hash", "") or "")
-    return model_id, override_revision or revision
+    snapshot_id, snapshot_revision = _snapshot_identity(model_dir)
+    return snapshot_id or model_id, override_revision or snapshot_revision or revision
 
 
 class KotEngine:

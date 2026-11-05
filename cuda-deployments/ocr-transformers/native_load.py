@@ -44,7 +44,7 @@ import transformers
 from safetensors import safe_open
 from transformers import DeepseekOcr2ForConditionalGeneration
 
-REVISION = "aaa02f3811945a91062062994c5c4a3f4c0af2b0"
+COMMIT_HASH = re.compile(r"[0-9a-f]{40}")
 
 # The independent rename oracle: source key -> native key, verified key by
 # key against the registered deepseek_ocr2 mapping and the meta skeleton.
@@ -91,9 +91,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def snapshot_identity(dir) -> tuple[str, str]:
+    """(repo id, revision): a hub snapshot's path names both, and its directory
+    is named by its commit. Both are empty for any other directory."""
+    path = Path(dir).resolve()
+    repo = path.parent.parent.name
+    if path.parent.name == "snapshots" and repo.startswith("models--") and COMMIT_HASH.fullmatch(path.name):
+        return repo.removeprefix("models--").replace("--", "/"), path.name
+    return "", ""
+
+
 def _revision(dir) -> str:
     trees = glob.glob(str(Path(dir) / ".cache" / "huggingface" / "trees" / "*.json"))
-    return Path(trees[0]).stem if trees else ""
+    return snapshot_identity(dir)[1] or (Path(trees[0]).stem if trees else "")
 
 
 def _safetensors_path(dir) -> Path:
@@ -118,7 +128,7 @@ def load_native(dir, cfg):
     report = {
         "model_class": type(model).__name__,
         "transformers_version": transformers.__version__,
-        "revision": _revision(path) or REVISION,
+        "revision": _revision(path),
         "file_hashes": {
             "config.json": _sha256(path / "config.json"),
             _safetensors_path(path).name: _sha256(_safetensors_path(path)),

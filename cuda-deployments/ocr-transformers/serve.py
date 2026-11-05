@@ -72,7 +72,7 @@ import torch
 from transformers import set_seed
 
 from native_config import build_config
-from native_load import load_native
+from native_load import load_native, snapshot_identity
 from native_processor import build_processor, load_image
 
 HOST = "127.0.0.1"
@@ -201,7 +201,7 @@ def main():
     parameter = next(model.parameters())
     info = {
         "contract_version": 1,
-        "model_id": Path(args.model).name,
+        "model_id": snapshot_identity(args.model)[0] or Path(args.model).name,
         "model_dir": str(Path(args.model)),
         "model_revision": report["revision"] or "",
         "engine": f"transformers {metadata.version('transformers')}",
