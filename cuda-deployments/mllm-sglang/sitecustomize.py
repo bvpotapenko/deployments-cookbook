@@ -6,10 +6,11 @@ copies this file into the engine venv's site-packages, where site.py finds it
 without any PYTHONPATH. It imports nothing heavy at startup; the patches are
 applied when SGLang's own modules finish loading.
 
-Three monkeypatches. The first two are additive: the original computation
+Four monkeypatches. The first two are additive: the original computation
 still runs and feeds SGLang's own logprob plumbing; the patch writes the
 full-vocabulary distribution of the scored positions where ``kot_server.py``
-collects it. The third replaces a step: ``qwen_vl.preprocess_video``.
+collects it. The last two replace steps of ``qwen_vl``: ``preprocess_video``,
+and the processor's path from request ids to engine ids.
 
 * ``LogitsProcessor.compute_temp_top_p_normalized_logprobs`` is where the
   log-softmax over the whole vocabulary exists for prefill positions. It is
@@ -41,6 +42,14 @@ collects it. The third replaces a step: ``qwen_vl.preprocess_video``.
   the HF processor receives is what the reference's own call decodes, and its
   resize, under the cap ``mm_process_config`` carries, is the only one. Those
   rules are constants and module code: no engine kwarg reaches them.
+
+* ``QwenVLImageProcessor.load_mm_data`` and ``process_and_combine_mm_data``
+  keep a request's ids as sent. For ids with a video, the stock path decodes
+  the ids to text and the HF processor tokenizes that text again; a sampled
+  tail that is not the tokenizer's own split comes back as other ids. The
+  replacement gives the HF processor the video placeholder alone and puts its
+  expansion in place of the placeholder in the request ids (see
+  ``_patch_qwen_verbatim``).
 
 Under tensor parallelism every rank runs LogitsProcessor and
 ModelRunner.sample with identical post-all-gather logits; both patches gate
@@ -231,6 +240,7 @@ def _apply_patch(fullname: str) -> None:
             _patch_model_runner(torch, module)
         elif fullname == "sglang.srt.multimodal.processors.qwen_vl":
             _patch_qwen_video(module)
+            _patch_qwen_verbatim(module)
         _patch_log(f"applied: {fullname}")
     except Exception as failure:
         _patch_log(f"FAILED: {fullname}: {type(failure).__name__}: {failure}")
@@ -383,6 +393,105 @@ def _patch_qwen_video(module) -> None:
     preprocess_video_pinned._kot_patched = True
     module.preprocess_video = preprocess_video_pinned
     module.QwenVLImageProcessor.video_preprocessing_device = "cpu"
+
+
+# The engine ids of the last request with ids and a video, written by the
+# patch layer; kot_server.py compares them with the reference expansion.
+VIDEO_IDS_NOTE = "last_video_ids.json"
+
+
+def _patch_qwen_verbatim(module) -> None:
+    """The request ids reach the model as sent; only the video placeholder grows.
+
+    For ids with a video that is not preprocessed, ``load_mm_data`` decodes
+    the ids to text, the HF processor tokenizes that text again inside
+    ``process_and_combine_mm_data``, and the result becomes the engine ids.
+    SGLang's own id-preserving rebuild there covers images only. The two
+    wrappers below replace that path for one video:
+
+    * ``load_mm_data`` finds the placeholder in the ids (vision start, video
+      pad, vision end) and loads the video through the stock
+      ``fast_load_mm_data``, with that placeholder as the whole text. No id is
+      decoded.
+    * ``process_and_combine_mm_data`` runs the stock step on that text. The
+      HF processor makes the pixels and the grid as before, and expands the
+      placeholder into the per-frame timestamp tokens and video tokens. That
+      expansion replaces the three placeholder ids in the request ids; all
+      other ids stay as sent. The items' offsets move by the placeholder's
+      position. ``_process_mm_data_uncached`` then computes the M-RoPE
+      positions from these ids and the grid, as for the stock path.
+
+    The engine ids go to ``VIDEO_IDS_NOTE`` in the stash dir. A request that
+    does not fit (two videos, images or audio beside the video, no native
+    placeholder) fails: it never falls back to the decode path.
+    """
+    import torch
+
+    processor_class = module.QwenVLImageProcessor
+    if getattr(processor_class.process_and_combine_mm_data, "_kot_patched", False):
+        return
+    # Resolved here, so a renamed internal fails the patch when the module loads.
+    original_load = processor_class.load_mm_data
+    original_combine = processor_class.process_and_combine_mm_data
+    fast_load = processor_class.fast_load_mm_data
+
+    def raw_videos(videos) -> bool:
+        return any(
+            video is not None and not processor_class._is_preprocessed_input(video)
+            for video in videos or []
+        )
+
+    def placeholder(processor, ids: list) -> tuple[int, str]:
+        """The start of the one video placeholder in the ids, and its text."""
+        hits = [at for at, token in enumerate(ids) if token == processor.mm_tokens.video_token_id]
+        if len(hits) != 1:
+            raise ValueError(f"kot patch: {len(hits)} video pads in the request ids; one is served")
+        start = hits[0] - 1
+        native = [processor.vision_start_token_id, ids[hits[0]], processor.vision_end_token_id]
+        if start < 0 or ids[start:start + 3] != native:
+            raise ValueError("kot patch: the video pad is not between vision start and vision end")
+        return start, "".join(processor._tokenizer.convert_ids_to_tokens(native))
+
+    async def load_mm_data_verbatim(self, prompt, multimodal_tokens, image_data=None,
+                                    video_data=None, audio_data=None, **kwargs):
+        if not (isinstance(prompt, list) and raw_videos(video_data)):
+            return await original_load(self, prompt, multimodal_tokens, image_data=image_data,
+                                       video_data=video_data, audio_data=audio_data, **kwargs)
+        if image_data or audio_data or len(video_data) != 1:
+            raise ValueError("kot patch: a request with ids carries one video and no other media")
+        _, text = placeholder(self, prompt)
+        return await fast_load(self, prompt=text, multimodal_tokens=multimodal_tokens,
+                               video_data=video_data, input_ids=prompt, **kwargs)
+
+    def process_and_combine_verbatim(self, base_output, mm_tokens, processor=None, **kwargs):
+        ids = base_output.input_ids
+        if not (isinstance(ids, list) and raw_videos(base_output.videos)):
+            return original_combine(self, base_output, mm_tokens, processor=processor, **kwargs)
+        start, text = placeholder(self, ids)
+        if base_output.input_text != text:
+            raise ValueError("kot patch: the loader passed text other than the video placeholder")
+        items, expansion, ret = original_combine(
+            self, base_output, mm_tokens, processor=processor, **kwargs
+        )
+        engine_ids = [*ids[:start], *map(int, expansion.flatten().tolist()), *ids[start + 3:]]
+        for item in items:
+            item.offsets = [(first + start, last + start) for first, last in item.offsets]
+        covered = [at for item in items for first, last in item.offsets for at in range(first, last + 1)]
+        video_at = [at for at, token in enumerate(engine_ids) if token == mm_tokens.video_token_id]
+        if sorted(covered) != video_at:
+            raise ValueError("kot patch: the item offsets do not cover the video tokens")
+        input_ids = torch.tensor(engine_ids, dtype=expansion.dtype)
+        ret["input_ids"] = input_ids.unsqueeze(0)
+        try:
+            with open(os.path.join(STASH_DIR, VIDEO_IDS_NOTE), "w", encoding="utf-8") as note:
+                json.dump({"request_ids": len(ids), "input_ids": engine_ids}, note)
+        except Exception as failure:
+            _patch_log(f"note FAILED: {type(failure).__name__}: {failure}")
+        return items, input_ids, ret
+
+    process_and_combine_verbatim._kot_patched = True
+    processor_class.load_mm_data = load_mm_data_verbatim
+    processor_class.process_and_combine_mm_data = process_and_combine_verbatim
 
 
 def _trace(message: str) -> None:

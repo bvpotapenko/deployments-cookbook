@@ -22,7 +22,8 @@ Endpoints:
   layer samples the frames as the reference does (fps 2.0, pinned) and the
   checkpoint's HF processor, inside the engine, resizes them under the
   per-frame cap and expands the placeholder into the per-frame timestamp
-  structure.
+  structure. The patch layer puts that expansion in place of the
+  placeholder; every other id reaches the model as sent.
 * ``POST /kot/infer`` -- the speed surface: one video decode, the
   description written as ``text.txt`` into ``out_dir``, the file named back.
 * ``POST /v1/chat/completions`` -- the OpenAI-shaped surface the speed harness
@@ -260,12 +261,15 @@ def _write_array(out_dir: Path, name: str, array: np.ndarray) -> str:
 def _consumed_guard(done: dict, ids: list[int], engine, raw: list[int], video_path: str) -> None:
     """The engine must consume the request ids verbatim, plus the video block.
 
-    The expected consumed count is known before the request: the request ids
-    grown by what the expansion adds to the raw template. That growth comes
-    from this deployment's own processor rendering of the same video at the
-    reference's pins - the HF expansion, the same code the reference runs. A
-    mismatch means the engine retokenized the request or sampled different
-    frames; the self-agreement would read that only as numbers.
+    The expected sequence is known before the request: the request ids with
+    the raw template replaced by its expansion. That expansion comes from this
+    deployment's own processor rendering of the same video at the reference's
+    pins - the HF expansion, the same code the reference runs. ``prompt_tokens``
+    must count that sequence, and the engine ids the patch layer records
+    (``last_video_ids.json`` in the stash dir) must equal it position by
+    position. A missing note means the engine took its decode-and-retokenize
+    path; a mismatch means it changed an id or sampled different frames. The
+    self-agreement would read either only as numbers.
     """
     meta = done.get("meta_info", {}) if isinstance(done, dict) else {}
     prompt_tokens = int(meta.get("prompt_tokens", 0) or 0)
@@ -278,6 +282,25 @@ def _consumed_guard(done: dict, ids: list[int], engine, raw: list[int], video_pa
             f"the engine consumed {prompt_tokens} tokens for {len(ids)} ids; the raw "
             f"template's {len(raw)} expand to {len(expanded)}, so {expected} were "
             "expected: the request did not stay verbatim"
+        )
+    note = Path(os.environ["KOT_SGLANG_STASH_DIR"]) / "last_video_ids.json"
+    try:
+        consumed = json.loads(note.read_text(encoding=UTF8))["input_ids"]
+    except (OSError, ValueError, KeyError):
+        raise ScoreFailure(
+            "the patch layer recorded no engine ids for this request: its ids patch "
+            "did not run, and the engine took its decode-and-retokenize path"
+        ) from None
+    reference = [*expanded, *ids[len(raw):]]
+    if consumed != reference:
+        at = next(
+            (at for at, pair in enumerate(zip(consumed, reference)) if pair[0] != pair[1]),
+            min(len(consumed), len(reference)),
+        )
+        raise ScoreFailure(
+            f"the engine ids ({len(consumed)}) differ from the reference expansion plus "
+            f"the tail ({len(reference)}) first at position {at}: engine "
+            f"{consumed[at:at + 4]}, reference {reference[at:at + 4]}"
         )
 
 
