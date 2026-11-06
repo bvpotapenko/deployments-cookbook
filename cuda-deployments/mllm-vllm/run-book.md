@@ -95,10 +95,10 @@ every capture carries its own.
 |---|---|---|
 | `KOT_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
 | `KOT_VENV` | `/scratch/kot-vllm-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-venv` |
-| `KOT_VLLM_GPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under the 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
-| `KOT_VLLM_MAX_MODEL_LEN` | `20480` | the window: the ~12.4k-token video prompt plus the 4096-token decode |
+| `KOT_VLLM_GPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under even a 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
+| `KOT_VLLM_MAX_MODEL_LEN` | `24576` | the window: a video prompt up to the pixel budget (12,288 video tokens plus the template) plus the 8192-token decode. vLLM checks only the prompt against it and caps the output at the window without an error; the server then refuses a decode with `allow_eos` false that is short of `max_new_tokens` |
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | the chunk size of every prefill, shared by capture and speed. The size is part of the numerics and is reported in `/kot/info` |
-| `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (a 4,096-row tail is 16 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
+| `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (an 8,192-row tail is 32 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
 | `KOT_VLLM_MAX_NUM_SEQS` | `4` | the CUDA-graph profiling KV and the capture sizes scale with the concurrent-request count; the 256 API-server default on 32G cards OOMs boot |
 | `KOT_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
@@ -110,10 +110,12 @@ every capture carries its own.
 ### Host memory
 
 The V2 runner removed the V1 floor: no full-prompt pinned buffer, no
-full-prompt message, no top-k. The measured host peak during a replay is
-56.5 GiB against the container's 120.7 GiB limit (V1 needed ~122 GiB at the
-final relay and the cgroup OOM-killed the server). The deployment's own
-row processing is the blocked scatter over the kept tail only.
+full-prompt message, no top-k. The measured host peak during a 4,096-row
+replay was 56.5 GiB against the container's 120.7 GiB limit (V1 needed
+~122 GiB at the final relay and the cgroup OOM-killed the server). The
+server holds one block of 256 decode steps, or one replay segment, at a
+time. Each one goes into `log_probs.npy` through a memmap at the final
+shape, and then the server releases it.
 
 ### The V2 runner
 

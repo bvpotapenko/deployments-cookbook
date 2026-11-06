@@ -262,6 +262,39 @@ def _decode_rows(entries: list, vocab_size: int) -> np.ndarray:
     return _scatter_full_vocab(token_ids, logprobs, vocab_size)
 
 
+def _drain_steps(processor, steps: int, log_probs: np.ndarray, written: int, vocab_size: int) -> int:
+    """Write the first ``steps`` stashed steps into log_probs from row ``written``
+    and drop them from the stash, so it holds one block, never the unit.
+    Returns the rows written so far."""
+    entries = processor.kot_sample_lists[:steps]
+    del processor.kot_sample_lists[:steps]
+    block = _decode_rows(entries, vocab_size)
+    del entries
+    _check_well_formed(block)
+    log_probs[written:written + block.shape[0]] = block
+    return written + block.shape[0]
+
+
+def _compact(path: Path, rows: int) -> None:
+    """Cut log_probs.npy to its first ``rows`` rows: copied block by block into
+    a new file at the final shape, which then replaces the old one."""
+    source = np.load(path, mmap_mode="r")
+    staged = path.with_name(f"{path.name}.compact")
+    try:
+        target = np.lib.format.open_memmap(
+            staged, mode="w+", dtype=np.float32, shape=(rows, source.shape[1])
+        )
+        for start in range(0, rows, BLOCK_ROWS):
+            stop = min(start + BLOCK_ROWS, rows)
+            target[start:stop] = source[start:stop]
+        target.flush()
+        del target, source
+        os.replace(staged, path)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+
+
 def _refuse_occupied_out_dir(body: dict, out_dir: Path) -> None:
     """A score request must not silently replace another run's rows.
 
@@ -477,13 +510,15 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
 
     The engine's per-step tensors are drained while the request runs,
     scattered into token-id order and written block-wise into a memmap of the
-    cap shape, so memory holds one block instead of the whole unit and the
-    client sees rows for as long as the generation lasts. Under allow_eos the
-    sampler may stop early; the file is compacted to the rows actually
-    produced before the reply names it.
+    cap shape, and each drained block leaves the stash, so memory holds one
+    block instead of the whole unit and the client sees rows for as long as
+    the generation lasts. Under allow_eos the sampler may stop early; the
+    file is compacted to the rows actually produced before the reply names
+    it. Without allow_eos anything short of max_new_tokens is an error.
     """
     video_path = body["attachments"][VIDEO]
     max_new_tokens = int(body["max_new_tokens"])
+    allow_eos = bool(body.get("allow_eos", False))
     out_dir = Path(body["out_dir"])
     _refuse_occupied_out_dir(body, out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -498,25 +533,17 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
         shape=(max_new_tokens, vocab_size),
     )
     processor = None
-    consumed = 0
+    blocks = 0
     written = 0
     try:
         final = None
         async for output in engine.generate(prompt, params, request_id):
             final = output
             processor = processor or _peek_sink(request_id)
-            while (
-                processor is not None
-                and len(processor.kot_sample_lists) - consumed >= BLOCK_ROWS
-            ):
-                block = _decode_rows(
-                    processor.kot_sample_lists[consumed:consumed + BLOCK_ROWS], vocab_size
-                )
-                _check_well_formed(block)
-                log_probs[written:written + block.shape[0]] = block
-                written += block.shape[0]
-                consumed += BLOCK_ROWS
-                yield _line({"block": consumed // BLOCK_ROWS - 1, "rows": written})
+            while processor is not None and len(processor.kot_sample_lists) >= BLOCK_ROWS:
+                written = _drain_steps(processor, BLOCK_ROWS, log_probs, written, vocab_size)
+                blocks += 1
+                yield _line({"block": blocks - 1, "rows": written})
         if final is None or not final.finished:
             yield _line(
                 {"error": "RuntimeError",
@@ -524,18 +551,17 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
             )
             return
         processor = processor or _pop_sink(request_id)
-        if processor is None or not processor.kot_sample_lists:
+        if processor is None or not (written or processor.kot_sample_lists):
             yield _line(
                 {"error": "RuntimeError",
                  "detail": "no logprob tap for the request; the V1 LogprobsProcessor patch did not run"}
             )
             return
-        if len(processor.kot_sample_lists) > consumed:
-            block = _decode_rows(processor.kot_sample_lists[consumed:], vocab_size)
-            _check_well_formed(block)
-            log_probs[written:written + block.shape[0]] = block
-            written += block.shape[0]
-            yield _line({"block": consumed // BLOCK_ROWS, "rows": written})
+        if processor.kot_sample_lists:
+            written = _drain_steps(
+                processor, len(processor.kot_sample_lists), log_probs, written, vocab_size
+            )
+            yield _line({"block": blocks, "rows": written})
         output_ids = [int(token) for token in final.outputs[0].token_ids]
         if written != len(output_ids):
             yield _line(
@@ -550,21 +576,25 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
                  "detail": f"decode produced {written} rows for a cap of {max_new_tokens}"}
             )
             return
-        # Compact to the rows actually produced (allow_eos may stop early).
-        # A real copy, not a view: np.load(mmap_mode)[:n] stays memory-mapped
-        # (ascontiguousarray returns the same buffer), and rewriting the file
-        # under a live mmap is a short write.
+        # A "length" finish short of max_new_tokens is the window's cap, not
+        # the request's, whatever allow_eos says.
+        capped = getattr(final.outputs[0], "finish_reason", None) == "length"
+        if written != max_new_tokens and (capped or not allow_eos):
+            yield _line(
+                {"error": "ValueError",
+                 "detail": f"decode produced {written} ids of the {max_new_tokens} asked "
+                           f"(allow_eos {str(allow_eos).lower()}, finish_reason "
+                           f"{getattr(final.outputs[0], 'finish_reason', None)}); the likely "
+                           "cause is a prompt plus decode longer than the max_model_len window"}
+            )
+            return
+        # Compact to the rows actually produced (allow_eos may stop early),
+        # block by block into a new file: a whole-unit copy is what the
+        # memmap exists to avoid.
         log_probs.flush()
         del log_probs
         if written < max_new_tokens:
-            mapped = np.load(out_dir / "log_probs.npy", mmap_mode="r")
-            compact = np.array(mapped[:written])
-            del mapped
-            np.save(
-                out_dir / "log_probs.npy",
-                compact,
-                allow_pickle=False,
-            )
+            _compact(out_dir / "log_probs.npy", written)
         # The raw prompt the deployment rendered (the pinned chat template
         # with one video placeholder) plus the generated ids: the
         # pre-expansion sequence, so the replay of this file re-renders the
@@ -623,56 +653,76 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     tail = transcript[len(raw_ids):]
     expanded_n = expanded_template + len(tail)
     first_row = expanded_n - 1 - keep
-    row_blocks = []
+    # Each segment's rows go into the file at the final shape as they land,
+    # under a staging name: memory holds one segment, and a failed replay
+    # leaves no log_probs.npy behind to block a retry.
+    staged = out_dir / "log_probs.npy.partial"
+    log_probs = np.lib.format.open_memmap(
+        staged, mode="w+", dtype=np.float32, shape=(keep, vocab_size)
+    )
+    filled = 0
     started = time.monotonic()
-    for a in range(first_row, first_row + keep, REPLAY_SEGMENT_ROWS):
-        b = min(a + REPLAY_SEGMENT_ROWS, first_row + keep)
-        cut = list(transcript[: len(raw_ids) + (b - expanded_template + 1)])
-        segment_id = f"{SCORE_PREFIX}{uuid.uuid4().hex}"
-        params = SamplingParams(
-            max_tokens=1,
-            temperature=1.0,
-            prompt_logprob_token_ids=np.tile(
-                np.arange(vocab_size, dtype=np.int64), (b - a, 1)
-            ),
-            prompt_logprob_start=a,
-        )
-        try:
-            final = None
-            async for output in engine.generate(
-                _video_prompt(cut, video_path), params, segment_id
-            ):
-                final = output
-            if final is None or not final.finished:
-                raise RuntimeError("the engine ended the request without finishing it")
-        finally:
-            _pop_sink(segment_id)
-        # The engine's own expansion must match the processor-computed one,
-        # or the start index scored the wrong rows. The cut expands to
-        # exactly B + 1 ids: the template plus the tail through token B.
-        expanded_actual = len(final.prompt_token_ids or ())
-        if expanded_actual != b + 1:
-            raise RuntimeError(
-                f"the engine expanded the segment prompt to {expanded_actual} ids, "
-                f"the processor computed {b + 1}; the start index cannot be trusted"
+    try:
+        for a in range(first_row, first_row + keep, REPLAY_SEGMENT_ROWS):
+            b = min(a + REPLAY_SEGMENT_ROWS, first_row + keep)
+            cut = list(transcript[: len(raw_ids) + (b - expanded_template + 1)])
+            segment_id = f"{SCORE_PREFIX}{uuid.uuid4().hex}"
+            params = SamplingParams(
+                max_tokens=1,
+                temperature=1.0,
+                prompt_logprob_token_ids=np.tile(
+                    np.arange(vocab_size, dtype=np.int64), (b - a, 1)
+                ),
+                prompt_logprob_start=a,
             )
-        rows = getattr(final, "prompt_token_id_logprobs", None)
-        if rows is None:
+            try:
+                final = None
+                async for output in engine.generate(
+                    _video_prompt(cut, video_path), params, segment_id
+                ):
+                    final = output
+                if final is None or not final.finished:
+                    raise RuntimeError("the engine ended the request without finishing it")
+            finally:
+                _pop_sink(segment_id)
+            # The engine's own expansion must match the processor-computed one,
+            # or the start index scored the wrong rows. The cut expands to
+            # exactly B + 1 ids: the template plus the tail through token B.
+            expanded_actual = len(final.prompt_token_ids or ())
+            if expanded_actual != b + 1:
+                raise RuntimeError(
+                    f"the engine expanded the segment prompt to {expanded_actual} ids, "
+                    f"the processor computed {b + 1}; the start index cannot be trusted"
+                )
+            rows = getattr(final, "prompt_token_id_logprobs", None)
+            if rows is None:
+                raise RuntimeError(
+                    "the V2 runner returned no prompt_token_id_logprobs; the "
+                    "tap passthrough did not run"
+                )
+            rows = np.asarray(rows, dtype=np.float32)
+            if filled + rows.shape[0] > keep:
+                raise RuntimeError(
+                    f"the segments produced more than the requested {keep} rows"
+                )
+            # The checks are per row: every segment passing is the tail passing.
+            _check_well_formed(rows)
+            log_probs[filled:filled + rows.shape[0]] = rows
+            filled += rows.shape[0]
+            # The loop variable and the params hold the segment's rows and
+            # its id tile too: all go, so memory holds one segment.
+            del rows, final, output, params
+        if filled != keep:
             raise RuntimeError(
-                "the V2 runner returned no prompt_token_id_logprobs; the "
-                "tap passthrough did not run"
+                f"the segments produced {filled} rows for a requested {keep}; "
+                "the tail is incomplete"
             )
-        row_blocks.append(np.asarray(rows, dtype=np.float32))
-    engine_s = time.monotonic() - started
-    log_probs = np.ascontiguousarray(np.concatenate(row_blocks), dtype=np.float32)
-    if log_probs.shape[0] != keep:
-        raise RuntimeError(
-            f"the segments produced {log_probs.shape[0]} rows for a requested "
-            f"{keep}; the tail is incomplete"
-        )
-    _check_well_formed(log_probs)
-
-    np.save(out_dir / "log_probs.npy", log_probs, allow_pickle=False)
+        log_probs.flush()
+        del log_probs
+        os.replace(staged, out_dir / "log_probs.npy")
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
     # The stored ids are the sequence the rows live in, verbatim: the OCR
     # replay's rows predict the trailing generated ids, and the eval joins
     # them to decode_ids by name.
@@ -683,13 +733,13 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     )
     print(
         f"[kot-vllm-mllm] prefill {body['prompt_id']}: ids {n}, keep {keep}, "
-        f"engine {engine_s:.1f}s, rows {time.monotonic() - started - engine_s:.1f}s",
+        f"segments and rows {time.monotonic() - started:.1f}s",
         flush=True,
     )
     return {
         "prompt_id": body["prompt_id"],
         "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
-        "n_positions": int(log_probs.shape[0]),
+        "n_positions": keep,
         "vocab_size": vocab_size,
         "output_ids": [],
     }
@@ -757,9 +807,11 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     args.served_model_name = [model_id, model]
     # One video per request.
     args.limit_mm_per_prompt = {"video": 1}
-    # The video units run ~12.4k-token prompts (the checkpoint's own pixel
-    # budget) plus a 4096-token decode; the window covers both.
-    args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "20480"))
+    # The video units run prompts up to ~12.4k tokens (the checkpoint's pixel
+    # budget allows 12,288 video tokens, plus the template) and an 8192-token
+    # decode; the window covers both with room. vLLM checks only the prompt
+    # against it and caps the output at the window without an error.
+    args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "24576"))
     # The chunk size of every prefill. Under the V2 runner the score path
     # has no full-vocab gather, so the #29 budget that forced 128 is void:
     # 2048 is vLLM's API-server default for this card class and serves both
@@ -799,7 +851,7 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
     # The 52G of weights over two cards leave ~5G per card for the KV cache
     # and the scoring transient. The V2 runner's own accounting is tighter
-    # than V1's: at 0.89 the available KV falls 20 MiB under the 20,480-token
+    # than V1's: at 0.89 the available KV falls 20 MiB under even a 20,480-token
     # window (0.70 GiB available vs 0.72 needed) and the engine refuses to
     # boot. 0.91 sizes the pool at 38,229 KV tokens and still leaves ~2.4 GiB
     # free beside the pool - the V2 tail scoring needs at most ~3.1 MiB per
