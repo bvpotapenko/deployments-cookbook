@@ -167,9 +167,11 @@ video." A video decode renders it with the checkpoint's chat template
 (`enable_thinking` false), expands the placeholder with the processor, and
 generates. The stored ids are the raw form (one video placeholder) plus the
 generated ids; the stored rows are generate's own per-step logits, passed
-through a float32 log-softmax. A replay prefill re-renders the same prompt
+through a float32 log-softmax. Each row goes to host memory at its step, so
+a long decode does not fill card 0. The host holds about 1 GB of rows for
+each 1000 generated tokens. A replay prefill re-renders the same prompt
 from the attachment, asserts the stored ids' head matches, and scores the
-stored tail (`n_rows` rows) with `logits_to_keep`.
+stored tail (`n_rows` rows). The lm_head runs on 256 rows at a time.
 
 `POST /kot/infer` runs one video decode, the description written as `text.txt`
 into the request's `out_dir`, the file names returned. The benchmark's speed

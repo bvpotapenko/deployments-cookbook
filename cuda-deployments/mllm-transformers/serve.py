@@ -22,9 +22,10 @@ to videos: the frozen inputs carry no ids (the prompt is built around the
 frames), so the deployment renders the pinned chat prompt itself - the raw
 form (one video placeholder) is what a capture stores, and a replay prefill
 re-renders it, asserts the stored head matches, and scores the stored tail
-(n_rows). The decode's rows come from generate's own per-step logits
-(output_logits), the raw pre-warper distribution. allow_eos shapes a video
-decode's stop as the contract states: false, the default, is exactly
+(n_rows). The decode's rows are the raw logits generate samples from, each
+step's taken by a forward hook before any processor and moved to host at
+once; the lm_head of a prefill runs one block of rows at a time. allow_eos
+shapes a video decode's stop as the contract states: false, the default, is exactly
 max_new_tokens ids with EOS suppressed through min_new_tokens, and the rows
 are still taken before that suppression; true stops at EOS, at most that many,
 and the EOS id stays in output_ids with its row.
@@ -245,22 +246,37 @@ def main() -> int:
         }
         return raw, expanded, media
 
-    def _store_rows(out_dir: Path, logits: tuple[torch.Tensor, ...], ids: list[int]) -> None:
-        """Write one log_probs.npy row per logits tensor, block by block: the
-        log-softmax on the logits' device, each finished block copied to host
-        and into the file, so a whole unit's float32 rows never exist at once."""
+    def _store_rows(out_dir: Path, count: int, logits_of, ids: list[int]) -> None:
+        """Write count log_probs.npy rows, block by block: logits_of(start, stop)
+        gives rows start..stop-1 as raw logits on a card, the log-softmax runs
+        there, and each finished block is copied to host and into the file, so
+        a whole unit's rows never exist at once on a card."""
         out_dir.mkdir(parents=True, exist_ok=True)
         rows = np.lib.format.open_memmap(
-            out_dir / "log_probs.npy", mode="w+", dtype=np.float32, shape=(len(logits), vocab_size)
+            out_dir / "log_probs.npy", mode="w+", dtype=np.float32, shape=(count, vocab_size)
         )
-        for start in range(0, len(logits), BLOCK_ROWS):
-            # One expression: no name keeps a block alive, so its memory is back
-            # in the allocator for the next one, without an empty_cache.
-            rows[start:start + BLOCK_ROWS] = torch.log_softmax(
-                torch.vstack(logits[start:start + BLOCK_ROWS]).float(), dim=-1
-            )[:, :vocab_size].cpu().numpy()
+        with torch.no_grad():
+            for start in range(0, count, BLOCK_ROWS):
+                stop = min(start + BLOCK_ROWS, count)
+                # One expression: no name keeps a block alive, so its memory is back
+                # in the allocator for the next one, without an empty_cache.
+                rows[start:stop] = torch.log_softmax(
+                    logits_of(start, stop).float(), dim=-1
+                )[:, :vocab_size].cpu().numpy()
         rows.flush()
         np.save(out_dir / "input_ids.npy", np.asarray(ids, dtype=np.int32), allow_pickle=False)
+
+    def _head(hidden: torch.Tensor):
+        """logits_of for _store_rows over last hidden states: the model's own
+        lm_head, one block at a time. At vocabulary 248320 the logits of an
+        8192-row tail are 3.8 GiB in bfloat16, too much beside the weights."""
+        return lambda start, stop: model.lm_head(hidden[start:stop])
+
+    def _hidden(**inputs) -> torch.Tensor:
+        """The last hidden state at each position: the lm_head's input, as the
+        model's own forward computes it."""
+        with torch.no_grad():
+            return model.model(**inputs).last_hidden_state[0]
 
     def _video_decode(body: dict, path: str) -> dict:
         raw, expanded, media = render_video(path)
@@ -274,30 +290,45 @@ def main() -> int:
             )
         max_new_tokens = int(body["max_new_tokens"])
         allow_eos = bool(body.get("allow_eos", False))
-        with torch.no_grad():
-            out = model.generate(
-                input_ids=torch.tensor([expanded], device=model.device),
-                do_sample=True,
-                temperature=float(sampling.get("temperature", 1.0) or 1.0),
-                top_p=float(sampling.get("top_p", 0.95) or 0.95),
-                top_k=int(sampling.get("top_k", 20) or 20),
-                min_new_tokens=0 if allow_eos else max_new_tokens,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=processor.tokenizer.eos_token_id,
-                use_cache=True,
-                return_dict_in_generate=True,
-                output_logits=True,
-                # generate reads only each step's last-position logits; without
-                # this the first forward materialises the whole prompt's
-                # [seq, 248320] logits and OOMs card 0 beside the weights.
-                logits_to_keep=1,
-                **media,
-            )
-        generated = out.sequences[0][len(expanded):].tolist()
-        logits = out.logits
-        del out  # it holds the KV cache: off both cards before the rows
+        kept: list[torch.Tensor] = []
+
+        def keep_row(_module, _args, output):
+            # The row generate samples from: the last position's logits as
+            # float32, before any processor. It goes to host at once; with
+            # output_logits generate keeps every row on card 0, 7.6 GiB at 8192.
+            kept.append(output.logits[0, -1].to(device="cpu", dtype=torch.float32))
+
+        hook = model.register_forward_hook(keep_row)
+        try:
+            with torch.no_grad():
+                sequences = model.generate(
+                    input_ids=torch.tensor([expanded], device=model.device),
+                    do_sample=True,
+                    temperature=float(sampling.get("temperature", 1.0) or 1.0),
+                    top_p=float(sampling.get("top_p", 0.95) or 0.95),
+                    top_k=int(sampling.get("top_k", 20) or 20),
+                    min_new_tokens=0 if allow_eos else max_new_tokens,
+                    max_new_tokens=max_new_tokens,
+                    pad_token_id=processor.tokenizer.eos_token_id,
+                    use_cache=True,
+                    # generate reads only each step's last-position logits; without
+                    # this the first forward materialises the whole prompt's
+                    # [seq, 248320] logits and OOMs card 0 beside the weights.
+                    logits_to_keep=1,
+                    **media,
+                )
+        finally:
+            hook.remove()
+        generated = sequences[0][len(expanded):].tolist()
+        if len(kept) != len(generated):
+            raise RuntimeError(f"{len(kept)} forward rows for {len(generated)} generated ids")
         out_dir = Path(body["out_dir"])
-        _store_rows(out_dir, logits, [*raw, *generated])
+        _store_rows(
+            out_dir,
+            len(kept),
+            lambda start, stop: torch.vstack(kept[start:stop]).to(model.device),
+            [*raw, *generated],
+        )
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
@@ -327,14 +358,11 @@ def main() -> int:
              torch.zeros(1, len(tail), dtype=media["mm_token_type_ids"].dtype, device=model.device)],
             dim=1,
         )
-        with torch.no_grad():
-            # logits_to_keep pins the lm_head to the last n_rows+1 positions:
-            # at vocab 248320 the full-sequence logits would not fit beside
-            # the weights and the KV cache. The first n_rows of the block are
-            # the tail's predictors (row t predicts position t+1).
-            block = model(**media, input_ids=full, logits_to_keep=n_rows + 1).logits[0]
+        # The tail's predictors: the n_rows positions before the last one
+        # (row t predicts tail[t]). The lm_head runs on them block by block.
+        hidden = _hidden(**media, input_ids=full)[-(n_rows + 1):-1]
         out_dir = Path(body["out_dir"])
-        _store_rows(out_dir, block[:n_rows].unbind(), ids)
+        _store_rows(out_dir, n_rows, _head(hidden), ids)
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
@@ -368,10 +396,8 @@ def main() -> int:
         (out_dir / "text.txt").write_text(text, encoding=UTF8)
         return {"prompt_id": body["prompt_id"], "files": ["text.txt"]}
 
-    def _forward(ids: list[int]) -> torch.Tensor:
-        tokens = torch.tensor([ids], dtype=torch.long, device=model.device)
-        with torch.no_grad():
-            return model(input_ids=tokens).logits[0]
+    def _text_hidden(ids: list[int]) -> torch.Tensor:
+        return _hidden(input_ids=torch.tensor([ids], dtype=torch.long, device=model.device))
 
     def _decode(body: dict, ids: list[int]) -> dict:
         seed = int(body.get("seed", 42))
@@ -391,10 +417,9 @@ def main() -> int:
             max_new_tokens=int(body["max_new_tokens"]),
             pad_token_id=processor.tokenizer.eos_token_id,
         )[0][len(ids):].tolist()
-        logits = _forward([*ids, *generated])
+        hidden = _text_hidden([*ids, *generated])[len(ids) - 1 : len(ids) - 1 + len(generated)]
         out_dir = Path(body["out_dir"])
-        rows = logits[len(ids) - 1 : len(ids) - 1 + len(generated)].unbind()
-        _store_rows(out_dir, rows, [*ids, *generated])
+        _store_rows(out_dir, len(generated), _head(hidden), [*ids, *generated])
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
@@ -407,9 +432,9 @@ def main() -> int:
         n_rows = int(body.get("n_rows", 0))
         if n_rows < 1:
             raise RuntimeError("the mllm prefill stores the decode's rows: set n_rows")
-        logits = _forward(ids)
+        hidden = _text_hidden(ids)[len(ids) - 1 - n_rows : len(ids) - 1]
         out_dir = Path(body["out_dir"])
-        _store_rows(out_dir, logits[len(ids) - 1 - n_rows : len(ids) - 1].unbind(), ids)
+        _store_rows(out_dir, n_rows, _head(hidden), ids)
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
