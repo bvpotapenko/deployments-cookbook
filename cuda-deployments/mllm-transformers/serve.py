@@ -24,7 +24,15 @@ form (one video placeholder) is what a capture stores, and a replay prefill
 re-renders it, asserts the stored head matches, and scores the stored tail
 (n_rows). The decode's rows are the raw logits generate samples from, each
 step's taken by a forward hook before any processor and moved to host at
-once; the lm_head of a prefill runs one block of rows at a time. allow_eos
+once; at every 256 rows the hook runs their log-softmax on the card and
+writes them into log_probs.npy, opened at max_new_tokens rows, so the host
+holds one block, never the unit. A video replay runs in calls through one
+cache: the expanded prompt with the video, then the tail in chunks of
+KOT_TF_REPLAY_CHUNK tokens, so the working memory of a call stays bounded;
+every row still sees the video, the prompt and every tail id before the one
+it predicts. The rows of each call go into the file as the call returns. The
+chunk size is part of the numerics and /kot/info reports it. The lm_head of
+a prefill runs one block of rows at a time. allow_eos
 shapes a video decode's stop as the contract states: false, the default, is exactly
 max_new_tokens ids with EOS suppressed through min_new_tokens, and the rows
 are still taken before that suppression; true stops at EOS, at most that many,
@@ -35,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from http import HTTPStatus
 from pathlib import Path
@@ -74,6 +83,34 @@ CAP_PIXELS_PER_FRAME = True
 
 # Rows per log-softmax block. At vocabulary 248320 a block is 0.24 GiB of float32.
 BLOCK_ROWS = 256
+
+# Tokens per replay call after the prompt call. The working memory of a call
+# grows with its tokens: one call over a 12.3k-token video prompt plus an
+# 8192-token tail does not fit on card 0. The size is part of the numerics:
+# the float order changes at every call edge, so rows produced at one size
+# need not be bit-identical to rows produced at another. /kot/info reports it.
+# The env override is for experiments; captures run at the default.
+REPLAY_CHUNK = int(os.environ.get("KOT_TF_REPLAY_CHUNK", "2048"))
+
+
+def compact_rows(path: Path, rows: int) -> None:
+    """Cut log_probs.npy to its first rows: copied block by block into a new
+    file at the final shape, which then replaces the old one."""
+    source = np.load(path, mmap_mode="r")
+    staged = path.with_name(f"{path.name}.compact")
+    try:
+        target = np.lib.format.open_memmap(
+            staged, mode="w+", dtype=np.float32, shape=(rows, source.shape[1])
+        )
+        for start in range(0, rows, BLOCK_ROWS):
+            stop = min(start + BLOCK_ROWS, rows)
+            target[start:stop] = source[start:stop]
+        target.flush()
+        del target, source
+        os.replace(staged, path)
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
 
 
 def nvidia_driver() -> str:
@@ -125,6 +162,9 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
+    if REPLAY_CHUNK < 2:
+        # A call of one token takes the decode path, not the prefill path.
+        raise SystemExit(f"KOT_TF_REPLAY_CHUNK is {REPLAY_CHUNK}; a replay chunk needs at least 2 tokens")
 
     checkpoint = Path(args.model)
     processor = AutoProcessor.from_pretrained(checkpoint)
@@ -152,6 +192,10 @@ def main() -> int:
         "driver_version": nvidia_driver(),
         "toolkit_version": torch.version.cuda or "",
         "media": pinned_media_params(checkpoint, processor),
+        # The replay's chunk size is part of the numerics: the float order
+        # changes at every call edge, so rows produced at one size need not
+        # be bit-identical to rows produced at another. Every capture carries its own.
+        "replay_chunk_tokens": REPLAY_CHUNK,
         "started_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     print(f"[mllm-transformers] serving: {json.dumps(info)}", flush=True)
@@ -246,28 +290,41 @@ def main() -> int:
         }
         return raw, expanded, media
 
-    def _store_rows(out_dir: Path, count: int, logits_of, ids: list[int]) -> None:
-        """Write count log_probs.npy rows, block by block: logits_of(start, stop)
-        gives rows start..stop-1 as raw logits on a card, the log-softmax runs
-        there, and each finished block is copied to host and into the file, so
-        a whole unit's rows never exist at once on a card."""
+    def _open_rows(out_dir: Path, count: int) -> np.ndarray:
+        """log_probs.npy at its final shape, a memmap to fill block by block."""
         out_dir.mkdir(parents=True, exist_ok=True)
-        rows = np.lib.format.open_memmap(
+        return np.lib.format.open_memmap(
             out_dir / "log_probs.npy", mode="w+", dtype=np.float32, shape=(count, vocab_size)
         )
+
+    def _write_rows(rows: np.ndarray, first: int, count: int, logits_of) -> int:
+        """Write count rows from row first, block by block: logits_of(start, stop)
+        gives rows start..stop-1 of the batch as raw logits on a card, the
+        log-softmax runs there, and each finished block is copied to host and
+        into the file, so a whole unit's rows never exist at once on a card.
+        Returns the next row to write."""
         with torch.no_grad():
             for start in range(0, count, BLOCK_ROWS):
                 stop = min(start + BLOCK_ROWS, count)
                 # One expression: no name keeps a block alive, so its memory is back
                 # in the allocator for the next one, without an empty_cache.
-                rows[start:stop] = torch.log_softmax(
+                rows[first + start:first + stop] = torch.log_softmax(
                     logits_of(start, stop).float(), dim=-1
                 )[:, :vocab_size].cpu().numpy()
-        rows.flush()
+        return first + count
+
+    def _save_ids(out_dir: Path, ids: list[int]) -> None:
         np.save(out_dir / "input_ids.npy", np.asarray(ids, dtype=np.int32), allow_pickle=False)
 
+    def _store_rows(out_dir: Path, count: int, logits_of, ids: list[int]) -> None:
+        """Write count log_probs.npy rows and the ids in one pass."""
+        rows = _open_rows(out_dir, count)
+        _write_rows(rows, 0, count, logits_of)
+        rows.flush()
+        _save_ids(out_dir, ids)
+
     def _head(hidden: torch.Tensor):
-        """logits_of for _store_rows over last hidden states: the model's own
+        """logits_of for _write_rows over last hidden states: the model's own
         lm_head, one block at a time. At vocabulary 248320 the logits of an
         8192-row tail are 3.8 GiB in bfloat16, too much beside the weights."""
         return lambda start, stop: model.lm_head(hidden[start:stop])
@@ -290,13 +347,31 @@ def main() -> int:
             )
         max_new_tokens = int(body["max_new_tokens"])
         allow_eos = bool(body.get("allow_eos", False))
+        out_dir = Path(body["out_dir"])
+        # At the cap shape: allow_eos may stop early, and the file is then
+        # compacted to the rows produced.
+        rows = _open_rows(out_dir, max_new_tokens)
         kept: list[torch.Tensor] = []
+        written = 0
+
+        def write_kept():
+            # The blocks start at row 0, hold 256 rows and run on one card,
+            # so the bytes do not depend on when a block is written.
+            nonlocal written
+            written = _write_rows(
+                rows, written, len(kept),
+                lambda start, stop: torch.vstack(kept[start:stop]).to(model.device),
+            )
+            kept.clear()
 
         def keep_row(_module, _args, output):
             # The row generate samples from: the last position's logits as
             # float32, before any processor. It goes to host at once; with
             # output_logits generate keeps every row on card 0, 7.6 GiB at 8192.
+            # The host holds at most one block of rows, 0.24 GiB.
             kept.append(output.logits[0, -1].to(device="cpu", dtype=torch.float32))
+            if len(kept) == BLOCK_ROWS:
+                write_kept()
 
         hook = model.register_forward_hook(keep_row)
         try:
@@ -319,16 +394,15 @@ def main() -> int:
                 )
         finally:
             hook.remove()
+        write_kept()
         generated = sequences[0][len(expanded):].tolist()
-        if len(kept) != len(generated):
-            raise RuntimeError(f"{len(kept)} forward rows for {len(generated)} generated ids")
-        out_dir = Path(body["out_dir"])
-        _store_rows(
-            out_dir,
-            len(kept),
-            lambda start, stop: torch.vstack(kept[start:stop]).to(model.device),
-            [*raw, *generated],
-        )
+        if written != len(generated):
+            raise RuntimeError(f"{written} forward rows for {len(generated)} generated ids")
+        rows.flush()
+        del rows
+        if written < max_new_tokens:
+            compact_rows(out_dir / "log_probs.npy", written)
+        _save_ids(out_dir, [*raw, *generated])
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},
@@ -348,21 +422,50 @@ def main() -> int:
         n_rows = int(body.get("n_rows", 0))
         if n_rows != len(tail):
             raise RuntimeError(f"n_rows {n_rows} != the stored tail's length {len(tail)}")
-        full = torch.tensor([expanded + tail], dtype=torch.long, device=model.device)
-        # The processor's attention_mask and mm_token_type_ids cover the
-        # expanded prompt only; the replay's sequence is the prompt plus the
-        # tail (text, type 0), so both extend.
-        media["attention_mask"] = torch.ones_like(full)
-        media["mm_token_type_ids"] = torch.cat(
-            [media["mm_token_type_ids"],
-             torch.zeros(1, len(tail), dtype=media["mm_token_type_ids"].dtype, device=model.device)],
-            dim=1,
-        )
-        # The tail's predictors: the n_rows positions before the last one
-        # (row t predicts tail[t]). The lm_head runs on them block by block.
-        hidden = _hidden(**media, input_ids=full)[-(n_rows + 1):-1]
         out_dir = Path(body["out_dir"])
-        _store_rows(out_dir, n_rows, _head(hidden), ids)
+        rows = _open_rows(out_dir, n_rows)
+        # Row t predicts tail[t]. Call 1 is the decode's own first call: the
+        # expanded prompt with the video inputs, the processor's own mask and
+        # type ids. No cache goes in, so the model starts a fresh one. The
+        # model keeps rope_deltas as state; with no earlier value and an
+        # empty cache it computes them from this video. Its last position
+        # gives row 0.
+        model.model.rope_deltas = None
+        with torch.no_grad():
+            out = model.model(
+                input_ids=torch.tensor([expanded], dtype=torch.long, device=model.device),
+                use_cache=True,
+                **media,
+            )
+        cache = out.past_key_values
+        written = _write_rows(rows, 0, min(1, n_rows), _head(out.last_hidden_state[0, -1:]))
+        del out
+        # Then the tail, chunk by chunk, through the same cache: each chunk
+        # attends to the video, the prompt and every earlier chunk. A chunk
+        # call takes only its ids and the cache. No attention_mask: a
+        # chunk-length mask restarts the 3D-rope positions and hides every key
+        # after the first chunk-length ones, and neither raises an error.
+        # The position of tail[t-1] gives row t; the last tail id's row is
+        # not stored.
+        for start in range(0, len(tail), REPLAY_CHUNK):
+            chunk = tail[start:start + REPLAY_CHUNK]
+            with torch.no_grad():
+                out = model.model(
+                    input_ids=torch.tensor([chunk], dtype=torch.long, device=model.device),
+                    past_key_values=cache,
+                    use_cache=True,
+                )
+            written = _write_rows(
+                rows, written, min(len(chunk), n_rows - written), _head(out.last_hidden_state[0])
+            )
+            del out
+        if written != n_rows or cache.get_seq_length() != len(expanded) + len(tail):
+            raise RuntimeError(
+                f"the replay wrote {written} rows of {n_rows} over "
+                f"{cache.get_seq_length()} cached positions of {len(expanded) + len(tail)}"
+            )
+        rows.flush()
+        _save_ids(out_dir, ids)
         return {
             "prompt_id": body["prompt_id"],
             "files": {"log_probs": "log_probs.npy", "input_ids": "input_ids.npy"},

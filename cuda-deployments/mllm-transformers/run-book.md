@@ -112,12 +112,13 @@ every value.
 
 ### Parameters
 
-The launcher reads one variable. The request body carries the sampling
-parameters.
+The launcher reads one variable and the server reads one. The request body
+carries the sampling parameters.
 
 | variable | effect |
 |---|---|
 | `KOT_MLLM_PYTHON` | the interpreter the launcher execs |
+| `KOT_TF_REPLAY_CHUNK` | the tokens per replay call after the prompt call; default 2048, minimum 2. The size is part of the numerics and is reported in `/kot/info`. Captures run at the default |
 
 | argument | effect |
 |---|---|
@@ -168,10 +169,28 @@ video." A video decode renders it with the checkpoint's chat template
 generates. The stored ids are the raw form (one video placeholder) plus the
 generated ids; the stored rows are generate's own per-step logits, passed
 through a float32 log-softmax. Each row goes to host memory at its step, so
-a long decode does not fill card 0. The host holds about 1 GB of rows for
-each 1000 generated tokens. A replay prefill re-renders the same prompt
-from the attachment, asserts the stored ids' head matches, and scores the
-stored tail (`n_rows` rows). The lm_head runs on 256 rows at a time.
+a long decode does not fill card 0. At each 256 rows the server runs the
+log-softmax of the block on card 0 and writes the block into
+`log_probs.npy`, which it opens at `max_new_tokens` rows. The host holds one
+block, 0.24 GiB, at a time. When `allow_eos` is true and the decode stops
+early, the server copies the rows into a new file, block by block, and the
+new file replaces the old one.
+
+A replay prefill re-renders the same prompt from the attachment, asserts
+the stored ids' head matches, and scores the stored tail (`n_rows` rows).
+One call over the prompt and an 8192-token tail does not fit on card 0, so
+the replay runs in calls through one cache. The first call is the expanded
+prompt with the video, the same as the first call of the decode. Then the
+tail goes in chunks of `KOT_TF_REPLAY_CHUNK` tokens. A chunk call gets only
+its ids and the cache: no attention mask, no pixels. So each row sees the
+video, the prompt and all tail ids before the one it predicts. The lm_head
+runs on 256 rows at a time, and the rows of each call go into
+`log_probs.npy` when the call returns.
+
+The chunk size is part of the numerics: the float order changes at each call
+edge, so rows produced at one size need not be bit-identical to rows
+produced at another. `/kot/info` reports `replay_chunk_tokens`, so every
+capture carries its own.
 
 `POST /kot/infer` runs one video decode, the description written as `text.txt`
 into the request's `out_dir`, the file names returned. The benchmark's speed
