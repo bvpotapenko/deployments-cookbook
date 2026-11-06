@@ -610,7 +610,7 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     args.enable_prefix_caching = False
     args.disable_log_requests = True
     # DeepSeek's own anti-repetition rule for OCR outputs, as an engine-level
-    # V1 logits processor (module copied into the venv by kot_serve.sh, so
+    # V1 logits processor (module copied into the venv by serve.sh, so
     # the FQCN resolves in the workers). logprobs_mode stays at its default
     # raw_logprobs: the reported rows are computed before this stage runs.
     args.logits_processors = ["kot_ngram:KotNoRepeatNGramLogitsProcessor"]

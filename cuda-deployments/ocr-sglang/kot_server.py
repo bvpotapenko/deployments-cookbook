@@ -2,7 +2,7 @@
 
     kot_server.py --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
 
-Started by ``kot_serve.sh``. One asyncio process: the adapter (this file)
+Started by ``serve.sh``. One asyncio process: the adapter (this file)
 embeds ``sglang.Engine`` inside its own event loop, so /kot/score and the
 speed harness drive the same resident engine, as the contract requires. The
 architecture is the llm-sglang deployment's; what changes is the family: the
@@ -732,7 +732,7 @@ class KotEngine:
         self.image_token_id = image_token
         # DeepSeek's anti-repetition rule, serialized for per-request
         # delivery (sglang's custom_logit_processor): the scheduler
-        # deserializes it by name, so kot_serve.sh installs the module into
+        # deserializes it by name, so serve.sh installs the module into
         # site-packages. Applied to every sampling request.
         from kot_ocr_ngram import KotOCR2NoRepeatNGram
 
@@ -946,7 +946,7 @@ def _warmup_image():
 
 async def run_server(port: int, model: str, device: str) -> None:
     if not os.environ.get("KOT_SGLANG_STASH_DIR"):
-        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through kot_serve.sh", flush=True)
+        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
         raise SystemExit(2)
 
     # Created inside the running loop, the Engine adopts it: tokenizer

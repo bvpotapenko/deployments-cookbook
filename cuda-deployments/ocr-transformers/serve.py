@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DeepSeek-OCR-2 serving of DEPLOYMENT_CONTRACT.md, no kot imports.
 
-    ./kot_serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
+    ./serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
 
 Layout: this file beside the three builder modules it imports and never
 implements - native_config (build_config), native_load (load_native),

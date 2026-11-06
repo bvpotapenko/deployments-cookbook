@@ -2,7 +2,7 @@
 
     kot_server.py --port P --model /path/to/Qwen3.8-27B --device cpu|cuda
 
-Started by ``kot_serve.sh``. One asyncio process: the adapter (this file)
+Started by ``serve.sh``. One asyncio process: the adapter (this file)
 embeds ``sglang.Engine`` inside its own event loop, so /kot/score and the
 speed harness drive the same resident engine, as the contract requires. The
 architecture is the ocr-sglang deployment's; what changes is the family: the
@@ -156,7 +156,7 @@ async def _stash_archives(kind: str) -> list[tuple[Path, int]]:
         if "rows" not in marker:
             raise ScoreFailure(
                 f"the stash marker of {path.name} states no row count: the patch layer "
-                "is older than kot_server.py; start the server through kot_serve.sh"
+                "is older than kot_server.py; start the server through serve.sh"
             )
         archives.append((path, int(marker["rows"])))
     return archives
@@ -1021,7 +1021,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
 
 async def run_server(port: int, model: str, device: str) -> None:
     if not os.environ.get("KOT_SGLANG_STASH_DIR"):
-        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through kot_serve.sh", flush=True)
+        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
         raise SystemExit(2)
 
     # Created inside the running loop, the Engine adopts it: tokenizer

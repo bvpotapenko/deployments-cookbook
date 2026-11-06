@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # kot deployment: vla_tokens family (OpenVLA-7B), vllm engine.
 #
-#   ./kot_serve.sh --port <P> --model <weights dir> --device <torch device>
+#   ./serve.sh --port <P> --model <weights dir> --device <torch device>
 #
 # A networked host installs the pinned stack from PyPI into the venv the run
 # book documents (CPython 3.12). If the ambient python cannot import it, a
@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
     --model=*) MODEL="${1#*=}"; shift ;;
     --device) DEVICE="${2:?}"; shift 2 ;;
     --device=*) DEVICE="${1#*=}"; shift ;;
-    *) echo "kot_serve.sh: unknown argument '$1' (expected --port --model --device)" >&2; exit 2 ;;
+    *) echo "serve.sh: unknown argument '$1' (expected --port --model --device)" >&2; exit 2 ;;
   esac
 done
 : "${PORT:?--port is required}" "${MODEL:?--model is required}" "${DEVICE:?--device is required}"

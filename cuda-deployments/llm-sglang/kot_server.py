@@ -2,7 +2,7 @@
 
     kot_server.py --port P --model /model --device cpu|cuda
 
-Started by ``kot_serve.sh``. One asyncio process: the adapter (this file)
+Started by ``serve.sh``. One asyncio process: the adapter (this file)
 embeds ``sglang.Engine`` inside its own event loop, so /kot/score and the
 speed harness drive the same resident engine, as the contract requires.
 
@@ -727,7 +727,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
 
 async def run_server(port: int, model: str, device: str) -> None:
     if not os.environ.get("KOT_SGLANG_STASH_DIR"):
-        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through kot_serve.sh", flush=True)
+        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
         raise SystemExit(2)
 
     # Created inside the running loop, the Engine adopts it: tokenizer

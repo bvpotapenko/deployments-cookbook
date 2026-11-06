@@ -76,7 +76,7 @@ same push.
 ```bash
 KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
   CUDA_VISIBLE_DEVICES=0 \
-  ./kot_serve.sh --port 8798 --model /models/DeepSeek-OCR-2 --device cuda
+  ./serve.sh --port 8798 --model /models/DeepSeek-OCR-2 --device cuda
 ```
 
 The launcher behaves like llm-sglang's. It installs the patch layer into the

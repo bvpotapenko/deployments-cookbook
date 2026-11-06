@@ -67,7 +67,7 @@ ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-sglang/*.sh'
 
 ```bash
 KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
-  ./kot_serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
+  ./serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
 ```
 
 The launcher installs the patch layer into the venv's site-packages (module

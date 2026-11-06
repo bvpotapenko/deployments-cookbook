@@ -99,7 +99,7 @@ matches the source.
 
 ```bash
 KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
-  ./kot_serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
+  ./serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
 ```
 
 The patch layer must load in every engine process. The launcher ships it into
@@ -157,7 +157,7 @@ engine opens tensor parallel over every visible card.
 
 ```bash
 KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
-  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
+  ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 Both variables are required. A lower memory fraction leaves the KV pool below
@@ -167,7 +167,7 @@ The same variables serve every launch of this model:
 
 ```bash
 KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
-  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
+  ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 ### state-spaces/mamba-2.8b-hf

@@ -70,7 +70,7 @@ ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-vllm/*.sh'
 
 ```bash
 KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
-  ./kot_serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
+  ./serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
 ```
 
 The first boot compiles the engine; minutes. A warm compile cache makes the

@@ -5,10 +5,10 @@
 #
 # Creates /root/kotvenv-ocr with the native deepseek_ocr2 stack: transformers
 # is PINNED to 5.22.1 (the version that ships the architecture beside a
-# Blackwell-capable torch). kot_serve.sh finds the venv by this exact path.
+# Blackwell-capable torch). serve.sh finds the venv by this exact path.
 # The model itself is not downloaded here: on the box run
 #   HF_HUB_DISABLE_TELEMETRY=1 HF_HOME=/workspace/hf_ocr hf download deepseek-ai/DeepSeek-OCR-2
-# or upload a local copy; either way pass the directory to kot_serve.sh --model.
+# or upload a local copy; either way pass the directory to serve.sh --model.
 set -euo pipefail
 
 PYTHON="${1:-python3}"

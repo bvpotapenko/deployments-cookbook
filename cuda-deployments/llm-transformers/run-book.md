@@ -98,7 +98,7 @@ matches the source.
 ### Start
 
 ```bash
-./kot_serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
+./serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
 ```
 
 The process listens on 127.0.0.1 only.
@@ -116,7 +116,7 @@ retries with `attn_implementation="eager"`. On cuda the weights run bfloat16
 under sdpa, and `device_map="auto"` spreads the layers over every visible
 card. Set CUDA_VISIBLE_DEVICES to pin the card set.
 
-`kot_serve.sh` runs a fixed interpreter, the exec path above; it accepts no
+`serve.sh` runs a fixed interpreter, the exec path above; it accepts no
 override.
 
 ### Parameters

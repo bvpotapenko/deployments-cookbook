@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Start the SGLang deployment of the kot contract, OCR family (DeepSeek-OCR-2).
+# Start the SGLang deployment of the kot contract, MLLM family (Qwen3.8-27B).
 #
-#   ./kot_serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
+#   ./serve.sh --port P --model /path/to/Qwen3.8-27B --device cpu|cuda
 #
 # One process serves everything: this script launches kot_server.py, which
 # embeds sglang.Engine in-process and answers /kot/info, /kot/score,
@@ -9,8 +9,8 @@
 # document as an image_url data URI). The contract's one-server rule lives
 # here: the score path and the speed harness drive the same engine.
 #
-# The engine is sglang 0.5.23 (DeepSeek-OCR-2 runs through the checkpoint's
-# own remote code). On a CUDA host it expects to find sglang,
+# The engine is sglang 0.5.23 (Qwen3.8-27B runs the native qwen3_5
+# architecture). On a CUDA host it expects to find sglang,
 # sglang-kernel and triton already installed in the interpreter named
 # by KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
 set -euo pipefail
@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device cpu|cuda" >&2
+  echo "usage: serve.sh --port P --model PATH --device cpu|cuda" >&2
   exit 2
 fi
 if [[ ! -d "$MODEL" ]]; then
@@ -59,8 +59,8 @@ if [[ -z "$PYTHON" ]]; then
   echo "no interpreter with sglang found; set KOT_SGLANG_PYTHON" >&2
   exit 1
 fi
-echo "[kot_serve] engine python: $PYTHON"
-"$PYTHON" -c "import sglang, torch; print(f'[kot_serve] sglang {sglang.__version__}, torch {torch.__version__}')"
+echo "[kot_server] engine python: $PYTHON"
+"$PYTHON" -c "import sglang, torch; print(f'[kot_server] sglang {sglang.__version__}, torch {torch.__version__}')"
 
 # The engine holds CUDA + zmq + one fd per queued connection; a soft limit of
 # 1024 runs out under the harness's connection warmup (EMFILE mid-serve).
@@ -86,8 +86,7 @@ fi
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/sitecustomize.py"
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/kot_sglang_patch.py"
 echo "import kot_sglang_patch" > "$SITE_PACKAGES/kot_sglang_patch.pth"
-cp "$HERE/kot_ocr_ngram.py" "$SITE_PACKAGES/kot_ocr_ngram.py"
-echo "[kot_serve] patch layer installed into $SITE_PACKAGES (module + .pth)"
+echo "[kot_server] patch layer installed into $SITE_PACKAGES (module + .pth)"
 
 # DeepGEMM's JIT asserts at startup without NVCC >= 12.9 (serving hosts carry
 # no toolkit); the triton kernels cover these GPUs. Set before any sglang
@@ -98,6 +97,15 @@ export SGLANG_ENABLE_JIT_DEEPGEMM=false
 # sm_120 (RTX 5090); the batch-invariant triton matmul is the fallback and
 # keeps determinism without DeepGEMM. Set before any sglang process spawns.
 export SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_DEEPGEMM=0
+
+# SGLang computes a prefill's input logprobs in chunks of this many rows
+# (2048 by default). Each chunk's fp32 [rows, 248320] copies peak on the
+# card beside the 0.89 static pool, and each chunk is one stash archive the
+# adapter holds in host memory. Deterministic inference (kot_server.py)
+# runs a batch-invariant matmul, so the rows should not depend on the chunk
+# size; a replay at 512 and at 2048 on the box confirms it. Set before any
+# sglang process spawns.
+export SGLANG_LOGPROB_CHUNK_SIZE="${SGLANG_LOGPROB_CHUNK_SIZE:-512}"
 
 # The weights are local and the graded container has no network; the engine
 # must never reach for the hub either.
@@ -118,6 +126,6 @@ else
   export KOT_SGLANG_STASH_DIR="/tmp/kot-sglang-ocr-stash"
 fi
 mkdir -p "$KOT_SGLANG_STASH_DIR"
-echo "[kot_serve] stash dir: $KOT_SGLANG_STASH_DIR"
+echo "[kot_server] stash dir: $KOT_SGLANG_STASH_DIR"
 
 exec "$PYTHON" "$HERE/kot_server.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

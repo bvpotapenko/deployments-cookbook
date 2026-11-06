@@ -94,7 +94,7 @@ matches the source.
 ### Start
 
 ```bash
-./kot_serve.sh --port 8090 --model /models/Qwen3.8-27B --device cuda
+./serve.sh --port 8090 --model /models/Qwen3.8-27B --device cuda
 ```
 
 The model needs both cards. Leave CUDA_VISIBLE_DEVICES unset;

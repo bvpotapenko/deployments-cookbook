@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# kot deployment: ocr family (DeepSeek-OCR-2), vllm engine.
+# kot deployment: llm family, vllm engine.
 #
-#   ./kot_serve.sh --port <P> --model <weights dir> --device <torch device>
+#   ./serve.sh --port <P> --model <weights dir> --device <torch device>
 #
 # A networked host installs the pinned vllm from PyPI into the venv the run
 # book documents (CPython 3.12). If the ambient python cannot import it, a
@@ -23,10 +23,18 @@ while [ $# -gt 0 ]; do
     --model=*) MODEL="${1#*=}"; shift ;;
     --device) DEVICE="${2:?}"; shift 2 ;;
     --device=*) DEVICE="${1#*=}"; shift ;;
-    *) echo "kot_serve.sh: unknown argument '$1' (expected --port --model --device)" >&2; exit 2 ;;
+    *) echo "serve.sh: unknown argument '$1' (expected --port --model --device)" >&2; exit 2 ;;
   esac
 done
 : "${PORT:?--port is required}" "${MODEL:?--model is required}" "${DEVICE:?--device is required}"
+
+# A missing weights dir must fail here, loudly: passed on, vllm reads it as a
+# hub repo id and dies inside huggingface_hub with a confusing validation
+# error instead of naming the problem.
+if [ ! -d "$MODEL" ]; then
+  echo "[kot-vllm] model directory not found: $MODEL" >&2
+  exit 1
+fi
 
 # The speed harness opens hundreds of connections at once; vLLM adds its ZMQ
 # sockets and shm handles on top. The default 1024 fd limit kills the engine
@@ -45,25 +53,25 @@ find_python() {
     printf '%s' "python3"
     return 0
   fi
-  local venv="${KOT_VENV:-/scratch/kot-vllm-ocr-venv}"
+  local venv="${KOT_VENV:-/scratch/kot-vllm-venv}"
   if ! mkdir -p "$(dirname "$venv")" 2>/dev/null || ! mkdir -p "$venv" 2>/dev/null; then
-    venv="/tmp/kot-vllm-ocr-venv"
+    venv="/tmp/kot-vllm-venv"
     mkdir -p "$venv"
   fi
   if [ ! -x "$venv/bin/python" ]; then
-    echo "[kot-vllm-ocr] creating venv at $venv with CPython 3.12 (the wheel set is cp312)" >&2
+    echo "[kot-vllm] creating venv at $venv with CPython 3.12 (the line the run book documents)" >&2
     if command -v uv >/dev/null 2>&1; then
       uv python install 3.12 && uv venv --seed --python 3.12 "$venv"
     elif command -v python3.12 >/dev/null 2>&1; then
       python3.12 -m venv "$venv"
     else
-      echo "[kot-vllm-ocr] no CPython 3.12 on this host: the offline wheels install on no" \
-           "other interpreter. Install uv, or point KOT_PYTHON at a 3.12 interpreter with vllm." >&2
+      echo "[kot-vllm] no CPython 3.12 on this host. Install uv, or point KOT_PYTHON at a" \
+           "3.12 interpreter with vllm." >&2
       exit 1
     fi
   fi
   if ! "$venv/bin/python" -c "import vllm" >/dev/null 2>&1; then
-    echo "[kot-vllm-ocr] installing vllm $VLLM_PIN offline from $DIR/wheels" >&2
+    echo "[kot-vllm] installing vllm $VLLM_PIN offline from $DIR/wheels" >&2
     "$venv/bin/pip" install --no-index --no-cache-dir \
       --find-links "$DIR/wheels" "vllm==$VLLM_PIN" >&2
   fi
@@ -71,18 +79,7 @@ find_python() {
 }
 
 PY="$(find_python)"
-echo "[kot-vllm-ocr] python: $PY" >&2
+echo "[kot-vllm] python: $PY" >&2
 "$PY" -c "import vllm; assert vllm.__version__ == '$VLLM_PIN', vllm.__version__" >&2
-
-# The ngram rule ships as a module the engine imports by FQCN
-# (--logits-processors); it must resolve in every worker, so it lives in the
-# venv's site-packages, refreshed on every start.
-SITE_PACKAGES="$("$PY" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")"
-cp "$DIR/kot_ngram.py" "$SITE_PACKAGES/kot_ngram.py"
-echo "[kot-vllm-ocr] ngram rule installed into $SITE_PACKAGES"
-
-# vLLM's per-request decoded-media limit applies on chat only: /kot/score has
-# no such limit. 0 disables it, so the two routes take the same documents.
-export VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES=0
 
 exec "$PY" "$DIR/kot_serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

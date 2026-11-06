@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# kot_serve.sh -- start the OpenVLA transformers deployment.
-#   ./kot_serve.sh --port P --model PATH --device DEVICE
+# serve.sh -- start the OpenVLA transformers deployment.
+#   ./serve.sh --port P --model PATH --device DEVICE
 set -euo pipefail
 
 PORT=""
@@ -15,7 +15,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device DEVICE" >&2
+  echo "usage: serve.sh --port P --model PATH --device DEVICE" >&2
   exit 2
 fi
 

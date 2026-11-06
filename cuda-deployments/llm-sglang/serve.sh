@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Start the SGLang deployment of the kot contract, MLLM family (Qwen3.8-27B).
+# Start the SGLang deployment of the kot contract.
 #
-#   ./kot_serve.sh --port P --model /path/to/Qwen3.8-27B --device cpu|cuda
+#   ./serve.sh --port P --model /path/to/weights --device cpu|cuda
 #
 # One process serves everything: this script launches kot_server.py, which
 # embeds sglang.Engine in-process and answers /kot/info, /kot/score,
-# /v1/completions and /v1/chat/completions (multimodal: a text part and the
-# document as an image_url data URI). The contract's one-server rule lives
-# here: the score path and the speed harness drive the same engine.
+# /v1/completions and /v1/chat/completions. The contract's one-server rule
+# lives here: the score path and the speed harness drive the same engine.
 #
-# The engine is sglang 0.5.23 (Qwen3.8-27B runs the native qwen3_5
-# architecture). On a CUDA host it expects to find sglang,
-# sglang-kernel and triton already installed in the interpreter named
-# by KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
+# The engine is sglang 0.5.23. On a CUDA host it expects to find sglang,
+# sglang-kernel and triton already installed in the interpreter named by
+# KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
 set -euo pipefail
 
 PORT=""
@@ -21,16 +19,13 @@ DEVICE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
-    --port=*) PORT="${1#*=}"; shift ;;
     --model) MODEL="$2"; shift 2 ;;
-    --model=*) MODEL="${1#*=}"; shift ;;
     --device) DEVICE="$2"; shift 2 ;;
-    --device=*) DEVICE="${1#*=}"; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device cpu|cuda" >&2
+  echo "usage: serve.sh --port P --model PATH --device cpu|cuda" >&2
   exit 2
 fi
 if [[ ! -d "$MODEL" ]]; then
@@ -59,8 +54,8 @@ if [[ -z "$PYTHON" ]]; then
   echo "no interpreter with sglang found; set KOT_SGLANG_PYTHON" >&2
   exit 1
 fi
-echo "[kot_server] engine python: $PYTHON"
-"$PYTHON" -c "import sglang, torch; print(f'[kot_server] sglang {sglang.__version__}, torch {torch.__version__}')"
+echo "[kot_serve] engine python: $PYTHON"
+"$PYTHON" -c "import sglang, torch; print(f'[kot_serve] sglang {sglang.__version__}, torch {torch.__version__}')"
 
 # The engine holds CUDA + zmq + one fd per queued connection; a soft limit of
 # 1024 runs out under the harness's connection warmup (EMFILE mid-serve).
@@ -86,26 +81,23 @@ fi
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/sitecustomize.py"
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/kot_sglang_patch.py"
 echo "import kot_sglang_patch" > "$SITE_PACKAGES/kot_sglang_patch.pth"
-echo "[kot_server] patch layer installed into $SITE_PACKAGES (module + .pth)"
+echo "[kot_serve] patch layer installed into $SITE_PACKAGES (module + .pth)"
 
 # DeepGEMM's JIT asserts at startup without NVCC >= 12.9 (serving hosts carry
 # no toolkit); the triton kernels cover these GPUs. Set before any sglang
 # process spawns.
 export SGLANG_ENABLE_JIT_DEEPGEMM=false
 
-# The deterministic matmul defaults to DeepGEMM, whose kernels do not cover
-# sm_120 (RTX 5090); the batch-invariant triton matmul is the fallback and
-# keeps determinism without DeepGEMM. Set before any sglang process spawns.
+# The batch-invariant TRITON persistent matmul is the fallback and
+# keeps determinism without DeepGEMM. Set before any sglang
+# process spawns.
 export SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_DEEPGEMM=0
 
-# SGLang computes a prefill's input logprobs in chunks of this many rows
-# (2048 by default). Each chunk's fp32 [rows, 248320] copies peak on the
-# card beside the 0.89 static pool, and each chunk is one stash archive the
-# adapter holds in host memory. Deterministic inference (kot_server.py)
-# runs a batch-invariant matmul, so the rows should not depend on the chunk
-# size; a replay at 512 and at 2048 on the box confirms it. Set before any
-# sglang process spawns.
-export SGLANG_LOGPROB_CHUNK_SIZE="${SGLANG_LOGPROB_CHUNK_SIZE:-512}"
+# sglang's async asserts make the embedding (and other layers) check their
+# inputs against real bounds and name the layer when one fails, at no cost
+# when nothing trips. The diagnosis path for unknown walls: the default
+# device-side assert names neither the input nor the layer.
+export SGLANG_ENABLE_ASYNC_ASSERT=1
 
 # The weights are local and the graded container has no network; the engine
 # must never reach for the hub either.
@@ -121,11 +113,15 @@ export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
 # patch layer resolves the same default in the scheduler processes, whose
 # environment sglang replaces.
 if [[ -d /scratch && -w /scratch ]]; then
-  export KOT_SGLANG_STASH_DIR="/scratch/kot-sglang-ocr-stash"
+  export KOT_SGLANG_STASH_DIR="/scratch/kot-sglang-stash"
 else
-  export KOT_SGLANG_STASH_DIR="/tmp/kot-sglang-ocr-stash"
+  export KOT_SGLANG_STASH_DIR="/tmp/kot-sglang-stash"
 fi
 mkdir -p "$KOT_SGLANG_STASH_DIR"
-echo "[kot_server] stash dir: $KOT_SGLANG_STASH_DIR"
+echo "[kot_serve] stash dir: $KOT_SGLANG_STASH_DIR"
+
+# Pre-sampling rows come out of the engine in float32 whatever the weights
+# run in; the patch recompute is documented in sitecustomize.py.
+export KOT_SGLANG_FULL_LOGPROBS=1
 
 exec "$PYTHON" "$HERE/kot_server.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

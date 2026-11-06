@@ -99,7 +99,7 @@ same push.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 KOT_PYTHON=/root/kotvenv-vllm-ocr/bin/python \
-  ./kot_serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device cuda
+  ./serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device cuda
 ```
 
 The engine opens tensor parallel over every visible card. This model fits

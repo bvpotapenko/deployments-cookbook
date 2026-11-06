@@ -2,7 +2,7 @@
 
 Imported by ``site`` in every python process this deployment starts (the
 adapter and the spawned scheduler/detokenizer processes), through the
-PYTHONPATH entry ``kot_serve.sh`` sets. It imports nothing heavy at startup;
+PYTHONPATH entry ``serve.sh`` sets. It imports nothing heavy at startup;
 the patches are applied when SGLang's own modules finish loading.
 
 Two monkeypatches plus one launch shim, all additive: the original
@@ -58,7 +58,7 @@ import sys
 
 # The scheduler subprocesses get a curated environment from sglang (no
 # PYTHONPATH, no custom vars), so the stash directory cannot be passed by env
-# alone. The deterministic default matches kot_serve.sh's own choice, and this
+# alone. The deterministic default matches serve.sh's own choice, and this
 # file is also installed into the engine venv's site-packages, where site.py
 # finds it without any PYTHONPATH.
 STASH_DIR = (
