@@ -162,6 +162,36 @@ rows: n - 1, or the last `n_rows`. Every row is the float32 log-softmax of
 the raw logits over all 32064 columns. The server reads no seed and no
 sampling: decoding is greedy. `max_new_tokens` must be 7.
 
+kot's VLA input version `v1` is for a pi0 robot: each observation has 3
+cameras, `action_dim` 32 and `chunk_size` 50. This server refuses it: kot
+sends `max_new_tokens` equal to `action_dim`, and the server reads one
+camera. Use the input version `v1_openvla`. It has the observation ids and
+prompts of `v1`, the first camera of `v1` only, `action_dim` 7 and
+`chunk_size` 1. That camera has the same image as in `v1`. All other fields
+are the same as in `v1`.
+
+Make `v1_openvla` on the machine that holds the kot store. The script reads
+`inputs/vla_inputs/v1/observations.json` and writes
+`inputs/vla_inputs/v1_openvla/observations.json`. It prints the changed
+fields of each observation. It stops if `v1_openvla` exists:
+
+```bash
+python3 /opt/engines/vla-openvla-tf/make_v1_openvla.py --root $KOT_STORE
+```
+
+Freeze it from the kot checkout. The first command writes one `.npz` per
+observation. The second command writes
+`inputs/frozen_sequences/vla_tokens/openvla_openvla-7b/v1_openvla.npz`: each
+unit has empty ids and decode 7.
+
+```bash
+python -m kot.gather --root $KOT_STORE freeze vla --input-version v1_openvla
+python -m kot.gather --root $KOT_STORE freeze sequences --family vla_tokens \
+  --model-id openvla/openvla-7b --input-version v1_openvla
+```
+
+Capture this deployment with `--family vla_tokens --input-version v1_openvla`.
+
 ## Check
 
 The identity surface answers with the engine's own facts:
