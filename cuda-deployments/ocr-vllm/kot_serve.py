@@ -9,8 +9,9 @@ probe). The contract endpoints are added to the same app:
 
   GET  /kot/info   provenance: the running engine, its dtype, the vocab width
   POST /kot/score  writes log_probs.npy + input_ids.npy into out_dir; a decode
-                   answers in JSON lines, one per 256-row block, so a long
-                   generation streams instead of answering at the end
+                   also writes its transcript as text.txt, and answers in JSON
+                   lines, one per 256-row block, so a long generation streams
+                   instead of answering at the end
 
 Numerics, the whole point of this deployment:
 
@@ -461,6 +462,11 @@ async def _decode_stream(engine, body: dict, vocab_size: int, image_token_id: in
             ),
             allow_pickle=False,
         )
+        # The checkpoint's own decode: only the stop token goes. Its table tags
+        # (<td>, <tr>) are flagged special, so skip_special_tokens=True deletes them.
+        tokenizer = _tokenizer()
+        text = tokenizer.decode(output_ids, skip_special_tokens=False).removesuffix(tokenizer.eos_token)
+        (out_dir / "text.txt").write_text(text, encoding=UTF8)
         yield _line(
             {
                 "prompt_id": body["prompt_id"],

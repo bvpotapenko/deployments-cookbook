@@ -49,10 +49,12 @@ Numerics of the score path, in one place:
   replay prefill teacher-forces over exactly what the request carried: the
   pre-expansion sequence, with its single video placeholder.
 
-Rows land on disk through ``open_memmap`` at the final shape, filled block by
-block as the engine's stash arrives: the full-vocabulary log-softmax of a
-4,096-token decode at this vocabulary (248,320) is about 4 GB, and no stage
-of this file holds one.
+Rows land on disk through ``open_memmap`` at the final shape, filled one
+stash archive at a time: the full-vocabulary log-softmax of an 8,192-token
+decode at this vocabulary (248,320) is 7.6 GiB, and no stage of this file
+holds one. Each archive's marker states its row count, so the counts are
+checked before any row is read; this file holds one archive (one decode
+row, or one logprob chunk of a prefill) and deletes it once copied.
 
 Concurrency: one event loop; the Engine is created inside it. /kot/score is
 serialised by a lock -- the runner sends one at a time, and
@@ -85,7 +87,6 @@ import numpy as np
 CONTRACT_VERSION = 1
 UTF8 = "utf-8"
 STASH_WAIT_S = 60.0
-MEMMAP_BLOCK_ROWS = 512
 
 VIDEO = "video"
 # The pinned media pipeline, the same values the transformers reference
@@ -129,8 +130,9 @@ def _stash_order(name: str) -> int:
     return int(stem.split("_")[-1])
 
 
-async def _collect_stash(kind: str) -> list[np.ndarray]:
-    """Every complete stash archive of one kind, in write order, then delete them."""
+async def _stash_archives(kind: str) -> list[tuple[Path, int]]:
+    """Every complete stash archive of one kind, in write order, with the row
+    count its marker states. No rows are read here."""
     stash = os.environ["KOT_SGLANG_STASH_DIR"]
     deadline = time.monotonic() + STASH_WAIT_S
     while True:
@@ -147,31 +149,55 @@ async def _collect_stash(kind: str) -> list[np.ndarray]:
     if not blocks:
         raise ScoreFailure(f"the engine wrote no {kind} log-prob rows into {stash}")
     blocks.sort(key=lambda block: block[0])
-    loaded = []
+    archives = []
     for _, path in blocks:
-        with np.load(path) as archive:
-            loaded.append(np.ascontiguousarray(archive["rows"], dtype=np.float32))
+        marker = json.loads(Path(f"{path}.done.json").read_text(encoding=UTF8))
+        if "rows" not in marker:
+            raise ScoreFailure(
+                f"the stash marker of {path.name} states no row count: the patch layer "
+                "is older than kot_server.py; start the server through kot_serve.sh"
+            )
+        archives.append((path, int(marker["rows"])))
+    return archives
+
+
+def _drop_archive(path: Path) -> None:
+    for name in (path, Path(f"{path}.done.json")):
         try:
-            path.unlink()
-            Path(f"{path}.done.json").unlink()
+            name.unlink()
         except OSError:
             pass
-    return loaded
 
 
-def _write_rows(out_dir: Path, name: str, blocks: list[np.ndarray]) -> str:
-    """Stack stash blocks into out_dir/name through an open_memmap at the
-    final shape: rows are copied block by block, never held whole."""
-    rows = sum(block.shape[0] for block in blocks)
-    vocab = blocks[0].shape[1]
-    path = out_dir / name
+def _stream_rows(
+    engine, out_dir: Path, archives: list[tuple[Path, int]], skip: int, keep: int, finite: bool
+) -> str:
+    """Rows skip..skip+keep-1 of the archives, in write order, into
+    out_dir/log_probs.npy through an open_memmap at the final shape. One
+    archive is in memory at a time, and each is deleted once passed; those
+    before the kept rows are deleted unread."""
+    path = out_dir / "log_probs.npy"
     array = np.lib.format.open_memmap(
-        path, mode="w+", dtype=np.float32, shape=(rows, vocab)
+        path, mode="w+", dtype=np.float32, shape=(keep, engine.vocab_size)
     )
-    filled = 0
-    for block in blocks:
-        array[filled:filled + block.shape[0]] = block
-        filled += block.shape[0]
+    first = 0  # the archive's first row in the request's order
+    for archive, count in archives:
+        low, high = max(first, skip), min(first + count, skip + keep)
+        if low < high:
+            with np.load(archive) as stash:
+                block = engine.slice_vocab(np.ascontiguousarray(stash["rows"], dtype=np.float32))
+            if block.shape[0] != count:
+                raise ScoreFailure(
+                    f"the stash archive {archive.name} holds {block.shape[0]} rows, "
+                    f"its marker states {count}"
+                )
+            block = block[low - first:high - first]
+            if finite and not np.isfinite(block).all():
+                raise ScoreFailure("prefill log_probs contain NaN or -inf")
+            array[low - skip:high - skip] = block
+            del block
+        _drop_archive(archive)
+        first += count
     array.flush()
     del array
     return path.name
@@ -346,9 +372,8 @@ async def _score_prefill(engine, body: dict) -> dict:
         logprob_start_len=0,
     )
     _consumed_guard(done, ids, engine, raw, video_path)
-    blocks = await _collect_stash("prefill")
-    blocks = [engine.slice_vocab(block) for block in blocks]
-    rows = sum(block.shape[0] for block in blocks)
+    archives = await _stash_archives("prefill")
+    rows = sum(count for _, count in archives)
     # Alone, a prefill stashes one row per position of the expanded prompt, and
     # prompt_tokens counts those positions. A request sharing the forward adds
     # rows with no id, which would move the tail below in the correct shape.
@@ -364,26 +389,12 @@ async def _score_prefill(engine, body: dict) -> dict:
             "image placeholder was not expanded into an image block"
         )
     # Drop the final (sampling) row -- it predicts a token that is not there --
-    # then keep the tail's rows. Walked from the end, block by block, so the
-    # whole [rows, vocab] matrix is never held.
-    blocks[-1] = np.ascontiguousarray(blocks[-1][:-1])
-    tail: list[np.ndarray] = []
-    have = 0
-    for block in reversed(blocks):
-        if have >= keep:
-            break
-        take = min(block.shape[0], keep - have)
-        tail.append(np.ascontiguousarray(block[block.shape[0] - take:]))
-        have += take
-    tail.reverse()
-    if have != keep:
+    # then keep the tail's rows: the keep rows before it.
+    if rows - 1 < keep:
         raise ScoreFailure(
             f"{rows} expanded rows cannot yield {keep} requested rows"
         )
-    log_probs_name = _write_rows(out_dir, "log_probs.npy", tail)
-    first = tail[0]
-    if not np.isfinite(first).all() or not np.isfinite(tail[-1]).all():
-        raise ScoreFailure("prefill log_probs contain NaN or -inf")
+    log_probs_name = _stream_rows(engine, out_dir, archives, rows - 1 - keep, keep, finite=True)
     _write_array(out_dir, "input_ids.npy", np.asarray(transcript, dtype=np.int32))
     return {
         "prompt_id": body["prompt_id"],
@@ -437,9 +448,8 @@ async def _score_decode(engine, body: dict) -> dict:
     output_ids = [int(token) for token in done["output_ids"]]
     # The decode's own rows: the probe below would pollute the stash
     # with prefill rows, so collect before probing.
-    blocks = await _collect_stash("decode")
-    blocks = [engine.slice_vocab(block) for block in blocks]
-    rows = sum(block.shape[0] for block in blocks)
+    archives = await _stash_archives("decode")
+    rows = sum(count for _, count in archives)
     # One sample call per generated id, with the overlap scheduler off. Any
     # other count is a request sharing the batch, and its rows carry no id.
     if rows != len(output_ids):
@@ -451,11 +461,26 @@ async def _score_decode(engine, body: dict) -> dict:
         raise ScoreFailure(
             f"decode produced {len(output_ids)} ids for a cap of {max_new_tokens}"
         )
+    # The scheduler cuts max_new_tokens, and min_new_tokens with it, to what
+    # the window and the KV pool leave after the prompt, without a message.
+    # A "length" finish short of max_new_tokens is that cut, whatever
+    # allow_eos says.
+    finish = done.get("meta_info", {}).get("finish_reason") or {}
+    capped = isinstance(finish, dict) and finish.get("type") == "length"
+    if len(output_ids) != max_new_tokens and (capped or not allow_eos):
+        prompt_tokens = int(done.get("meta_info", {}).get("prompt_tokens", 0) or 0)
+        raise ScoreFailure(
+            f"decode produced {len(output_ids)} ids of the {max_new_tokens} asked "
+            f"(allow_eos {str(allow_eos).lower()}, finish {finish}). The likely cause: "
+            f"the {prompt_tokens}-token expanded "
+            f"prompt plus {max_new_tokens} does not fit the engine's context_length "
+            "window, and the scheduler cut max_new_tokens to fit"
+        )
 
     # The raw prompt the deployment rendered (the pinned chat template with
     # one video placeholder) plus the generated ids: the pre-expansion
     # sequence, so the replay of this file re-renders the same expansion.
-    _write_rows(out_dir, "log_probs.npy", blocks)
+    _stream_rows(engine, out_dir, archives, 0, rows, finite=False)
     _write_array(
         out_dir, "input_ids.npy",
         np.asarray([*raw_ids, *output_ids], dtype=np.int32),
@@ -716,10 +741,13 @@ class KotEngine:
             # scoring gets nothing from overlap, and the phantom row would
             # fail the decode's row count.
             "disable_overlap_schedule": True,
-            # The video units run at most ~12.4k-token prompts (the checkpoint's
-            # own pixel budget) plus a 4,096-token decode.
+            # The video units run at most ~12.4k-token prompts (the pixel
+            # budget allows 12,288 video tokens, plus the template) plus an
+            # 8,192-token decode. A shorter window makes the scheduler cut
+            # the decode without a message. 24,576 fits in the 25,626-token
+            # pool that KOT_SGLANG_MEM_FRACTION 0.89 sizes on 2x RTX 5090.
             "max_prefill_tokens": 16384,
-            "context_length": 20480,
+            "context_length": 24576,
             # Explicit, because sglang's heuristic reserves
             # max_prefill_tokens * 1.5 MB and can go negative; and headroom
             # for the full-vocab logprob transient, which for a long prefill

@@ -244,9 +244,12 @@ def _stash(kind: str, rows, counter: list) -> None:
     counter[0] += 1
     path = os.path.join(STASH_DIR, f"{kind}_{os.getpid()}_{counter[0]:08d}.npz")
     try:
-        np.savez(path, rows=rows.detach().to("cpu", torch.float32).numpy())
+        host = rows.detach().to("cpu", torch.float32).numpy()
+        np.savez(path, rows=host)
+        # The row count lets the adapter check a request's counts and place
+        # every row before it reads any archive.
         with open(path + ".done.json", "w", encoding="utf-8") as done:
-            json.dump({"kind": kind}, done)
+            json.dump({"kind": kind, "rows": int(host.shape[0])}, done)
     except Exception as failure:
         _patch_log(f"stash FAILED: {kind}: {type(failure).__name__}: {failure}")
 
