@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stock-transformers serving of DEPLOYMENT_CONTRACT.md, one flat file, no kot imports.
 
-    ./kot_serve.sh --port P --model /path/to/weights --device cpu|cuda
+    ./serve.sh --port P --model /path/to/weights --device cpu|cuda
 
 Numerics contract, implemented exactly:
 

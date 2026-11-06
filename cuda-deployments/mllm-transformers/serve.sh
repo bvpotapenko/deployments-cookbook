@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# kot_serve.sh -- boot the mllm transformers deployment.
-#   ./kot_serve.sh --port P --model PATH --device DEVICE
+# serve.sh -- boot the mllm transformers deployment.
+#   ./serve.sh --port P --model PATH --device DEVICE
 set -euo pipefail
 
 PORT=""
@@ -11,10 +11,10 @@ while [ $# -gt 0 ]; do
     --port) PORT="$2"; shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
-    *) echo "usage: kot_serve.sh --port P --model PATH --device DEVICE" >&2; exit 2 ;;
+    *) echo "usage: serve.sh --port P --model PATH --device DEVICE" >&2; exit 2 ;;
   esac
 done
-[ -n "$PORT" ] && [ -n "$MODEL" ] || { echo "usage: kot_serve.sh --port P --model PATH --device DEVICE" >&2; exit 2; }
+[ -n "$PORT" ] && [ -n "$MODEL" ] || { echo "usage: serve.sh --port P --model PATH --device DEVICE" >&2; exit 2; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 

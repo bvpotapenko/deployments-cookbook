@@ -1,6 +1,6 @@
 """DeepSeek's OCR no-repeat-ngram rule as an sglang CustomLogitProcessor.
 
-Copied into the engine venv's site-packages by ``kot_serve.sh`` (beside
+Copied into the engine venv's site-packages by ``serve.sh`` (beside
 sitecustomize.py) so dill resolves the class by name inside the scheduler
 processes, whose environment carries no PYTHONPATH. The adapter serializes
 the class with ``to_str()`` and passes it per request as

@@ -101,7 +101,7 @@ take 15.1 GB. Do not change any file in the snapshot.
 cd /opt/engines/vla-vllm
 mkdir -p /outputs
 CUDA_VISIBLE_DEVICES=0 KOT_PYTHON=/root/kotvenv-vllm-vla/bin/python \
-  ./kot_serve.sh --port 8090 --model $MODEL --device cuda 2>&1 | tee /outputs/vla-vllm.log
+  ./serve.sh --port 8090 --model $MODEL --device cuda 2>&1 | tee /outputs/vla-vllm.log
 ```
 
 The engine opens tensor parallel over every visible card. This model fits on

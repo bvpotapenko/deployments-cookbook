@@ -2,7 +2,7 @@
 # Rebuild the offline wheel closure for this deployment (wheels/).
 #
 # The closure is rebuilt whenever the pinned vllm line moves: run this on any
-# linux x86_64 host with network, then `./kot_serve.sh` installs offline from
+# linux x86_64 host with network, then `./serve.sh` installs offline from
 # wheels/ on first start (an offline host has no network).
 #
 #   ./make_wheels.sh

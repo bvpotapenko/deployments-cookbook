@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kot_serve.sh -- port, model, device: the whole contract surface this script takes.
+# serve.sh -- port, model, device: the whole contract surface this script takes.
 set -euo pipefail
 
 PORT=""
@@ -16,7 +16,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device DEVICE" >&2
+  echo "usage: serve.sh --port P --model PATH --device DEVICE" >&2
   exit 2
 fi
 

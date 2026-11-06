@@ -1,7 +1,7 @@
 """Patch SGLang so the kot contract's numerics can leave the engine.
 
 Imported by ``site`` in every python process this deployment starts (the
-adapter and the spawned scheduler/detokenizer processes): ``kot_serve.sh``
+adapter and the spawned scheduler/detokenizer processes): ``serve.sh``
 copies this file into the engine venv's site-packages, where site.py finds it
 without any PYTHONPATH. It imports nothing heavy at startup; the patches are
 applied when SGLang's own modules finish loading.
@@ -70,7 +70,7 @@ import sys
 
 # The scheduler subprocesses get a curated environment from sglang (no
 # PYTHONPATH, no custom vars), so the stash directory cannot be passed by env
-# alone. The deterministic default matches kot_serve.sh's own choice.
+# alone. The deterministic default matches serve.sh's own choice.
 STASH_DIR = (
     os.environ.get("KOT_SGLANG_STASH_DIR")
     or ("/scratch/kot-sglang-stash" if os.path.isdir("/scratch") else "/tmp/kot-sglang-stash")

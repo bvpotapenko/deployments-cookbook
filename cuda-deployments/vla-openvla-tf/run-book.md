@@ -94,7 +94,7 @@ weights take 15.1 GB.
 cd /opt/engines/vla-openvla-tf
 mkdir -p /outputs
 export CUDA_VISIBLE_DEVICES=0
-./kot_serve.sh --port 8090 --model $MODEL --device cuda 2>&1 | tee /outputs/vla-openvla-tf.log
+./serve.sh --port 8090 --model $MODEL --device cuda 2>&1 | tee /outputs/vla-openvla-tf.log
 ```
 
 The model needs one card. The server uses the first visible card only, so

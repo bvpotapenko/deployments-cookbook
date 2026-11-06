@@ -102,7 +102,7 @@ same push.
 ### Start
 
 ```bash
-./kot_serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device cuda
+./serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device cuda
 ```
 
 The process listens on 127.0.0.1 only. The launcher resolves its interpreter

@@ -75,7 +75,7 @@ rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
 
 The engine push leaves the wheel closure out. A networked host builds
 its venv from the index and never reads it. Push the closure only to a
-host that must install offline; `kot_serve.sh` fills a missing venv from
+host that must install offline; `serve.sh` fills a missing venv from
 it on first start:
 
 ```bash
@@ -104,7 +104,7 @@ matches the source.
 
 ```bash
 KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
-  ./kot_serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
+  ./serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
 ```
 
 Prefix caching is disabled in the server. A cache hit would leave the
@@ -138,7 +138,7 @@ every visible card.
 ```bash
 KOT_VLLM_GPU_MEM=0.60 KOT_VLLM_MAX_BATCHED_TOKENS=1024 \
 KOT_VLLM_MAX_MODEL_LEN=16384 \
-  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
+  ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 Both directions fail. A higher memory setting fills the card and the
@@ -152,7 +152,7 @@ launch of this model:
 
 ```bash
 KOT_VLLM_GPU_MEM=0.60 KOT_VLLM_MAX_MODEL_LEN=16384 \
-  ./kot_serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
+  ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
 ### state-spaces/mamba-2.8b-hf

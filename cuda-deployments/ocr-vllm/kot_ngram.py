@@ -1,6 +1,6 @@
 """DeepSeek's OCR no-repeat-ngram rule as a vLLM V1 LogitsProcessor.
 
-Wired into the engine through ``--logits-processors``; ``kot_serve.sh``
+Wired into the engine through ``--logits-processors``; ``serve.sh``
 copies this module into the engine venv's site-packages so the FQCN
 resolves in every worker. The rule is DeepSeek's own (their
 DeepSeek-OCR2-vllm run scripts; sglang ships the same values as its native

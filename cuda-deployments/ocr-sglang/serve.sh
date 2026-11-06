@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Start the SGLang deployment of the kot contract.
+# Start the SGLang deployment of the kot contract, OCR family (DeepSeek-OCR-2).
 #
-#   ./kot_serve.sh --port P --model /path/to/weights --device cpu|cuda
+#   ./serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
 #
 # One process serves everything: this script launches kot_server.py, which
 # embeds sglang.Engine in-process and answers /kot/info, /kot/score,
-# /v1/completions and /v1/chat/completions. The contract's one-server rule
-# lives here: the score path and the speed harness drive the same engine.
+# /v1/completions and /v1/chat/completions (multimodal: a text part and the
+# document as an image_url data URI). The contract's one-server rule lives
+# here: the score path and the speed harness drive the same engine.
 #
-# The engine is sglang 0.5.23. On a CUDA host it expects to find sglang,
-# sglang-kernel and triton already installed in the interpreter named by
-# KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
+# The engine is sglang 0.5.23 (DeepSeek-OCR-2 runs through the checkpoint's
+# own remote code). On a CUDA host it expects to find sglang,
+# sglang-kernel and triton already installed in the interpreter named
+# by KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
 set -euo pipefail
 
 PORT=""
@@ -19,13 +21,16 @@ DEVICE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
+    --port=*) PORT="${1#*=}"; shift ;;
     --model) MODEL="$2"; shift 2 ;;
+    --model=*) MODEL="${1#*=}"; shift ;;
     --device) DEVICE="$2"; shift 2 ;;
+    --device=*) DEVICE="${1#*=}"; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device cpu|cuda" >&2
+  echo "usage: serve.sh --port P --model PATH --device cpu|cuda" >&2
   exit 2
 fi
 if [[ ! -d "$MODEL" ]]; then
@@ -81,6 +86,7 @@ fi
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/sitecustomize.py"
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/kot_sglang_patch.py"
 echo "import kot_sglang_patch" > "$SITE_PACKAGES/kot_sglang_patch.pth"
+cp "$HERE/kot_ocr_ngram.py" "$SITE_PACKAGES/kot_ocr_ngram.py"
 echo "[kot_serve] patch layer installed into $SITE_PACKAGES (module + .pth)"
 
 # DeepGEMM's JIT asserts at startup without NVCC >= 12.9 (serving hosts carry
@@ -88,16 +94,10 @@ echo "[kot_serve] patch layer installed into $SITE_PACKAGES (module + .pth)"
 # process spawns.
 export SGLANG_ENABLE_JIT_DEEPGEMM=false
 
-# The batch-invariant TRITON persistent matmul is the fallback and
-# keeps determinism without DeepGEMM. Set before any sglang
-# process spawns.
+# The deterministic matmul defaults to DeepGEMM, whose kernels do not cover
+# sm_120 (RTX 5090); the batch-invariant triton matmul is the fallback and
+# keeps determinism without DeepGEMM. Set before any sglang process spawns.
 export SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_DEEPGEMM=0
-
-# sglang's async asserts make the embedding (and other layers) check their
-# inputs against real bounds and name the layer when one fails, at no cost
-# when nothing trips. The diagnosis path for unknown walls: the default
-# device-side assert names neither the input nor the layer.
-export SGLANG_ENABLE_ASYNC_ASSERT=1
 
 # The weights are local and the graded container has no network; the engine
 # must never reach for the hub either.
@@ -113,15 +113,11 @@ export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
 # patch layer resolves the same default in the scheduler processes, whose
 # environment sglang replaces.
 if [[ -d /scratch && -w /scratch ]]; then
-  export KOT_SGLANG_STASH_DIR="/scratch/kot-sglang-stash"
+  export KOT_SGLANG_STASH_DIR="/scratch/kot-sglang-ocr-stash"
 else
-  export KOT_SGLANG_STASH_DIR="/tmp/kot-sglang-stash"
+  export KOT_SGLANG_STASH_DIR="/tmp/kot-sglang-ocr-stash"
 fi
 mkdir -p "$KOT_SGLANG_STASH_DIR"
 echo "[kot_serve] stash dir: $KOT_SGLANG_STASH_DIR"
-
-# Pre-sampling rows come out of the engine in float32 whatever the weights
-# run in; the patch recompute is documented in sitecustomize.py.
-export KOT_SGLANG_FULL_LOGPROBS=1
 
 exec "$PYTHON" "$HERE/kot_server.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
