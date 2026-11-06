@@ -98,6 +98,15 @@ export SGLANG_ENABLE_JIT_DEEPGEMM=false
 # keeps determinism without DeepGEMM. Set before any sglang process spawns.
 export SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_DEEPGEMM=0
 
+# SGLang computes a prefill's input logprobs in chunks of this many rows
+# (2048 by default). Each chunk's fp32 [rows, 248320] copies peak on the
+# card beside the 0.89 static pool, and each chunk is one stash archive the
+# adapter holds in host memory. Deterministic inference (kot_server.py)
+# runs a batch-invariant matmul, so the rows should not depend on the chunk
+# size; a replay at 512 and at 2048 on the box confirms it. Set before any
+# sglang process spawns.
+export SGLANG_LOGPROB_CHUNK_SIZE="${SGLANG_LOGPROB_CHUNK_SIZE:-512}"
+
 # The weights are local and the graded container has no network; the engine
 # must never reach for the hub either.
 export HF_HUB_OFFLINE=1
