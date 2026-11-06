@@ -109,10 +109,23 @@ engine's own frame step samples and resizes by rules of its own, so the patch
 layer replaces it: frames come from `Qwen3VLVideoProcessor.sample_frames` at
 fps 2.0, decoded on the CPU and unresized, and the HF processor resizes them on
 the CPU with `cap_pixels_per_frame` true and expands the placeholder into the
-per-frame timestamp structure. The deployment also computes the expanded id
-count through the checkpoint's HF processor (the same pins) and guards every
-score request on it: a retokenize fallback or a frame selection that disagrees
-with the reference fails the request instead of reading as numbers.
+per-frame timestamp structure.
+
+The engine keeps the request ids as sent. For ids with a video, stock SGLang
+decodes the ids to text and tokenizes that text again. A sampled tail is not
+always the tokenizer's own split, so the engine can get different ids (issue
+#79). The patch layer replaces that path. The HF processor gets only the video
+placeholder, and its expansion replaces the placeholder in the request ids.
+All other ids stay as sent. The patch layer writes the engine ids to
+`last_video_ids.json` in the stash dir. A request with ids and more than one
+video, or with a video and other media, fails in the engine.
+
+The deployment also computes the expanded template through the checkpoint's
+HF processor (the same pins) and guards every score request on it. The prompt
+token count must agree with the expansion, and the engine ids must equal the
+expanded template plus the tail at each position. A missing note, a changed id
+or a frame selection that disagrees with the reference fails the request
+instead of reading as numbers.
 
 A video unit costs at most ~12.4k tokens (the checkpoint's own pixel budget:
 `longest_edge 25165824` per video). The stored rows are the pre-sampling
