@@ -162,26 +162,47 @@ rows: n - 1, or the last `n_rows`. Every row is the float32 log-softmax of
 the raw logits over all 32064 columns. The server reads no seed and no
 sampling: decoding is greedy. `max_new_tokens` must be 7.
 
-kot's VLA input version `v1` is for a pi0 robot: each observation has 3
-cameras, `action_dim` 32 and `chunk_size` 50. This server refuses it: kot
-sends `max_new_tokens` equal to `action_dim`, and the server reads one
-camera. Use the input version `v1_openvla`. It has the observation ids and
-prompts of `v1`, the first camera of `v1` only, `action_dim` 7 and
-`chunk_size` 1. That camera has the same image as in `v1`. All other fields
-are the same as in `v1`.
+kot's VLA input version `v1` is for a pi0 robot, and this server refuses
+it. Use the input version `v1_openvla`. On the machine that holds the kot
+store, write this file at
+`$KOT_STORE/inputs/vla_inputs/v1_openvla/observations.json`:
 
-Make `v1_openvla` on the machine that holds the kot store. The script reads
-`inputs/vla_inputs/v1/observations.json` and writes
-`inputs/vla_inputs/v1_openvla/observations.json`. It prints the changed
-fields of each observation. It stops if `v1_openvla` exists:
-
-```bash
-python3 /opt/engines/vla-openvla-tf/make_v1_openvla.py --root $KOT_STORE
+```json
+{
+  "version": "1.0.0",
+  "seed": 42,
+  "observations": [
+    {
+      "id": "step_0000",
+      "prompt": "pick up the red block",
+      "state_dim": 32,
+      "state_range": [0.1, 0.6],
+      "action_dim": 7,
+      "chunk_size": 1,
+      "cameras": ["base_0_rgb"],
+      "image_shape": [3, 224, 224],
+      "noise_seed": 0
+    }
+  ]
+}
 ```
 
-Freeze it from the kot checkout. The first command writes one `.npz` per
-observation. The second command writes
-`inputs/frozen_sequences/vla_tokens/openvla_openvla-7b/v1_openvla.npz`: each
+The file holds the one observation of `v1`, with these differences:
+
+- `cameras`: `base_0_rgb` only, the first camera of `v1`. The server reads
+  one camera. The camera has the same image as in `v1`.
+- `action_dim`: 7. kot sends `max_new_tokens` equal to `action_dim`, and the
+  model writes 7 action tokens.
+- `chunk_size`: 1. The model predicts one action per request.
+- `seed`: 42, at the top level. Freeze requires a seed. Decoding is greedy,
+  so the seed does not change the action.
+
+`state_dim`, `state_range` and `noise_seed` stay: freeze requires them to
+make the state and the noise. The server reads neither.
+
+Freeze it from the kot checkout. The first command writes
+`inputs/vla_inputs/v1_openvla/step_0000.npz`. The second command writes
+`inputs/frozen_sequences/vla_tokens/openvla_openvla-7b/v1_openvla.npz`: the
 unit has empty ids and decode 7.
 
 ```bash
@@ -191,6 +212,8 @@ python -m kot.gather --root $KOT_STORE freeze sequences --family vla_tokens \
 ```
 
 Capture this deployment with `--family vla_tokens --input-version v1_openvla`.
+The capture also needs `$KOT_STORE/inputs/sampling/openvla_openvla-7b.yaml`.
+kot reads it before a decode. The server does not use it.
 
 ## Check
 
