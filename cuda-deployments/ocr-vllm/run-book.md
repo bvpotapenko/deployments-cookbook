@@ -167,6 +167,16 @@ Chat and `/kot/score` load the image with the same vLLM `ImageMediaIO`, which
 applies the EXIF rotation and composites alpha on white; the checkpoint's own
 recipe also rotates but drops alpha, so a transparent image differs from it.
 
+A decode on `/kot/score` writes three files into the request's `out_dir`:
+`log_probs.npy`, `input_ids.npy` and `text.txt`. `text.txt` holds the
+generated ids as UTF-8 text. The checkpoint's tokenizer decodes the ids with
+`skip_special_tokens=False`, then the server removes the trailing EOS token.
+The tokenizer flags the table tags `<td>` and `<tr>` as special tokens, so
+`skip_special_tokens=True` would remove them. `ocr-transformers` and
+`ocr-sglang` use the same rule. A replay prefill writes no `text.txt`. The
+eval reads only the `.npy` files. `text.txt` lets a person compare the
+transcripts of the engines.
+
 ## Check
 
 The text path, then the image path. `doc.png` is any document page.
