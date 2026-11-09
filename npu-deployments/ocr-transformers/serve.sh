@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kot_serve.sh -- port, model, device: the whole contract surface this script takes.
+# serve.sh -- port, model, device: the whole contract surface this script takes.
 #
 # Two ways this script is started:
 #
@@ -10,10 +10,10 @@
 #   wrap docker run with the Ascend driver mounts and device nodes, mirroring
 #   kot.platforms' ascend-910b row.
 #
-# The OCR stack needs transformers 4.46.3 (the checkpoint's remote code breaks
-# on 5.x), so the interpreter chain prefers a dedicated venv when one carries
-# both torch_npu and transformers; only such an interpreter may run serve.py
-# directly.
+# The OCR stack needs transformers 5.22.1, which ships the native deepseek_ocr2
+# architecture, so the interpreter chain prefers a dedicated venv when one
+# carries both torch_npu and transformers; only such an interpreter may run
+# serve.py directly.
 set -euo pipefail
 
 PORT=""
@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device DEVICE" >&2
+  echo "usage: serve.sh --port P --model PATH --device DEVICE" >&2
   exit 2
 fi
 
@@ -51,14 +51,16 @@ for candidate in "${KOT_OCR_PY:-}" /root/kotvenv-ocr/bin/python /root/kotvenv/bi
 done
 if [ -n "$PY" ]; then
   source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
-  # The checkpoint's remote code imports from its own directory.
+  # The working directory is the model dir: the runner's out_dir resolves
+  # against it when sent relative. serve.py imports its sibling builder
+  # modules through its own directory on sys.path.
   cd "$MODEL"
   exec "$PY" "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
 fi
 
 IMAGE="${KOT_NPU_IMAGE:-kot-ocr-ascend-910b:latest}"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "[kot_serve] building $IMAGE from $HERE/Dockerfile (first run only)" >&2
+  echo "[serve] building $IMAGE from $HERE/Dockerfile (first run only)" >&2
   docker build -t "$IMAGE" "$HERE" >&2
 fi
 
