@@ -1,10 +1,11 @@
 # Run Book: ocr-transformers
 
-This deployment serves DeepSeek-OCR-2 with stock transformers 5.20.2. The
-stack runs on the Ascend 910B through torch_npu 2.10.0 under CANN 9.1.0. The
-checkpoint loads through the native DeepseekOCR2 architecture, and no remote
-code runs. One process serves one scoring route. The server answers one
-request at a time. The server has no chat route.
+This deployment serves DeepSeek-OCR-2 with transformers 5.22.1. The stack
+runs on the Ascend 910B through torch_npu 2.10.0.post2 under CANN 9.1.0. The
+checkpoint loads through the native DeepseekOCR2 architecture that
+transformers 5.22.1 ships, and no remote code runs. One process serves one
+scoring route. The server answers one request at a time. The server has no
+chat route.
 
 ## Model parameters
 
@@ -17,8 +18,8 @@ comparison fails.
 |---|---|---|---|---|
 | deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | bfloat16 | temperature 0.0001, top_p 1.0 |
 
-One stack serves this model: CANN 9.1.0, torch 2.10.0, torch_npu 2.10.0,
-transformers 5.20.2, CPython 3.12. The seed arrives with the request; 42 is
+One stack serves this model: CANN 9.1.0, torch 2.10.0, torch_npu 2.10.0.post2,
+transformers 5.22.1, CPython 3.12. The seed arrives with the request; 42 is
 the convention.
 
 ## Server: Ascend 910B
@@ -42,26 +43,30 @@ These pins must not float.
   read-only at start. The driver on the host must pair with the CANN
   toolkit, so float the image only together with a host driver that supports
   CANN 9.1.0.
-- The build installs `torch==2.10.0`, `torch_npu==2.10.0` and
+- The build installs `torch==2.10.0`, `torch_npu==2.10.0.post2` and
   `torchvision==0.25.0` from wheel files, never pip resolution. torch_npu
   registers the npu backend, its version pairs with torch, and the plugin
   build pairs with the CANN release in the base image. torchvision must match
   the same torch line. The stack moves as a set. Change the CANN version only
   together with torch_npu, and the host driver only together with the CANN
   toolkit.
-- The build pins `transformers==5.20.2`. The checkpoint loads through the
+- The build pins `transformers==5.22.1`. The checkpoint loads through the
   native DeepseekOCR2 architecture, and no remote code runs.
 
 ### Layout
 
 ```text
-/opt/engines/ocr-transformers  this directory; the wrap mounts it read-only at /deployment
+/opt/engines/ocr-transformers  this directory: serve.py beside the three builder
+                               modules it imports, native_config (build_config),
+                               native_load (load_native), native_processor
+                               (build_processor); the wrap mounts it read-only
+                               at /deployment
 /models/DeepSeek-OCR-2          the checkpoint directory; mounted read-only at its own path
 ```
 
-`serve.py` is not baked into the image. The wrap mounts this directory
-read-only at /deployment and runs the script from there, so you edit
-`serve.py` here with no rebuild.
+The Python files are not baked into the image. The wrap mounts this directory
+read-only at /deployment and runs the script from there, so you edit them
+here with no rebuild.
 
 The model directory must hold config.json at its root. A HuggingFace cache
 layout is refused.
@@ -69,9 +74,9 @@ layout is refused.
 ### Start
 
 ```bash
-./kot_serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device npu
+./serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device npu
 # one card pinned:
-ASCEND_RT_VISIBLE_DEVICES=1 ./kot_serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device npu
+ASCEND_RT_VISIBLE_DEVICES=1 ./serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device npu
 ```
 
 The script tries one interpreter after another: `$KOT_OCR_PY`, then
@@ -100,6 +105,10 @@ Facts about the load:
 - torch_npu is imported before any tensor is placed.
 - The native DeepseekOCR2 architecture loads the checkpoint, and no remote
   code runs.
+- `build_config` reads `config.json` and builds the native configuration.
+- `load_native` stops the start when a key is missing or unexpected, or when
+  one checkpoint tensor differs from the loaded model. `/kot/info` carries
+  the result under `load_report`.
 - The weights run bfloat16 on npu; `KOT_DTYPE` overrides, and a typo is a
   load-time error.
 - Attention runs eager on npu, and `KOT_ATTN` overrides.
@@ -115,7 +124,7 @@ the driver and toolkit pair.
 |---|---|---|
 | `KOT_OCR_PY` | unset | interpreter for the direct route; it must import torch_npu and transformers. |
 | `KOT_DTYPE` | `bfloat16` on npu, `float32` on cpu | model dtype. A typo is an error at load. |
-| `KOT_ATTN` | `eager` on npu | attention implementation for the language half. The vision encoder calls scaled_dot_product_attention unconditionally on every platform, so the knob switches the language half only. |
+| `KOT_ATTN` | `eager` on npu | attention implementation for the whole model: the SAM encoder, the vision encoder and the language model. |
 | `KOT_NPU_IMAGE` | `kot-ocr-ascend-910b:latest` | image the host-mode wrap runs. |
 | `KOT_OUT_MOUNTS` | unset | colon-separated directories mounted read-write at the same path, so the server's output files land where the host reads them. Host mode only. |
 | `ASCEND_RT_VISIBLE_DEVICES` | `0` when both device variables are unset | card ordinals the wrap passes to the container; `ASCEND_VISIBLE_DEVICES` is the fallback. In the direct route, export them yourself. |
@@ -132,14 +141,16 @@ remote-code era: `config.json` and `modeling_deepseekv2.py`.
 `modeling_deepseekv2.py` was edited by Bogdan Potapenko for
 transformers 5.x compatibility. Copy the
 directory whole. The native path loads no modeling file from the weights
-directory. The patched `config.json` duplicates the language model's
-settings at the top level, and the vanilla file carries them only under
-`language_config`. Check the config patch against the native loader before
-the first serve.
+directory. `config.json` carries the language model's settings under
+`language_config` and as top-level copies. `build_config` reads only
+`language_config` and stops the start when a copy disagrees.
 
 An image with both sides at most 768 px becomes one 257-token block. A
 larger image adds a grid of up to six 768 px crop tiles, 144 tokens per
 tile.
+
+A decode request that carries no ids gets the template the frozen inputs
+hold: BOS, the image block, then the ids of the instruction `Free OCR.`.
 
 Generation applies a no-repeat n-gram rule. A token that would complete a
 30-gram already seen within the last 90 tokens is banned from sampling. The

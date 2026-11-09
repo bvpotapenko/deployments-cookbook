@@ -10,11 +10,10 @@
 #
 # Same base image and pins as kot's own graded recipe
 # (containers/Dockerfile + platform-ascend-910b.txt + family-ocr.txt):
-# the golden capture on CUDA ran transformers 4.46.3 (the DeepSeek-OCR-2
-# remote code breaks on 5.x), and the ascend row pairs torch-npu 2.10.0.post2
-# with the CUDA-free torch 2.10.0 and torchvision 0.25.0. The tag matches
-# kot.container.image_name, so the host-mode docker wrap and a container-mode
-# capture can share one image.
+# transformers 5.22.1 ships the native deepseek_ocr2 architecture, and the
+# ascend row pairs torch-npu 2.10.0.post2 with the CUDA-free torch 2.10.0 and
+# torchvision 0.25.0. The tag matches kot.container.image_name, so the
+# host-mode docker wrap and a container-mode capture can share one image.
 FROM quay.io/ascend/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12
 
 COPY wheels/ /wheels/
@@ -26,13 +25,13 @@ RUN pip install --no-cache-dir --break-system-packages \
     /wheels/torch_npu-2.10.0.post2-cp312-cp312-manylinux_2_28_aarch64.whl \
     /wheels/torchvision-0.25.0-cp312-cp312-manylinux_2_28_aarch64.whl
 
-# family-ocr.txt (transformers PINNED: the checkpoint's remote code breaks on
-# 5.x) + kot's base.txt equivalents (numpy, pydantic, pyyaml), so kot's
+# family-ocr.txt (transformers PINNED: the native deepseek_ocr2 stack) +
+# kot's base.txt equivalents (numpy, pydantic, pyyaml), so kot's
 # in-container runner also finds its own deps here. No harness layer: this
 # deployment serves no chat route, so the endpoints benchmark has nothing to
 # drive (the CUDA reference golden holds no speed record either).
 RUN pip install --no-cache-dir --break-system-packages \
-    transformers==4.46.3 \
+    transformers==5.22.1 \
     accelerate \
     safetensors \
     einops \
