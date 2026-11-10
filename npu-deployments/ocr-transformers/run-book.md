@@ -1,7 +1,7 @@
 # Run Book: ocr-transformers
 
 This deployment serves DeepSeek-OCR-2 with transformers 5.22.1. The stack
-runs on the Ascend 910B through torch_npu 2.10.0.post2 under CANN 9.1.0. The
+runs on the Ascend 910B through torch_npu 2.10.0.post2 under CANN 9.2.1. The
 checkpoint loads through the native DeepseekOCR2 architecture that
 transformers 5.22.1 ships, and no remote code runs. One process serves one
 scoring route. The server answers one request at a time. The server has no
@@ -18,7 +18,7 @@ comparison fails.
 |---|---|---|---|---|
 | deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | bfloat16 | temperature 0.0001, top_p 1.0 |
 
-One stack serves this model: CANN 9.1.0, torch 2.10.0, torch_npu 2.10.0.post2,
+One stack serves this model: CANN 9.2.1, torch 2.10.0, torch_npu 2.10.0.post2,
 transformers 5.22.1, CPython 3.12. The seed arrives with the request; 42 is
 the convention.
 
@@ -37,12 +37,12 @@ docker build -t kot-ocr-ascend-910b:latest .
 
 These pins must not float.
 
-- The base image `quay.io/ascend/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12` carries
-  the CANN 9.1.0 toolkit for the 910B. The toolkit half of the stack lives
-  in the image. The driver half lives on the host, and the wrap mounts it
-  read-only at start. The driver on the host must pair with the CANN
+- The base image `quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12-devel`
+  carries the CANN 9.2.1 toolkit for the 910B. The toolkit half of the stack
+  lives in the image. The driver half lives on the host, and the wrap mounts
+  it read-only at start. The driver on the host must pair with the CANN
   toolkit, so float the image only together with a host driver that supports
-  CANN 9.1.0.
+  CANN 9.2.1.
 - The build installs `torch==2.10.0`, `torch_npu==2.10.0.post2` and
   `torchvision==0.25.0` from wheel files, never pip resolution. torch_npu
   registers the npu backend, its version pairs with torch, and the plugin
@@ -171,6 +171,9 @@ facts:
 ```bash
 curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
 ```
+
+`engine` reads `transformers 5.22.1`, and `toolkit_version` reads
+`cann-9.2.1`.
 
 Any image serves the scoring route, and one wider or taller than 768 px also
 exercises the crop path.
