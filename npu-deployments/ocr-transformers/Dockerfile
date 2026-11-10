@@ -14,7 +14,7 @@
 # ascend row pairs torch-npu 2.10.0.post2 with the CUDA-free torch 2.10.0 and
 # torchvision 0.25.0. The tag matches kot.container.image_name, so the
 # host-mode docker wrap and a container-mode capture can share one image.
-FROM quay.io/ascend/cann:9.1.0-beta.1-910b-ubuntu22.04-py3.12
+FROM quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12-devel
 
 COPY wheels/ /wheels/
 
