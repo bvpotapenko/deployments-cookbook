@@ -151,33 +151,24 @@ curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
 Any image serves the scoring route, and one wider or taller than 768 px also
 exercises the crop path.
 
-`self_check.py` checks a deployment that has `serve.sh` at its root and a
-chat route, for example a deployment made from this one. It does not apply
-to this directory.
+`self_check.py` checks the scoring contract. The task deployment has no chat
+route, so use `--no-chat`.
 
 The script starts the deployment itself. Stop your own server first.
 
 ```bash
-python3 self_check.py --deployment /path/to/deployment \
-  --model /models/DeepSeek-OCR-2 --device npu
+python3 self_check.py --deployment /path/to/returned/deployment \
+  --model /models/DeepSeek-OCR-2 --device npu --no-chat
 ```
 
-The script starts `serve.sh` on a free port and waits for `/kot/info`. It
-sends one decode with empty `input_ids` and a small image, then one prefill
-of the ids that the decode stored. The decode must answer NDJSON. The
-prefill must answer one JSON object. For each answer, the script checks the
-two files: dtype, rank, finite values, row width equal to `vocab_size` in
-`config.json`, and row counts. Then it sends one chat request with `stream`
-false and one with `stream` true. The stream must end with `data: [DONE]`,
-and then the response must end. The decode and the chat requests use the
-sampling settings in `$SAMPLING` when that variable is set.
+The script builds the decode prompt from the model tokenizer. It then sends one
+decode and replays the stored ids as a prefill. It checks the two output files:
+dtype, rank, finite values, row width equal to `vocab_size` in `config.json`,
+and row counts. Each check prints one line, PASS or FAIL. Exit code 0 means
+that all checks passed. When a check fails, the script prints the last lines of
+the deployment output. At the end, it stops the deployment.
 
-Each check prints one line, PASS or FAIL. Exit code 0 means that all checks
-passed. When a check fails, the script also prints the last lines of the
-deployment output. At the end, the script stops the deployment.
-
-The script checks the wire contract, not the numbers. The graded run
-measures correctness and speed. The script needs Python 3.10 or later and
-numpy. It writes all its files in one temporary directory and removes that
-directory at the end. It exports `KOT_OUT_MOUNTS` with that directory, so a
-docker wrap can write there.
+The script checks the wire contract, not the numbers. The graded run measures
+correctness and speed. It needs Python 3.10 or later, numpy and
+transformers. It writes all
+files in one temporary directory and removes that directory at the end.

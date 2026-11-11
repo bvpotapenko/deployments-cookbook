@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Self-check of the kot deployment contract for an OCR deployment.
-
     python3 self_check.py --deployment DIR --model PATH --device npu
-
 """
 import argparse, base64, json, os, shutil, signal, socket, struct, subprocess, sys, tempfile, time
 import urllib.error, urllib.request, zlib
 from pathlib import Path
-
 import numpy as np
-
+from transformers import AutoTokenizer
 HOST = "127.0.0.1"
 LOAD_TIMEOUT_S = 900  # the contract's startup timeout
 REQUEST_TIMEOUT_S = 600  # the longest silence one request may keep
@@ -17,7 +14,6 @@ STOP_GRACE_S = 15  # SIGTERM, then SIGKILL, as the benchmark stops a deployment
 MAX_NEW_TOKENS, SEED = 16, 42
 DIGITS = [11415, 29671, 29647, 23497, 31183, 31215, 29257, 31727, 31695, 31599]  # 1234567890, 3x5
 failed = []
-
 def check(name, run):
     """Run one check and print its line. The check's value, or None when it failed."""
     try:
@@ -31,7 +27,6 @@ def check(name, run):
     line = f"FAIL {name}: {'; '.join(problems)}" if problems else f"PASS {name}: {detail}"
     print(line, flush=True)
     return None if problems else value
-
 def write_png(path):
     """Black digits 1234567890 on white, 704x144 px, 8-bit gray: the same bytes every run."""
     bits = [np.array([glyph >> (14 - i) & 1 for i in range(15)]).reshape(5, 3) for glyph in DIGITS]
@@ -43,7 +38,16 @@ def write_png(path):
     for tag, data in ((b"IHDR", header), (b"IDAT", zlib.compress(raw, 9)), (b"IEND", b"")):
         png += struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
     path.write_bytes(png)
-
+def template_ids(model):
+    """Build BOS, the image placeholder, and the plain OCR instruction from the model tokenizer."""
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True, local_files_only=True)
+    image = tokenizer.convert_tokens_to_ids("<image>")
+    if tokenizer.bos_token_id is None or image is None or image == tokenizer.unk_token_id:
+        raise ValueError("model tokenizer has no BOS token or <image> token")
+    instruction = tokenizer.encode("\nFree OCR.", add_special_tokens=False)
+    if not instruction:
+        raise ValueError("model tokenizer produced no ids for the OCR instruction")
+    return [int(tokenizer.bos_token_id), int(image), *map(int, instruction)]
 def wait_info(process, port):
     """GET /kot/info until it answers. Fail at once when serve.sh exits."""
     deadline = time.monotonic() + LOAD_TIMEOUT_S
@@ -57,13 +61,11 @@ def wait_info(process, port):
             time.sleep(1)
     exited = f"serve.sh exited with code {process.returncode}" if process.poll() is not None else ""
     return [exited or f"no answer within {LOAD_TIMEOUT_S} s"], "", None
-
 def post(port, path, payload):
     request = urllib.request.Request(f"http://{HOST}:{port}{path}", json.dumps(payload).encode(),
                                      {"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
         return response.read()
-
 def answer(port, payload):
     """Decode answers NDJSON: block lines, then the result line. Prefill answers one object."""
     body, prefill = post(port, "/kot/score", payload), payload["mode"] == "prefill"
@@ -77,7 +79,6 @@ def answer(port, payload):
         return [f"an error line, or no result line: {body[:300]!r}"], "", None
     detail = f"{len(lines) - len(results)} block line(s), then the result line"
     return [], "one JSON object" if prefill else detail, results[-1]
-
 def arrays(payload, reply, model, info):
     """The files the reply names: on disk; dtype, rank, finiteness, width; the row rule."""
     named = reply.get("files") or {}
@@ -107,7 +108,6 @@ def arrays(payload, reply, model, info):
     if not decode and stored != payload["input_ids"]:
         problems.append("the stored input_ids are not the ids sent: consume them verbatim")
     return problems, f"log_probs {log_probs.dtype} {list(log_probs.shape)}, finite", (stored, count)
-
 def chat(port, payload, stream):
     """One completion, read to the end of the response: a response that never ends fails."""
     body = post(port, "/v1/chat/completions", {**payload, "stream": stream})
@@ -122,12 +122,11 @@ def chat(port, payload, stream):
     if not chunks or any(not isinstance(chunk, dict) or "error" in chunk for chunk in chunks):
         return [f"no completion chunk before [DONE], or an error chunk: {events[:3]}"], "", None
     return [], f"{len(chunks)} chunks, data: [DONE], then the response ended", 1
-
-def run_checks(port, root, info, model):
-    """The decode, its replay as a prefill, then the chat route without and with streaming."""
+def run_checks(port, root, info, model, no_chat):
+    """The decode, its replay as a prefill, then the optional chat route."""
     sampling, image = json.loads(os.environ.get("SAMPLING") or "{}"), root / "digits.png"
     write_png(image)
-    decode = dict(prompt_id="self_check", input_ids=[], mode="decode", out_dir=str(root / "decode"),
+    decode = dict(prompt_id="self_check", input_ids=template_ids(model), mode="decode", out_dir=str(root / "decode"),
                   attachments={"image": str(image)}, max_new_tokens=MAX_NEW_TOKENS, seed=SEED,
                   sampling=sampling, allow_eos=True, n_rows=0)
     reply = check("decode answer", lambda: answer(port, decode))
@@ -138,6 +137,8 @@ def run_checks(port, root, info, model):
         replay = check("prefill answer", lambda: answer(port, prefill))
         if replay:
             check("prefill files", lambda: arrays(prefill, replay, model, info))
+    if no_chat:
+        return
     url = "data:image/png;base64," + base64.b64encode(image.read_bytes()).decode()
     parts = [dict(type="text", text="Free OCR."), dict(type="image_url", image_url=dict(url=url))]
     fields = {key: sampling[key] for key in ("temperature", "top_p", "top_k") if key in sampling}
@@ -145,7 +146,6 @@ def run_checks(port, root, info, model):
                    max_completion_tokens=MAX_NEW_TOKENS, seed=SEED, **fields)
     for stream in (False, True):
         check(f"chat, stream {str(stream).lower()}", lambda: chat(port, payload, stream))
-
 def stop(process):
     """SIGTERM the whole process group, then SIGKILL what is left."""
     for signum, grace in ((signal.SIGTERM, STOP_GRACE_S), (signal.SIGKILL, 5)):
@@ -157,11 +157,11 @@ def stop(process):
                 time.sleep(0.2)
         except (ProcessLookupError, PermissionError):  # gone; macOS answers EPERM for zombies
             return
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for flag in ("--deployment", "--model", "--device"):
         parser.add_argument(flag, required=True)
+    parser.add_argument("--no-chat", action="store_true", help="skip the OpenAI chat checks")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))  # so that the finally below runs
     root, process = Path(tempfile.mkdtemp(prefix="kot-self-check-")).resolve(), None
@@ -177,7 +177,7 @@ def main():
                 start_new_session=True, env={**os.environ, "KOT_OUT_MOUNTS": str(root)})))
         info = process and check("GET /kot/info", lambda: wait_info(process, port))
         if info:
-            run_checks(port, root, info, args.model)
+            run_checks(port, root, info, args.model, args.no_chat)
     except KeyboardInterrupt:
         check("interrupted", lambda: (["Ctrl-C"], "", None))
     finally:
@@ -188,6 +188,5 @@ def main():
             print(f"--- the last {len(tail)} lines of the deployment's output ---", *tail, sep="\n")
         shutil.rmtree(root, ignore_errors=True)
     return 1 if failed else 0
-
 if __name__ == "__main__":
     sys.exit(main())

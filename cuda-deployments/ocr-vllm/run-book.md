@@ -179,6 +179,17 @@ transcripts of the engines.
 
 ## Check
 
+Run the copied self-check for the full scoring and OpenAI chat surfaces:
+
+```bash
+python3 self_check.py --deployment . \
+  --model /models/DeepSeek-OCR-2 --device cuda
+```
+
+The script starts `serve.sh` on a free port, builds the decode ids from the
+model tokenizer, replays the generated ids as a prefill, then checks chat with
+and without streaming. Stop an existing server before starting the check.
+
 The text path, then the image path. `doc.png` is any document page.
 
 ```bash

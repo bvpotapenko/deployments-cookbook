@@ -139,6 +139,17 @@ never changes the reported log-probability rows.
 
 ## Check
 
+Run the copied self-check for the full scoring and OpenAI chat surfaces:
+
+```bash
+python3 self_check.py --deployment . \
+  --model /models/DeepSeek-OCR-2 --device cuda
+```
+
+The script starts `serve.sh` on a free port, builds the decode ids from the
+model tokenizer, replays the generated ids as a prefill, then checks chat with
+and without streaming. Stop an existing server before starting the check.
+
 ```bash
 DOC="$(base64 -w0 doc.png)"   # macOS: base64 -i doc.png
 curl -s http://127.0.0.1:8798/v1/chat/completions \
