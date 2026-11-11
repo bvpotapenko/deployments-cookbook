@@ -163,6 +163,18 @@ it through the real sampler path.
 
 ## Check
 
+The server serves no chat route. Run the copied self-check with chat checks
+disabled:
+
+```bash
+python3 self_check.py --deployment . \
+  --model /models/DeepSeek-OCR-2 --device cuda --no-chat
+```
+
+The script starts `serve.sh` on a free port and builds the decode ids from the
+model tokenizer. It replays the generated ids as a prefill and checks the
+returned files. Stop an existing server before starting the check.
+
 This deployment serves no chat route. The identity surface answers with the
 engine's own facts:
 
