@@ -163,20 +163,36 @@ it through the real sampler path.
 
 ## Check
 
-The server serves no chat route. Run the copied self-check with chat checks
-disabled:
+The server serves the scoring and OpenAI chat routes. Run the copied
+self-check for both surfaces:
 
 ```bash
 python3 self_check.py --deployment . \
-  --model /models/DeepSeek-OCR-2 --device cuda --no-chat
+  --model /models/DeepSeek-OCR-2 --device cuda
 ```
 
-The script starts `serve.sh` on a free port and builds the decode ids from the
-model tokenizer. It replays the generated ids as a prefill and checks the
-returned files. Stop an existing server before starting the check.
+The script starts `serve.sh` on a free port, builds the decode ids from the
+model tokenizer, replays the generated ids as a prefill, then checks chat with
+and without streaming. Stop an existing server before starting the check.
 
-This deployment serves no chat route. The identity surface answers with the
-engine's own facts:
+`POST /v1/chat/completions` accepts one user message with one `image_url` part
+and text. The URL must use `data:image/...;base64,...`. The server uses the
+same image views, image-token expansion and seeded generation path as
+`/kot/score`. `max_completion_tokens` is preferred, with `max_tokens` as an
+alias. Streaming returns assistant role, text delta, stop, and `[DONE]` SSE
+chunks.
+
+```bash
+curl -s http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"DeepSeek-OCR-2","messages":[{"role":"user","content":[
+       {"type":"text","text":"Free OCR."},
+       {"type":"image_url","image_url":{"url":"data:image/png;base64,<base64>"}}]}],
+       "max_completion_tokens":16,"seed":42,"temperature":0.0001,"top_p":1.0}' \
+  | python3 -m json.tool
+```
+
+The identity surface answers with the engine's own facts:
 
 ```bash
 curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool

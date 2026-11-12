@@ -194,8 +194,17 @@ capture carries its own.
 
 `POST /kot/infer` runs one video decode, the description written as `text.txt`
 into the request's `out_dir`, the file names returned. The benchmark's speed
-harness drives a chat route and this deployment serves none, so speed lands
-`speed_absent`.
+harness drives the chat route below.
+
+`POST /v1/chat/completions` accepts the OpenAI video message shape. The user
+message content must contain one `video_url` part and one or more text parts.
+The video URL must be a local absolute path or a `file://` URL. The server uses
+the same `render_video()` and `model.generate()` path as `/kot/infer`, with
+fps 2.0, the per-frame pixel cap, `enable_thinking=false`, the request seed,
+and temperature 1.0, top_p 0.95, and top_k 20. `max_completion_tokens` is
+preferred, with `max_tokens` as an alias and 512 as the default. The response
+is OpenAI-shaped. `stream: true` returns assistant role and text chunks, a
+final `stop` chunk, and `data: [DONE]`.
 
 The server plants the request's seed before each decode. The same seed gives
 the same output.
@@ -217,6 +226,25 @@ curl -s http://127.0.0.1:8090/kot/infer \
        "attachments": {"video": "/path/to/video.mp4"}}' \
   | python3 -m json.tool
 cat /tmp/kot-probe/text.txt
+```
+
+The OpenAI video chat check uses a local video path. Add `-N` for SSE output:
+
+```bash
+curl -s http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3.8-27B","messages":[{"role":"user","content":[
+       {"type":"video_url","video_url":{"url":"/path/to/video.mp4"}},
+       {"type":"text","text":"What happens in this video?"}]}],
+       "max_completion_tokens":32}' \
+  | python3 -m json.tool
+
+curl -sN http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen3.8-27B","stream":true,"messages":[{"role":"user","content":[
+       {"type":"video_url","video_url":{"url":"/path/to/video.mp4"}},
+       {"type":"text","text":"What happens in this video?"}]}],
+       "max_completion_tokens":32}'
 ```
 
 The startup line is the first check. It proves the model loaded, and it

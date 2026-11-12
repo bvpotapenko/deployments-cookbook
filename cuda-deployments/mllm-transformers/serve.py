@@ -45,6 +45,7 @@ import argparse
 import json
 import os
 import re
+import urllib.parse
 from http import HTTPStatus
 from pathlib import Path
 
@@ -57,6 +58,7 @@ UTF8 = "utf-8"
 INFO = "/kot/info"
 SCORE = "/kot/score"
 INFER = "/kot/infer"  # the speed surface: decode over the attachment, files named back
+CHAT = "/v1/chat/completions"
 HOST = "0.0.0.0"
 BACKLOG = 64
 CONTRACT_VERSION = 1
@@ -210,14 +212,26 @@ def main() -> int:
             self._json(HTTPStatus.OK, info)
 
         def do_POST(self):
-            if self.path not in (SCORE, INFER):
+            if self.path not in (SCORE, INFER, CHAT):
                 self._error(HTTPStatus.NOT_FOUND, "not_found", self.path)
                 return
-            body = json.loads(
-                self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
-            )
             try:
-                self._json(HTTPStatus.OK, kot_infer(body) if self.path == INFER else score(body))
+                body = json.loads(
+                    self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
+                )
+                if self.path == CHAT:
+                    text = chat_completion(body)
+                    if body.get("stream"):
+                        self._stream(text)
+                    else:
+                        self._json(HTTPStatus.OK, chat_response(text))
+                else:
+                    self._json(
+                        HTTPStatus.OK,
+                        kot_infer(body) if self.path == INFER else score(body),
+                    )
+            except ChatRequestError as failure:
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_request", str(failure))
             except Exception as failure:
                 self._error(
                     HTTPStatus.INTERNAL_SERVER_ERROR, type(failure).__name__, str(failure)
@@ -234,6 +248,37 @@ def main() -> int:
             self.send_header("Content-Length", str(len(blob)))
             self.end_headers()
             self.wfile.write(blob)
+
+        def _stream(self, text):
+            completion_id = f"chatcmpl-{os.urandom(12).hex()}"
+            created = int(__import__("time").time())
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            def write(delta, finish_reason=None):
+                payload = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": info["model_id"],
+                    "choices": [{
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": finish_reason,
+                    }],
+                }
+                self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode(UTF8))
+                self.wfile.flush()
+
+            write({"role": "assistant", "content": ""})
+            if text:
+                write({"content": text})
+            write({}, "stop")
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
 
         def _error(self, status, error, detail):
             self._json(status, {"error": error, "detail": detail})
@@ -256,15 +301,12 @@ def main() -> int:
             return _decode(body, ids)
         return _prefill(body, ids)
 
-    def render_video(path: str):
-        """The pinned prompt rendered two ways: the raw ids (one video
-        placeholder, what the capture stores) and the expanded forward inputs
-        (the processor's per-frame segments, deterministic in the video and
-        the pinned fps)."""
+    def render_video(path: str, prompt: str = VIDEO_PROMPT):
+        """Render the pinned video pipeline, with an optional chat prompt."""
         text = processor.apply_chat_template(
             [{"role": "user", "content": [
                 {"type": "video", "video": path},
-                {"type": "text", "text": VIDEO_PROMPT},
+                {"type": "text", "text": prompt},
             ]}],
             tokenize=False,
             add_generation_prompt=True,
@@ -289,6 +331,99 @@ def main() -> int:
             if key != "input_ids"
         }
         return raw, expanded, media
+
+    class ChatRequestError(ValueError):
+        pass
+
+    def _video_path_from_chat(part: dict) -> str:
+        video_url = part.get("video_url")
+        if not isinstance(video_url, dict) or not video_url.get("url"):
+            raise ChatRequestError("video_url must contain a url")
+        url = str(video_url["url"])
+        if url.startswith("file://"):
+            return urllib.parse.unquote(urllib.parse.urlparse(url).path)
+        if url.startswith("/"):
+            return url
+        raise ChatRequestError(
+            "video_url must be a local absolute path or file:// URL; remote URLs are unsupported"
+        )
+
+    def _chat_video_and_text(body: dict) -> tuple[str, str]:
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ChatRequestError("messages must be a non-empty list")
+        text_parts: list[str] = []
+        video_path = None
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                text_parts.append(content)
+                continue
+            if not isinstance(content, list):
+                raise ChatRequestError("the user message content must be text and video parts")
+            for part in content:
+                if not isinstance(part, dict):
+                    raise ChatRequestError("message content parts must be objects")
+                kind = part.get("type")
+                if kind == "text":
+                    text_parts.append(str(part.get("text", "")))
+                elif kind == "video_url":
+                    if video_path is not None:
+                        raise ChatRequestError("exactly one video attachment is supported")
+                    video_path = _video_path_from_chat(part)
+                else:
+                    raise ChatRequestError(f"unsupported message content type: {kind!r}")
+        text = "".join(text_parts).strip()
+        if video_path is None:
+            raise ChatRequestError("the request has no video attachment")
+        if not text:
+            raise ChatRequestError("the request has no text prompt")
+        return video_path, text
+
+    def _chat_max_tokens(body: dict) -> int:
+        value = body.get("max_completion_tokens", body.get("max_tokens", 512))
+        if value is None:
+            value = 512
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ChatRequestError("max_completion_tokens must be an integer") from None
+        if value < 1:
+            raise ChatRequestError("max_completion_tokens must be at least 1")
+        return value
+
+    def chat_completion(body: dict) -> str:
+        """The OpenAI surface uses the same video render and generate path as kot_infer."""
+        path, text = _chat_video_and_text(body)
+        _raw, expanded, media = render_video(path, text)
+        torch.manual_seed(int(body.get("seed", 42)))
+        with torch.no_grad():
+            output = model.generate(
+                input_ids=torch.tensor([expanded], device=model.device),
+                do_sample=True, temperature=1.0, top_p=0.95, top_k=20,
+                max_new_tokens=_chat_max_tokens(body),
+                pad_token_id=processor.tokenizer.eos_token_id,
+                use_cache=True,
+                logits_to_keep=1,
+                **media,
+            )
+        generated = output[0][len(expanded):].tolist()
+        return processor.tokenizer.decode(generated, skip_special_tokens=True)
+
+    def chat_response(text: str) -> dict:
+        return {
+            "id": f"chatcmpl-{os.urandom(12).hex()}",
+            "object": "chat.completion",
+            "created": int(__import__("time").time()),
+            "model": info["model_id"],
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }],
+        }
 
     def _open_rows(out_dir: Path, count: int) -> np.ndarray:
         """log_probs.npy at its final shape, a memmap to fill block by block."""
