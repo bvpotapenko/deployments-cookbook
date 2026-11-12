@@ -2,14 +2,14 @@
 
 This deployment serves Qwen/Qwen3.8-27B with vLLM-Ascend 0.32.0rc1 on Ascend 910B. The model runs the
 native `qwen3_5` architecture; the units are short videos. One process serves
-the full-vocabulary log-probability surface over both cards, one request at a
+the full-vocabulary log-probability surface on one card, one request at a
 time.
 
 ## Model parameters
 
 | model | revision | cards | dtype | sampling |
 |---|---|---|---|---|
-| Qwen/Qwen3.8-27B | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 2 (TP=2) | bfloat16 | temperature 1.0, top_p 0.95, top_k 20 |
+| Qwen/Qwen3.8-27B | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 1 (TP=1) | bfloat16 | temperature 1.0, top_p 0.95, top_k 20 |
 
 The sampling values are the checkpoint's own `generation_config.json`. The
 seed arrives with the request; 42 is the convention.
@@ -64,12 +64,14 @@ ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-vllm/*.sh'
 ### Start
 
 ```bash
+ASCEND_RT_VISIBLE_DEVICES=0 \
 KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
   ./serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device npu
 ```
 
-The first boot compiles the engine; minutes. A warm compile cache makes the
-second boot faster.
+The model uses one visible Ascend 910B card. Set
+`ASCEND_RT_VISIBLE_DEVICES=0`; the engine then uses TP=1. The first boot
+compiles the engine; a warm compile cache makes the second boot faster.
 
 One launch profile serves both surfaces. Under the V2 runner the score path
 has no full-vocab gather, so the capture surfaces no longer need a small
@@ -94,7 +96,7 @@ every capture carries its own.
 | `KOT_VLLM_MAX_MODEL_LEN` | `24576` | the window: a video prompt up to the pixel budget (12,288 video tokens plus the template) plus the 8192-token decode. vLLM checks only the prompt against it and caps the output at the window without an error; the server then refuses a decode with `allow_eos` false that is short of `max_new_tokens` |
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | the chunk size of every prefill, shared by capture and speed. The size is part of the numerics and is reported in `/kot/info` |
 | `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (an 8,192-row tail is 32 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
-| `KOT_VLLM_MAX_NUM_SEQS` | `4` | the Ascend-graph profiling KV and the capture sizes scale with the concurrent-request count; the 256 API-server default on 32G cards OOMs boot |
+| `KOT_VLLM_MAX_NUM_SEQS` | `4` | the Ascend-graph profiling KV and the capture sizes scale with the concurrent-request count; the API-server default asks for too much temporary KV during boot |
 | `KOT_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
 | `KOT_VLLM_DTYPE` | unset | numeric cross-check override |
@@ -232,7 +234,7 @@ kot_serve._MODEL_DIR = "/models/Qwen/Qwen3.8-27B"
 print(len(kot_serve._expanded_template_ids("/inputs/video.mp4")))'
 ```
 
-The default boot OOMed engine init on 2x Ascend 910B until the
+The default boot OOMed engine init on one Ascend 910B card until the
 `KOT_VLLM_MAX_NUM_SEQS` pin landed (issue #24): the temporary KV of the
 Ascend-graph profiling scales with the concurrent-request count, not with the
 window, and the 256 API-server default asked for 6.12 GiB beside the weights.
