@@ -14,7 +14,7 @@ Numerics contract, implemented exactly as our reference server's deepseek
 adapter does it:
 
 * prefill is teacher forced: the transcript's ids are appended verbatim to the
-  template the model builds from the image (BOS, then "<image>\\nFree OCR."
+  template the model builds from the image (BOS, then "<image>\nFree OCR."
   in the checkpoint's own plain format, one 257-token image block), the
   forward runs over both, and the rows returned are
   logits[prompt_len : prompt_len + len(transcript) - 1], so a transcript of n
@@ -57,9 +57,13 @@ holds a whole distribution in host memory.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import io
 import json
 import math
 import re
+import uuid
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -78,6 +82,7 @@ from native_processor import build_processor, load_image
 HOST = "127.0.0.1"
 INFO = "/kot/info"
 SCORE = "/kot/score"
+CHAT_COMPLETIONS = "/v1/chat/completions"
 PREFILL = "prefill"
 UTF8 = "utf-8"
 DEFAULT_SEED = 42
@@ -98,8 +103,13 @@ IMAGE_IDS = [IMAGE_TOKEN_ID] * (
     math.ceil((BASE_SIZE // PATCH_SIZE) / DOWNSAMPLE) ** 2 + 1
 )
 WRITE_CHUNK = 64  # rows of log-softmax per streaming write
-ROUTES: dict = {}
+class ChatStream:
+    def __init__(self, text: str, model: str):
+        self.text = text
+        self.model = model
 
+
+ROUTES: dict = {}
 # DeepSeek's own anti-repetition rule for OCR outputs (their repo's
 # DeepSeek-OCR2-vllm run scripts and sglang's native defaults agree on the
 # values): a token that would complete an n-gram that already occurred
@@ -323,7 +333,7 @@ def main():
         seed: int,
         sampling: dict,
         allow_eos: bool,
-        out_dir: Path,
+        out_dir: Path | None,
     ):
         """Sample under the request's sampling record; the stored rows are the
         raw pre-processor logits. ``allow_eos`` shapes the decode gate exactly
@@ -347,13 +357,14 @@ def main():
                 pad_token_id=processor.tokenizer.eos_token_id,
                 use_cache=True,
                 return_dict_in_generate=True,
-                output_logits=True,
+                output_logits=out_dir is not None,
                 logits_processor=[
                     NoRepeatNGramLogitsProcessor(NGRAM_SIZE, NGRAM_WINDOW, NGRAM_WHITELIST)
                 ],
             )
         emitted = out.sequences[0, prompt_len:].tolist()
-        write_log_probs(torch.cat(list(out.logits), dim=0), out_dir, len(emitted))
+        if out_dir is not None:
+            write_log_probs(torch.cat(list(out.logits), dim=0), out_dir, len(emitted))
         # The checkpoint's own decode: only the stop token goes. Its table tags
         # (<td>, <tr>) are flagged special, so skip_special_tokens=True deletes them.
         tokenizer = processor.tokenizer
@@ -400,7 +411,68 @@ def main():
             "output_ids": list(output_ids),
         }
 
-    @route(INFO)
+    def chat_request(body: dict):
+        messages = body.get("messages")
+        if (not isinstance(messages, list) or len(messages) != 1
+                or not isinstance(messages[0], dict) or messages[0].get("role") != "user"):
+            raise ValueError("messages must contain exactly one user message")
+        content = messages[0].get("content")
+        if not isinstance(content, list):
+            raise ValueError("the user message content must be a list with text and image_url parts")
+        images, texts = [], []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError("each content part must be an object")
+            if part.get("type") == "text":
+                text = part.get("text")
+                if not isinstance(text, str):
+                    raise ValueError("text parts must contain a string text")
+                texts.append(text)
+            elif part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url")
+                if not isinstance(url, str):
+                    raise ValueError("image_url must contain a URL")
+                images.append(url)
+            else:
+                raise ValueError("content supports only text and image_url parts")
+        if len(images) != 1:
+            raise ValueError(f"expected exactly one image_url part, got {len(images)}")
+        if not texts or not "".join(texts).strip():
+            raise ValueError("the user message must contain text")
+        url = images[0]
+        if not url.startswith("data:image/") or ";base64," not in url:
+            raise ValueError("image_url must be a data:image/...;base64,... URL")
+        encoded = url.split(";base64,", 1)[1]
+        try:
+            image = io.BytesIO(base64.b64decode(encoded, validate=True))
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("image_url contains invalid base64 data") from error
+
+        sampling = {}
+        for field in ("temperature", "top_p", "top_k", "min_p"):
+            if field in body:
+                sampling[field] = body[field]
+        for field, neutral in (("presence_penalty", 0.0), ("frequency_penalty", 0.0), ("repetition_penalty", 1.0)):
+            if field in body and float(body[field]) != neutral:
+                raise ValueError(f"unsupported non-neutral chat sampling field: {field}")
+        template_ids = [BOS_ID, IMAGE_TOKEN_ID, *processor.tokenizer.encode("\n" + "".join(texts), add_special_tokens=False)]
+        output_ids, text = generated(
+            image, template_ids,
+            int(body.get("max_completion_tokens", body.get("max_tokens", DEFAULT_MAX_TOKENS))),
+            int(body.get("seed", DEFAULT_SEED)), resolve_sampling({"sampling": sampling}), True, None,
+        )
+        model_id = info["model_id"]
+        reply = {"id": "chatcmpl-" + uuid.uuid4().hex, "object": "chat.completion",
+                 "created": int(datetime.now(timezone.utc).timestamp()), "model": model_id,
+                 "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                              "finish_reason": "stop" if len(output_ids) < int(body.get("max_completion_tokens", body.get("max_tokens", DEFAULT_MAX_TOKENS))) else "length"}],
+                 "usage": {"prompt_tokens": len(template_ids), "completion_tokens": len(output_ids), "total_tokens": len(template_ids) + len(output_ids)}}
+        return ChatStream(text, model_id) if body.get("stream") else reply
+
+    @route(CHAT_COMPLETIONS)
+    def chat_completions(body: dict):
+        return chat_request(body)
+
     def info_reply(_body: dict) -> dict:
         return info
 
@@ -418,7 +490,23 @@ def main():
                 return
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             try:
-                self._json(HTTPStatus.OK, handler(body))
+                result = handler(body)
+                if isinstance(result, ChatStream):
+                    chunks = [
+                        {"id": "chatcmpl-" + uuid.uuid4().hex, "object": "chat.completion.chunk", "created": int(datetime.now(timezone.utc).timestamp()), "model": result.model, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]},
+                        {"id": "chatcmpl-" + uuid.uuid4().hex, "object": "chat.completion.chunk", "created": int(datetime.now(timezone.utc).timestamp()), "model": result.model, "choices": [{"index": 0, "delta": {"content": result.text}, "finish_reason": None}]},
+                        {"id": "chatcmpl-" + uuid.uuid4().hex, "object": "chat.completion.chunk", "created": int(datetime.now(timezone.utc).timestamp()), "model": result.model, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                    ]
+                    payload = b"".join((f"data: {json.dumps(chunk)}\n\n").encode(UTF8) for chunk in chunks) + b"data: [DONE]\n\n"
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                else:
+                    self._json(HTTPStatus.OK, result)
             except Exception as failure:
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, type(failure).__name__, str(failure))
 
