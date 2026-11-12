@@ -209,6 +209,17 @@ the same output.
 
 ## Check
 
+Run the contract self-check against one local video:
+
+```bash
+python3 self_check.py --deployment . \
+  --model /models/Qwen3.8-27B --device npu \
+  --video /inputs/video_10014.mp4
+```
+
+It checks `/kot/info`, video decode, replay prefill, and both chat modes.
+Stop an existing server first.
+
 The identity surface answers with the engine's own facts:
 
 ```bash
