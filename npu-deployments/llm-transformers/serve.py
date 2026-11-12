@@ -35,17 +35,18 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http import HTTPStatus
 from importlib import metadata
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any
 from uuid import uuid4
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
+from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer, set_seed
 
 HOST = "127.0.0.1"
 INFO = "/kot/info"
@@ -65,6 +66,83 @@ DEFAULT_MAX_TOKENS = 16
 BACKLOG = 1024
 
 ROUTES: dict = {}
+
+
+class StreamReply:
+    """An OpenAI-shaped completion whose text arrives as server-sent events."""
+
+    def __init__(self, streamer, future, model: str, max_tokens: int, chat: bool):
+        self.streamer = streamer
+        self.future = future
+        self.model = model
+        self.max_tokens = max_tokens
+        self.chat = chat
+        self.id = f"chatcmpl-{uuid4().hex}" if chat else f"cmpl-{uuid4().hex}"
+        self.created = int(datetime.now(timezone.utc).timestamp())
+
+    def chunk(self, delta: dict, finish_reason: str | None) -> bytes:
+        content = {"delta": delta} if self.chat else {"text": delta.get("text", "")}
+        payload = {
+            "id": self.id,
+            "object": "chat.completion.chunk" if self.chat else "text_completion",
+            "created": self.created,
+            "model": self.model,
+            "choices": [{"index": 0, **content, "finish_reason": finish_reason}],
+        }
+        return f"data: {json.dumps(payload)}\n\n".encode(UTF8)
+
+
+async def write_stream(reply: StreamReply, writer) -> None:
+    """Write SSE chunks while a worker runs model.generate()."""
+    head = (
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode(UTF8)
+    writer.write(head)
+    await writer.drain()
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def pump():
+        try:
+            for delta in reply.streamer:
+                loop.call_soon_threadsafe(queue.put_nowait, delta)
+        except Exception as failure:
+            loop.call_soon_threadsafe(queue.put_nowait, failure)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    Thread(target=pump, daemon=True).start()
+
+    async def send(chunk: bytes):
+        writer.write(chunk)
+        await writer.drain()
+
+    try:
+        await send(reply.chunk({"role": "assistant", "content": ""}, None))
+        while True:
+            delta = await queue.get()
+            if delta is None:
+                break
+            if isinstance(delta, Exception):
+                raise delta
+            await send(reply.chunk({"content": delta}, None))
+        generated, _ = await asyncio.wrap_future(reply.future)
+        finish = "length" if len(generated) >= reply.max_tokens else "stop"
+        await send(reply.chunk({}, finish))
+        await send(b"data: [DONE]\n\n")
+    except (ConnectionError, asyncio.CancelledError):
+        return
+    except Exception as failure:
+        print(f"[llm-transformers] stream failed: {failure}", file=sys.stderr, flush=True)
+        try:
+            await send(f"event: error\ndata: {json.dumps({'error': type(failure).__name__, 'detail': str(failure)})}\n\n".encode(UTF8))
+            await send(b"data: [DONE]\n\n")
+        except ConnectionError:
+            return
 
 
 def route(path):
@@ -221,6 +299,7 @@ async def main():
     # model calls may not: one lock makes the compute path exactly as serial
     # (and as deterministic) as the score path it also serves.
     compute = Lock()
+    executor = ThreadPoolExecutor(max_workers=1)
 
     def generate_ids(
         prompt_ids: list[int],
@@ -228,6 +307,7 @@ async def main():
         seed: int,
         sampling: dict,
         want_logits: bool = True,
+        streamer: TextIteratorStreamer | None = None,
     ):
         """Sample with the request's sampling knobs; the raw per-step logits
         when wanted, before any warper touched them.
@@ -255,11 +335,19 @@ async def main():
                     use_cache=True,
                     return_dict_in_generate=True,
                     output_logits=want_logits,
+                    streamer=streamer,
                 )
             generated = out.sequences[0, ids.shape[1] :].tolist()
             if not want_logits:
                 return generated, None
             return generated, torch.cat(list(out.logits), dim=0)
+
+    def generate_stream(streamer: TextIteratorStreamer, *request):
+        try:
+            return generate_ids(*request, want_logits=False, streamer=streamer)
+        except Exception:
+            streamer.on_finalized_text("", stream_end=True)
+            raise
 
     def prefill(prompt_ids: list[int], out_dir: Path) -> int:
         with compute:
@@ -329,24 +417,35 @@ async def main():
         return completion_reply(body, [int(token) for token in ids["input_ids"]], chat=True)
 
     def completion_reply(body: dict, prompt_ids: list[int], chat: bool) -> dict:
-        if body.get("stream"):
+        if body.get("stream") and not chat:
             raise ValueError("stream=true is not served; run the harness offline")
         max_tokens = int(
             body.get("max_tokens") or body.get("max_completion_tokens") or DEFAULT_MAX_TOKENS
         )
-        # The harness sends temperature/top_p/top_k beside the seed; generate()
-        # implements all of them (min_p too), and anything else is ignored,
-        # never a rejection.
+        sampling = {
+            "temperature": float(body.get("temperature") or 1.0),
+            "top_p": float(body.get("top_p", 1.0)),
+            "top_k": int(body.get("top_k", 0)),
+            "min_p": float(body.get("min_p", 0.0)),
+        }
+        if body.get("stream") and chat:
+            streamer = TextIteratorStreamer(
+                tokenizer, skip_prompt=True, skip_special_tokens=True
+            )
+            future = executor.submit(
+                generate_stream,
+                streamer,
+                prompt_ids,
+                max_tokens,
+                int(body.get("seed") or DEFAULT_SEED),
+                sampling,
+            )
+            return StreamReply(streamer, future, model_id, max_tokens, chat=True)
         generated, _ = generate_ids(
             prompt_ids,
             max_tokens,
             int(body.get("seed") or DEFAULT_SEED),
-            {
-                "temperature": float(body.get("temperature") or 1.0),
-                "top_p": float(body.get("top_p", 1.0)),
-                "top_k": int(body.get("top_k", 0)),
-                "min_p": float(body.get("min_p", 0.0)),
-            },
+            sampling,
             want_logits=False,
         )
         text = tokenizer.decode(generated, skip_special_tokens=True)
@@ -409,7 +508,11 @@ async def main():
                 elif method == "POST" and path in ROUTES:
                     payload = json.loads(body or b"{}")
                     try:
-                        await _send(writer, HTTPStatus.OK, ROUTES[path](payload))
+                        payload = ROUTES[path](payload)
+                        if isinstance(payload, StreamReply):
+                            await write_stream(payload, writer)
+                            return
+                        await _send(writer, HTTPStatus.OK, payload)
                     except Exception as failure:
                         await _send(
                             writer,

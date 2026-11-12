@@ -156,6 +156,8 @@ implements no such knob.
 
 ## Check
 
+Non-streaming chat returns one JSON response:
+
 ```bash
 curl -s http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -163,7 +165,18 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-The server applies the checkpoint's own chat template. `stream: true` is
-refused, because the route is non-streaming. The `model` field in the reply
-is the identity the server prints at start: the checkpoint directory's name,
-or the repository id parsed from a snapshot directory or a single-snapshot cache.
+Streaming chat returns OpenAI server-sent events. The first event contains the
+assistant role. Later events contain incremental content. The final event has a
+finish reason, followed by `data: [DONE]`:
+
+```bash
+curl -N http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "Qwen3-0.6B", "messages": [{"role": "user", "content": "ping"}], "max_tokens": 8, "stream": true}'
+```
+
+The server applies the checkpoint's own chat template. The `model` field in the
+reply is the identity the server prints at start: the checkpoint directory's
+name, or the repository id parsed from a snapshot directory or a
+single-snapshot cache. Streaming and non-streaming generation use the same seed,
+sampling, and maximum-token settings. Model calls remain serialized.
