@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Rebuild the offline wheel closure for this deployment (wheels/).
 #
-# The closure is the pip resolution of the engine pair (vllm 0.23.0 +
+# The closure is the pip resolution of the engine pair (vllm==0.32.0 +
 # vllm-ascend==0.32.0rc1) inside the graded image's python 3.12 against its
-# system site packages, verified on the ascend-910b box; plus the three
+# system site packages, verified on the ascend-910b box; plus the five
 # platform wheels the Dockerfile bakes in. serve.sh installs the engine
 # offline from wheels/ into /scratch at first start; the Dockerfile COPYs
 # the same directory for the image build.
@@ -17,8 +17,9 @@
 # - vllm itself is the 266MB pypi aarch64 wheel; fetch it separately with
 #   curl -sfC - --retry if pip's download stalls (it is just a pinned name
 #   in wheels-requirements.txt).
-# - arctic-inference==0.1.1 ships no wheel: pip builds it from the sdist
-#   (one rerun of this script picks the built wheel up).
+# - arctic_inference==0.1.1 ships only an sdist and is absent from the
+#   configured mirrors. The special-case below fetches that pinned sdist from
+#   PyPI, verifies it, and builds the wheel locally.
 # - per-package --no-deps over exact pins: one pass, no resolution,
 #   resumable (pip skips files already in $OUT). Do NOT point pip at the
 #   whole reqs file: full-graph resolution with this many pins stalls and
@@ -31,11 +32,32 @@ OUT="${1:-$DIR/wheels}"
 mkdir -p "$OUT"
 
 grep -E '^[a-zA-Z0-9].*==' "$REQ" | tr '[:upper:]' '[:lower:]' |
+  grep -v '^arctic_inference==' |
   xargs -P 8 -n 1 -I{} pip download {} --no-deps \
     -d "$OUT" \
     -i https://mirrors.huaweicloud.com/repository/pypi/simple \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     --only-binary=:all: --no-cache-dir -q
+
+# The configured mirrors do not publish arctic_inference 0.1.1. Fetch the
+# small source archive directly, verify its immutable PyPI digest, and build
+# its wheel without consulting an index or resolving optional dependencies.
+ARCTIC_SRC_DIR="$OUT/.arctic-src"
+ARCTIC_SRC="$ARCTIC_SRC_DIR/arctic_inference-0.1.1.tar.gz"
+ARCTIC_URL="https://files.pythonhosted.org/packages/2a/d2/3bcebda042d08cfa0f35a2bbc6dd168d60fea60b6678824665c7a3665418/arctic_inference-0.1.1.tar.gz"
+ARCTIC_SHA256="36857e2fbe3ead34821a04be98dfab95086050c1e38199c8fdfe308234fdcf63"
+mkdir -p "$ARCTIC_SRC_DIR"
+if ! compgen -G "$OUT/arctic_inference-0.1.1-*.whl" >/dev/null; then
+  if [[ ! -s "$ARCTIC_SRC" ]]; then
+    curl -sfL --retry 20 --retry-all-errors -o "$ARCTIC_SRC" "$ARCTIC_URL"
+  fi
+  echo "$ARCTIC_SHA256  $ARCTIC_SRC" | sha256sum -c -
+  python3 -m pip wheel "$ARCTIC_SRC" --no-deps --no-cache-dir \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+    -w "$OUT"
+fi
+rm -rf "$ARCTIC_SRC_DIR"
 
 # The Dockerfile and first-start venv both depend on this platform set. Do
 # not report a usable closure when a large or architecture-specific wheel was
@@ -45,7 +67,8 @@ for pattern in \
   'torch_npu-2.11.0-*.whl' \
   'torchvision-0.26.0-*.whl' \
   'torchaudio-2.11.0-*.whl' \
-  'torchcodec-0.17.0-*.whl'
+  'torchcodec-0.17.0-*.whl' \
+  'arctic_inference-0.1.1-*.whl'
 do
   if ! compgen -G "$OUT/$pattern" >/dev/null; then
     echo "missing required offline wheel: $pattern" >&2

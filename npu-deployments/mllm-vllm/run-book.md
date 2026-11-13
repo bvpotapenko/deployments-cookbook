@@ -43,6 +43,9 @@ platform, including the `torchcodec==0.17.0` wheel. The exact pins live in
 `wheels-requirements.txt`; the script fails unless all five platform wheels
 are present. Build the closure on a matching aarch64 host or from the
 vLLM-Ascend source tree before running `docker build` or an offline serve.
+`arctic_inference==0.1.1` has no wheel on the configured mirror, so the
+builder fetches its pinned source archive from PyPI, verifies it, and builds
+the wheel while the host is networked.
 
 Without `KOT_PYTHON`, and with no ambient vllm, the launcher runs the offline
 install itself, into `KOT_VENV`.
