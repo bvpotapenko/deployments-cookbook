@@ -25,14 +25,13 @@ RUN pip install --no-cache-dir --break-system-packages \
     "pydantic>=2.7" \
     "pyyaml>=6.0"
 
-# platform-ascend-910b.txt: torch-npu 2.10.0.post2 pulls the CUDA-free torch
-# 2.10.0; torchvision is pinned beside it because the two must match.
-# The engine venv overlays its own torch_npu (post4) on these at first
-# start; see wheels-requirements.txt for the two layers.
+# platform-ascend-910b.txt: torch-npu 2.11.0 pulls the CUDA-free torch
+# 2.11.0; torchvision is pinned beside it because the two must match.
+# The engine venv uses the same torch_npu line; see wheels-requirements.txt.
 RUN pip install --no-cache-dir --break-system-packages \
-    /wheels/torch-2.10.0-cp312-cp312-manylinux_2_28_aarch64.whl \
-    /wheels/torch_npu-2.10.0.post2-cp312-cp312-manylinux_2_28_aarch64.whl \
-    /wheels/torchvision-0.25.0-cp312-cp312-manylinux_2_28_aarch64.whl
+    /wheels/torch-2.11.0-cp312-cp312-manylinux_2_28_aarch64.whl \
+    /wheels/torch_npu-2.11.0-cp312-cp312-manylinux_2_28_aarch64.whl \
+    /wheels/torchvision-0.26.0-cp312-cp312-manylinux_2_28_aarch64.whl
 
 # family-llm.txt + the versions this deployment was verified with. The
 # harness's own dependency graph pins transformers==5.16.1, which overrides a

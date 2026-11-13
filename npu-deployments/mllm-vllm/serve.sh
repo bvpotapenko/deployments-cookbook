@@ -159,10 +159,10 @@ find_python() {
     # refuse to resolve -- scipy 1.13.1 beside numpy 2.3.5 -- that the
     # runtime never touches, and resolution would fight them forever).
     # Excluded from the batch: torch and torchvision (the image's system
-    # copies satisfy the pins), torch_npu .post2 (the venv carries the
-    # vllm-ascend-pinned .post4), and vllm itself (installed just above).
+    # copies satisfy the pins), torch_npu (the image carries the same 2.11.0
+    # line), and vllm itself (installed just above).
     PINS=$(grep -E '^[a-zA-Z0-9].*==' "$DIR/wheels-requirements.txt" \
-      | grep -vE '^(torch==|torchvision==|torch_npu==2\.10\.0\.post2|vllm==)')
+      | grep -vE '^(torch==|torchvision==|torch_npu==|vllm==)')
     if [ -x "$DIR/bin/uv" ]; then
       # Vendored uv: seconds instead of minutes, no network touched.
       "$DIR/bin/uv" pip install --python "$venv/bin/python" --offline --no-cache \
