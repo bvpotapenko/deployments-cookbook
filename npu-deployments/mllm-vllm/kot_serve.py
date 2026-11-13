@@ -813,6 +813,7 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # decode; the window covers both with room. vLLM checks only the prompt
     # against it and caps the output at the window without an error.
     args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "24576"))
+    args.additional_config = {"runtime_report_dir": "/tmp/kot-vllm-runtime"}
     # The chunk size of every prefill. Under the V2 runner the score path
     # has no full-vocab gather, so the #29 budget that forced 128 is void:
     # 2048 is vLLM's API-server default for this card class and serves both
