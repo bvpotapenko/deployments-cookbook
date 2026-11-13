@@ -67,7 +67,7 @@ for pattern in \
   'torch_npu-2.10.0.post7-*.whl' \
   'torchvision-0.25.0-*.whl' \
   'torchaudio-2.10.0-*.whl' \
-  'torchcodec-0.17.0-*.whl' \
+  'torchcodec-0.16.0-*.whl' \
   'arctic_inference-0.1.1-*.whl'
 do
   if ! compgen -G "$OUT/$pattern" >/dev/null; then

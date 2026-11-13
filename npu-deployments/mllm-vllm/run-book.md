@@ -24,14 +24,14 @@ torchvision 0.25.0 and torchcodec 0.17.0. The CANN image is 9.2.1.
 uv venv /scratch/kot-vllm-venv --python 3.12
 uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.30.0"
 uv pip install --python /scratch/kot-vllm-venv/bin/python \
-  "torch==2.10.0" "torchvision==0.25.0" "torchcodec==0.17.0"
+  "torch==2.10.0" "torchvision==0.25.0" "torchcodec==0.16.0"
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-venv --python 3.12
 /scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
   --find-links ./wheels "vllm==0.30.0" "torch==2.10.0" \
-  "torch_npu==2.10.0.post7" "torchvision==0.25.0" "torchcodec==0.17.0"
+  "torch_npu==2.10.0.post7" "torchvision==0.25.0" "torchcodec==0.16.0"
 ```
 
 vLLM-Ascend 0.30.0 uses the CANN 9.2.1 image and the torch_npu
@@ -39,7 +39,7 @@ vLLM-Ascend 0.30.0 uses the CANN 9.2.1 image and the torch_npu
 matching aarch64 engine wheels carry the Qwen video processor and NPU runtime.
 
 `make_wheels.sh` builds the vLLM-Ascend 0.30.0 closure for the Ascend
-platform, including the `torchcodec==0.17.0` wheel. The exact pins live in
+platform, including the `torchcodec==0.16.0` wheel. The exact pins live in
 `wheels-requirements.txt`; the script fails unless all five platform wheels
 are present. Build the closure on a matching aarch64 host or from the
 vLLM-Ascend source tree before running `docker build` or an offline serve.

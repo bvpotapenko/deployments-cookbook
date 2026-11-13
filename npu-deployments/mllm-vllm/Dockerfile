@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir --break-system-packages \
 # wheelhouse; the base image is not an installation source.
 RUN pip install --no-cache-dir --break-system-packages \
     --no-index --find-links /wheels \
-    "torchcodec==0.17.0"
+    "torchcodec==0.16.0"
 
 # family-llm.txt + the versions this deployment was verified with. The
 # harness's own dependency graph pins transformers==5.16.1, which overrides a
