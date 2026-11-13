@@ -18,7 +18,7 @@
 #   container -- a container cannot start another one.
 set -euo pipefail
 
-VLLM_PIN="0.32.0rc1"
+VLLM_PIN="0.32.0"
 VLLM_ASCEND_PIN="0.32.0rc1"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

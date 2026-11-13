@@ -5,7 +5,7 @@
 # it serves the platform stack and the harness client.
 #
 # Layer 2, the engine closure (the compiled list that follows): the pip
-# resolution of vllm==0.32.0rc1 + vllm-ascend==0.32.0rc1 inside the graded
+# resolution of vllm==0.32.0 + vllm-ascend==0.32.0rc1 inside the graded
 # image's python 3.12 against its system site packages, verified on
 # ascend-910b. serve.sh builds the engine venv with
 # --system-site-packages and installs this closure over the image copies;
@@ -129,7 +129,7 @@ triton_ascend==3.2.2
 truststore==0.10.4
 uvicorn==0.52.4
 vcs-versioning==2.4.0
-vllm==0.32.0rc1
+vllm==0.32.0
 vllm_ascend==0.32.0rc1
 watchfiles==1.2.0
 websockets==17.1

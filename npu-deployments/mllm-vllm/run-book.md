@@ -22,7 +22,7 @@ torchvision 0.26.0 and torchcodec 0.17.0. The CANN image is 9.2.1.
 ```bash
 # networked host
 uv venv /scratch/kot-vllm-venv --python 3.12
-uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.32.0rc1"
+uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.32.0"
 uv pip install --python /scratch/kot-vllm-venv/bin/python \
   "torch==2.11.0" "torchvision==0.26.0" "torchcodec==0.17.0"
 
@@ -30,7 +30,7 @@ uv pip install --python /scratch/kot-vllm-venv/bin/python \
 ./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-venv --python 3.12
 /scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.32.0rc1" "torch==2.11.0" \
+  --find-links ./wheels "vllm==0.32.0" "torch==2.11.0" \
   "torch_npu==2.11.0" "torchvision==0.26.0" "torchcodec==0.17.0"
 ```
 
