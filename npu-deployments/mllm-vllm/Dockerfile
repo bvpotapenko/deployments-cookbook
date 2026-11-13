@@ -43,7 +43,7 @@ RUN pip install --no-cache-dir --break-system-packages \
 # harness's own dependency graph pins transformers==5.16.1, which overrides a
 # newer line here -- so the pin states exactly what the image ends up with.
 RUN pip install --no-cache-dir --break-system-packages \
-    transformers==5.16.1 \
+    transformers==5.14.1 \
     accelerate \
     safetensors \
     numpy==2.2.6
