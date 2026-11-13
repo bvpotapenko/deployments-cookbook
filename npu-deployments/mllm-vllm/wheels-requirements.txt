@@ -1,8 +1,8 @@
 # Two stacks, two layers; this file holds both.
 #
 # Layer 1, the image platform stack (the three pins directly below): the
-# Dockerfile installs them into the image. torch_npu 2.10.0.post2 is the
-# image pin; it serves the platform stack and the harness client.
+# Dockerfile installs them into the image. torch_npu 2.11.0 is the image pin;
+# it serves the platform stack and the harness client.
 #
 # Layer 2, the engine closure (the compiled list that follows): the pip
 # resolution of vllm==0.32.0rc1 + vllm-ascend==0.32.0rc1 inside the graded
@@ -10,11 +10,10 @@
 # ascend-910b. serve.sh builds the engine venv with
 # --system-site-packages and installs this closure over the image copies;
 # its pin batch excludes the layer-1 torch_npu pin by name, so the venv
-# carries the closure's torch_npu 2.10.0.post4. The server imports the
-# venv copy.
-torch==2.10.0
-torch_npu==2.10.0.post2
-torchvision==0.25.0
+# carries the same torch_npu 2.11.0 line. The server imports the venv copy.
+torch==2.11.0
+torch_npu==2.11.0
+torchvision==0.26.0
 # --- layer 2: the engine closure, installed over the image copies ---
 agent-detector==2.0.0
 aiofiles==25.1.0
@@ -123,8 +122,7 @@ sse-starlette==3.4.11
 starlette==0.50.0
 supervisor==4.3.0
 tokenizers==0.22.2
-torch_npu==2.10.0.post4
-torchaudio==2.10.0
+torchaudio==2.11.0
 transformers==5.5.4
 triton_ascend==3.2.2
 truststore==0.10.4

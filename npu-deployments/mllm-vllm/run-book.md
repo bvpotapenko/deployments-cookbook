@@ -16,27 +16,27 @@ seed arrives with the request; 42 is the convention.
 
 ## Environment
 
-The stack runs on CPython 3.12. An existing venv with these pins works;
-point `KOT_PYTHON` at it.
+One stack uses CPython 3.12, torch 2.11.0, torch_npu 2.11.0,
+torchvision 0.26.0 and torchcodec 0.17.0. The CANN image is 9.2.1.
 
 ```bash
 # networked host
 uv venv /scratch/kot-vllm-venv --python 3.12
 uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.32.0rc1"
-uv pip install --python /scratch/kot-vllm-venv/bin/python --no-deps \
-  "torchvision==0.29.0" --index-url https://download.pytorch.org/whl/cu130
-uv pip install --python /scratch/kot-vllm-venv/bin/python --no-deps torchcodec
+uv pip install --python /scratch/kot-vllm-venv/bin/python \
+  "torch==2.11.0" "torchvision==0.26.0" "torchcodec==0.17.0"
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-venv --python 3.12
 /scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.32.0rc1" "torchvision==0.29.0+cu130" "torchcodec==0.17.0"
+  --find-links ./wheels "vllm==0.32.0rc1" "torch==2.11.0" \
+  "torch_npu==2.11.0" "torchvision==0.26.0" "torchcodec==0.17.0"
 ```
 
 vLLM-Ascend 0.32.0rc1 uses the CANN 9.2.1 image and the torch_npu
-2.10.0.post2 platform stack. The matching aarch64 engine wheels carry the
-Qwen video processor and the NPU runtime.
+2.11.0 platform stack. TorchCodec 0.17.0 is built for this torch ABI. The
+matching aarch64 engine wheels carry the Qwen video processor and NPU runtime.
 
 `make_wheels.sh` builds the vLLM-Ascend 0.32.0rc1 closure for the Ascend
 platform. The exact pins live in `wheels-requirements.txt`; build the closure
