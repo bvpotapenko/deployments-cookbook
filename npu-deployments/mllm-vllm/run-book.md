@@ -1,6 +1,6 @@
 # Run Book: mllm-vllm
 
-This deployment serves Qwen/Qwen3.8-27B with vLLM-Ascend 0.32.0rc1 on Ascend 910B. The model runs the
+This deployment serves Qwen/Qwen3.8-27B with vLLM-Ascend 0.30.0 on Ascend 910B. The model runs the
 native `qwen3_5` architecture; the units are short videos. One process serves
 the full-vocabulary log-probability surface on one card, one request at a
 time.
@@ -16,29 +16,29 @@ seed arrives with the request; 42 is the convention.
 
 ## Environment
 
-One stack uses CPython 3.12, torch 2.11.0, torch_npu 2.11.0,
-torchvision 0.26.0 and torchcodec 0.17.0. The CANN image is 9.2.1.
+One stack uses CPython 3.12, torch 2.10.0, torch_npu 2.10.0.post7,
+torchvision 0.25.0 and torchcodec 0.17.0. The CANN image is 9.2.1.
 
 ```bash
 # networked host
 uv venv /scratch/kot-vllm-venv --python 3.12
-uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.32.0"
+uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.30.0"
 uv pip install --python /scratch/kot-vllm-venv/bin/python \
-  "torch==2.11.0" "torchvision==0.26.0" "torchcodec==0.17.0"
+  "torch==2.10.0" "torchvision==0.25.0" "torchcodec==0.17.0"
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
 uv venv --seed /scratch/kot-vllm-venv --python 3.12
 /scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.32.0" "torch==2.11.0" \
-  "torch_npu==2.11.0" "torchvision==0.26.0" "torchcodec==0.17.0"
+  --find-links ./wheels "vllm==0.30.0" "torch==2.10.0" \
+  "torch_npu==2.10.0.post7" "torchvision==0.25.0" "torchcodec==0.17.0"
 ```
 
-vLLM-Ascend 0.32.0rc1 uses the CANN 9.2.1 image and the torch_npu
-2.11.0 platform stack. TorchCodec 0.17.0 is built for this torch ABI. The
+vLLM-Ascend 0.30.0 uses the CANN 9.2.1 image and the torch_npu
+2.10.0.post7 platform stack. TorchCodec 0.17.0 is built for this torch ABI. The
 matching aarch64 engine wheels carry the Qwen video processor and NPU runtime.
 
-`make_wheels.sh` builds the vLLM-Ascend 0.32.0rc1 closure for the Ascend
+`make_wheels.sh` builds the vLLM-Ascend 0.30.0 closure for the Ascend
 platform, including the `torchcodec==0.17.0` wheel. The exact pins live in
 `wheels-requirements.txt`; the script fails unless all five platform wheels
 are present. Build the closure on a matching aarch64 host or from the

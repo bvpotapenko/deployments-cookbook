@@ -1,19 +1,19 @@
 # Two stacks, two layers; this file holds both.
 #
 # Layer 1, the image platform stack (the three pins directly below): the
-# Dockerfile installs them into the image. torch_npu 2.11.0 is the image pin;
+# Dockerfile installs them into the image. torch_npu 2.10.0.post7 is the image pin;
 # it serves the platform stack and the harness client.
 #
 # Layer 2, the engine closure (the compiled list that follows): the pip
-# resolution of vllm==0.32.0 + vllm-ascend==0.32.0rc1 inside the graded
+# resolution of vllm==0.30.0 + vllm-ascend==0.30.0 inside the graded
 # image's python 3.12 against its system site packages, verified on
 # ascend-910b. serve.sh builds the engine venv with
 # --system-site-packages and installs this closure over the image copies;
 # its pin batch excludes the layer-1 torch_npu pin by name, so the venv
-# carries the same torch_npu 2.11.0 line. The server imports the venv copy.
-torch==2.11.0
-torch_npu==2.11.0
-torchvision==0.26.0
+# carries the same torch_npu 2.10.0.post7 line. The server imports the venv copy.
+torch==2.10.0
+torch_npu==2.10.0.post7
+torchvision==0.25.0
 torchcodec==0.17.0
 # --- layer 2: the engine closure, installed over the image copies ---
 agent-detector==2.0.0
@@ -70,8 +70,8 @@ lm-format-enforcer==0.11.3
 loguru==0.7.3
 mcp==2.2.0
 mcp-types==2.2.0
-memcache_hybrid==1.2.0
-memfabric_hybrid==1.2.0
+memcache_hybrid==1.3.0
+memfabric_hybrid==1.3.0
 mistral_common==1.11.7
 model-hosting-container-standards==0.1.16
 msgpack==1.2.2
@@ -123,14 +123,14 @@ sse-starlette==3.4.11
 starlette==0.50.0
 supervisor==4.3.0
 tokenizers==0.22.2
-torchaudio==2.11.0
-transformers==5.5.4
-triton_ascend==3.2.2
+torchaudio==2.10.0
+transformers==5.14.1
+triton_ascend==3.6.0.post2
 truststore==0.10.4
 uvicorn==0.52.4
 vcs-versioning==2.4.0
-vllm==0.32.0
-vllm_ascend==0.32.0rc1
+vllm==0.30.0
+vllm_ascend==0.30.0
 watchfiles==1.2.0
 websockets==17.1
 Werkzeug==3.1.8

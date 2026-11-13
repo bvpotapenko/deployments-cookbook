@@ -18,8 +18,8 @@
 #   container -- a container cannot start another one.
 set -euo pipefail
 
-VLLM_PIN="0.32.0"
-VLLM_ASCEND_PIN="0.32.0rc1"
+VLLM_PIN="0.30.0"
+VLLM_ASCEND_PIN="0.30.0"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT="" MODEL="" DEVICE=""
@@ -159,7 +159,7 @@ find_python() {
     # refuse to resolve -- scipy 1.13.1 beside numpy 2.3.5 -- that the
     # runtime never touches, and resolution would fight them forever).
     # Excluded from the batch: torch and torchvision (the image's system
-    # copies satisfy the pins), torch_npu (the image carries the same 2.11.0
+    # copies satisfy the pins), torch_npu (the image carries the same 2.10.0.post7
     # line), and vllm itself (installed just above).
     PINS=$(grep -E '^[a-zA-Z0-9].*==' "$DIR/wheels-requirements.txt" \
       | grep -vE '^(torch==|torchvision==|torch_npu==|vllm==)')

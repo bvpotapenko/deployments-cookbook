@@ -94,7 +94,7 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 import numpy as np  # noqa: E402
 import vllm  # noqa: E402
 
-VLLM_PIN = "0.32.0"
+VLLM_PIN = "0.30.0"
 if not vllm.__version__.startswith(VLLM_PIN):
     sys.exit(
         f"this deployment is written against vllm {VLLM_PIN} (its logprobs tap "

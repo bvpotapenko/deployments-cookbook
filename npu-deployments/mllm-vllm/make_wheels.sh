@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Rebuild the offline wheel closure for this deployment (wheels/).
 #
-# The closure is the pip resolution of the engine pair (vllm==0.32.0 +
-# vllm-ascend==0.32.0rc1) inside the graded image's python 3.12 against its
+# The closure is the pip resolution of the engine pair (vllm==0.30.0 +
+# vllm-ascend==0.30.0) inside the graded image's python 3.12 against its
 # system site packages, verified on the ascend-910b box; plus the five
 # platform wheels the Dockerfile bakes in. serve.sh installs the engine
 # offline from wheels/ into /scratch at first start; the Dockerfile COPYs
@@ -63,10 +63,10 @@ rm -rf "$ARCTIC_SRC_DIR"
 # not report a usable closure when a large or architecture-specific wheel was
 # skipped by a mirror or was never copied into the wheelhouse.
 for pattern in \
-  'torch-2.11.0-*.whl' \
-  'torch_npu-2.11.0-*.whl' \
-  'torchvision-0.26.0-*.whl' \
-  'torchaudio-2.11.0-*.whl' \
+  'torch-2.10.0-*.whl' \
+  'torch_npu-2.10.0.post7-*.whl' \
+  'torchvision-0.25.0-*.whl' \
+  'torchaudio-2.10.0-*.whl' \
   'torchcodec-0.17.0-*.whl' \
   'arctic_inference-0.1.1-*.whl'
 do
