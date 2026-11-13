@@ -14,6 +14,7 @@
 torch==2.11.0
 torch_npu==2.11.0
 torchvision==0.26.0
+torchcodec==0.17.0
 # --- layer 2: the engine closure, installed over the image copies ---
 agent-detector==2.0.0
 aiofiles==25.1.0

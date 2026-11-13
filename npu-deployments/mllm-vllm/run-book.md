@@ -39,8 +39,10 @@ vLLM-Ascend 0.32.0rc1 uses the CANN 9.2.1 image and the torch_npu
 matching aarch64 engine wheels carry the Qwen video processor and NPU runtime.
 
 `make_wheels.sh` builds the vLLM-Ascend 0.32.0rc1 closure for the Ascend
-platform. The exact pins live in `wheels-requirements.txt`; build the closure
-on a matching aarch64 host or from the vLLM-Ascend source tree.
+platform, including the `torchcodec==0.17.0` wheel. The exact pins live in
+`wheels-requirements.txt`; the script fails unless all five platform wheels
+are present. Build the closure on a matching aarch64 host or from the
+vLLM-Ascend source tree before running `docker build` or an offline serve.
 
 Without `KOT_PYTHON`, and with no ambient vllm, the launcher runs the offline
 install itself, into `KOT_VENV`.

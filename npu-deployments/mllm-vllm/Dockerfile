@@ -33,6 +33,12 @@ RUN pip install --no-cache-dir --break-system-packages \
     /wheels/torch_npu-2.11.0-cp312-cp312-manylinux_2_28_aarch64.whl \
     /wheels/torchvision-0.26.0-cp312-cp312-manylinux_2_28_aarch64.whl
 
+# TorchCodec is part of the video ABI and must come from the same offline
+# wheelhouse; the base image is not an installation source.
+RUN pip install --no-cache-dir --break-system-packages \
+    --no-index --find-links /wheels \
+    "torchcodec==0.17.0"
+
 # family-llm.txt + the versions this deployment was verified with. The
 # harness's own dependency graph pins transformers==5.16.1, which overrides a
 # newer line here -- so the pin states exactly what the image ends up with.

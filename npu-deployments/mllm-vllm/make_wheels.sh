@@ -37,6 +37,22 @@ grep -E '^[a-zA-Z0-9].*==' "$REQ" | tr '[:upper:]' '[:lower:]' |
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     --only-binary=:all: --no-cache-dir -q
 
+# The Dockerfile and first-start venv both depend on this platform set. Do
+# not report a usable closure when a large or architecture-specific wheel was
+# skipped by a mirror or was never copied into the wheelhouse.
+for pattern in \
+  'torch-2.11.0-*.whl' \
+  'torch_npu-2.11.0-*.whl' \
+  'torchvision-0.26.0-*.whl' \
+  'torchaudio-2.11.0-*.whl' \
+  'torchcodec-0.17.0-*.whl'
+do
+  if ! compgen -G "$OUT/$pattern" >/dev/null; then
+    echo "missing required offline wheel: $pattern" >&2
+    exit 1
+  fi
+done
+
 echo "wheels in $OUT: $(ls "$OUT" | wc -l)"
 echo "pinned:        $(grep -cE '^[a-zA-Z0-9].*==' "$REQ")"
 echo "rerun this script until the two counts match (transient mirror timeouts)."
