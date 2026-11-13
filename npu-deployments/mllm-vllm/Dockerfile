@@ -61,8 +61,7 @@ RUN apt-get update \
 # host (spawn-mode services re-import the whole stack): service ready-check
 # 30s and tokenizer-shard warmup 25s both expire before the client starts.
 # Baked here so every fresh container inherits the working values.
-RUN python3 -c "p='/usr/local/python3.12.13/lib/python3.12/site-packages/inference_endpoint/config/schema.py'; s=open(p).read(); s=s.replace('service_ready_timeout_s: float = Field(\n        30.0,', 'service_ready_timeout_s: float = Field(\n        180.0,', 1); open(p,'w').write(s)" \
- && python3 -c "p='/usr/local/python3.12.13/lib/python3.12/site-packages/inference_endpoint/async_utils/services/metrics_aggregator/token_metrics.py'; s=open(p).read(); s=s.replace('_SHARD_WARMUP_TIMEOUT_S = 25.0', '_SHARD_WARMUP_TIMEOUT_S = 120.0', 1); open(p,'w').write(s)"
+RUN python3 -c "from pathlib import Path; import inference_endpoint; root=Path(inference_endpoint.__file__).parent; p=root/'config'/'schema.py'; s=p.read_text(); old='service_ready_timeout_s: float = Field(\n        30.0,'; new='service_ready_timeout_s: float = Field(\n        180.0,'; assert old in s, f'{p} does not contain the expected service timeout'; p.write_text(s.replace(old, new, 1)); p=root/'async_utils'/'services'/'metrics_aggregator'/'token_metrics.py'; s=p.read_text(); old='_SHARD_WARMUP_TIMEOUT_S = 25.0'; new='_SHARD_WARMUP_TIMEOUT_S = 120.0'; assert old in s, f'{p} does not contain the expected shard timeout'; p.write_text(s.replace(old, new, 1))"
 
 # kot's containers/Dockerfile sets this: container mode runs the kot runner
 # from the mounted repo (~/kot-current/kot -> /workspace/kot/kot). Kept LAST
