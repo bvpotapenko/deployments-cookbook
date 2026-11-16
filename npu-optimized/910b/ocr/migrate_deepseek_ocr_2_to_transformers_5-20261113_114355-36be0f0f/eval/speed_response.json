@@ -1,0 +1,131 @@
+{
+  "provenance": {
+    "deployment_sha": "7d886cb2543f2ad6ef2e219f27cef4294e594cc9ae095998aad67aad9157c1f4",
+    "device_id": "ascend910b-dev3",
+    "engine": "transformers 5.22.1",
+    "host": "0d6debc35f5d",
+    "image_digest": "sha256:2f45f2a5b620fe6f2f782070e8602c4197e0c56059781b34f9d4336567c64fae",
+    "model_dtype": "bfloat16",
+    "model_id": "deepseek-ai/DeepSeek-OCR-2",
+    "model_revision": "",
+    "platform_id": "ascend-910b",
+    "server": {
+      "contract_version": 1,
+      "device": "npu:0",
+      "driver_version": "26.1.1",
+      "dtype": "bfloat16",
+      "engine": "transformers 5.22.1",
+      "load_report": {
+        "bitwise_checked": 617,
+        "bitwise_mismatched": 0,
+        "checkpoint_tensor_count": 2707,
+        "dtype": "bfloat16",
+        "error_msgs": [],
+        "file_hashes": {
+          "config.json": "e2bb23b49b445f0bfd6eeb978bac9f19a2df82cb38472754e4ae83662d18f845",
+          "model-00001-of-000001.safetensors": "d8ff67a424ba6f4dd077885eb9d6a05d2537e76fe5491f0e2a9b712f8c8870fa"
+        },
+        "mismatched_keys": [],
+        "missing_keys": [],
+        "model_class": "DeepseekOcr2ForConditionalGeneration",
+        "native_tensor_count": 617,
+        "revision": "",
+        "transformers_version": "5.22.1",
+        "unexpected_keys": []
+      },
+      "model_dir": "/model",
+      "model_id": "model",
+      "model_revision": "",
+      "plugin_version": "2.10.0.post2",
+      "started_at": "2026-11-13T14:59:49+00:00",
+      "toolkit_version": "cann-9.2.1",
+      "torch_version": "2.10.0+cpu",
+      "vocab_size": 129280
+    },
+    "visible_devices": [],
+    "vocab_size": 129280
+  },
+  "results": [
+    {
+      "arrays": [],
+      "continues": "",
+      "n_generated": null,
+      "n_positions": 0,
+      "n_prompt": null,
+      "output_files": [
+        "mlc_endpoints/performance/result_summary.json"
+      ],
+      "prompt_id": "speed",
+      "received_dtype": "",
+      "speed": [
+        {
+          "dataset": "rvlcdip_2k",
+          "harness": "mlc_endpoints",
+          "log_path": "mlc_endpoints/performance/result_summary.json",
+          "metric_id": "throughput",
+          "scenario": "online-concurrency-client4",
+          "unit": "document/s",
+          "value": 0.09702207273142163
+        },
+        {
+          "dataset": "rvlcdip_2k",
+          "harness": "mlc_endpoints",
+          "log_path": "mlc_endpoints/performance/result_summary.json",
+          "metric_id": "latency_p50",
+          "scenario": "online-concurrency-client4",
+          "unit": "ms",
+          "value": 83657.239454
+        },
+        {
+          "dataset": "rvlcdip_2k",
+          "harness": "mlc_endpoints",
+          "log_path": "mlc_endpoints/performance/result_summary.json",
+          "metric_id": "latency_p95",
+          "scenario": "online-concurrency-client4",
+          "unit": "ms",
+          "value": 86311.681128
+        },
+        {
+          "dataset": "rvlcdip_2k",
+          "harness": "mlc_endpoints",
+          "log_path": "mlc_endpoints/performance/result_summary.json",
+          "metric_id": "latency_p99",
+          "scenario": "online-concurrency-client4",
+          "unit": "ms",
+          "value": 86312.730305
+        },
+        {
+          "dataset": "rvlcdip_2k",
+          "harness": "mlc_endpoints",
+          "log_path": "mlc_endpoints/performance/result_summary.json",
+          "metric_id": "tpot_p50",
+          "scenario": "online-concurrency-client4",
+          "unit": "ms",
+          "value": 382.3595194146342
+        },
+        {
+          "dataset": "rvlcdip_2k",
+          "harness": "mlc_endpoints",
+          "log_path": "mlc_endpoints/performance/result_summary.json",
+          "metric_id": "tpot_p95",
+          "scenario": "online-concurrency-client4",
+          "unit": "ms",
+          "value": 5225.692863133333
+        },
+        {
+          "dataset": "rvlcdip_2k",
+          "harness": "mlc_endpoints",
+          "log_path": "mlc_endpoints/performance/result_summary.json",
+          "metric_id": "tpot_p99",
+          "scenario": "online-concurrency-client4",
+          "unit": "ms",
+          "value": 40223.0301225
+        }
+      ],
+      "speed_absent": "",
+      "text": null,
+      "timing": {}
+    }
+  ],
+  "schema_version": "0.2"
+}
