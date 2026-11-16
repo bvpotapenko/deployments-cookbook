@@ -3,7 +3,7 @@
 #
 # The closure is the pip resolution of the engine pair (vllm==0.30.0 +
 # vllm-ascend==0.30.0) inside the graded image's python 3.12 against its
-# system site packages, verified on the ascend-910b box; plus the five
+# system site packages, verified on the ascend-910b box; plus the six
 # platform wheels the Dockerfile bakes in. serve.sh installs the engine
 # offline from wheels/ into /scratch at first start; the Dockerfile COPYs
 # the same directory for the image build.
@@ -31,13 +31,38 @@ REQ="$DIR/wheels-requirements.txt"
 OUT="${1:-$DIR/wheels}"
 mkdir -p "$OUT"
 
+case "$(uname -m)" in
+  aarch64) ;;
+  *) echo "TorchCodec 0.10 must be built on aarch64 (got $(uname -m))" >&2; exit 1 ;;
+esac
+
 grep -E '^[a-zA-Z0-9].*==' "$REQ" | tr '[:upper:]' '[:lower:]' |
   grep -v '^arctic_inference==' |
+  grep -v '^torchcodec==' |
   xargs -P 8 -n 1 -I{} pip download {} --no-deps \
     -d "$OUT" \
     -i https://mirrors.huaweicloud.com/repository/pypi/simple \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     --only-binary=:all: --no-cache-dir -q
+
+# Linux aarch64's published TorchCodec 0.10 wheel is CUDA-enabled, and the
+# CPU index has no 0.10 aarch64 artifact. Build the torch-2.10-compatible
+# release from source with CUDA disabled instead.
+if ! compgen -G "$OUT/torchcodec-0.10.0-*.whl" >/dev/null; then
+  TORCHCODEC_SRC_DIR="$OUT/.torchcodec-src"
+  mkdir -p "$TORCHCODEC_SRC_DIR"
+  pip download torchcodec==0.10.0 --no-deps --no-binary=:all: \
+    -d "$TORCHCODEC_SRC_DIR" -i https://pypi.org/simple --no-cache-dir -q
+  TORCHCODEC_SRC=$(echo "$TORCHCODEC_SRC_DIR"/torchcodec-0.10.0.tar.gz)
+  ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
+    pip wheel "$TORCHCODEC_SRC" --no-deps --no-build-isolation \
+      --no-cache-dir -w "$OUT" -q
+  rm -rf "$TORCHCODEC_SRC_DIR"
+fi
+if ! compgen -G "$OUT/torchcodec-0.10.0-*aarch64*.whl" >/dev/null; then
+  echo "missing aarch64 CPU-only TorchCodec 0.10.0 wheel" >&2
+  exit 1
+fi
 
 # The configured mirrors do not publish arctic_inference 0.1.1. Fetch the
 # small source archive directly, verify its immutable PyPI digest, and build
@@ -67,7 +92,7 @@ for pattern in \
   'torch_npu-2.10.0.post7-*.whl' \
   'torchvision-0.25.0-*.whl' \
   'torchaudio-2.10.0-*.whl' \
-  'torchcodec-0.16.0-*.whl' \
+  'torchcodec-0.10.0-*.whl' \
   'arctic_inference-0.1.1-*.whl'
 do
   if ! compgen -G "$OUT/$pattern" >/dev/null; then
