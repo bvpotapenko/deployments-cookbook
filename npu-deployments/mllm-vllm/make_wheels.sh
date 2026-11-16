@@ -36,10 +36,15 @@ case "$(uname -m)" in
   *) echo "TorchCodec 0.10 must be built on aarch64 (got $(uname -m))" >&2; exit 1 ;;
 esac
 
+# Do not let an older TorchCodec wheel in the active wheelhouse shadow the
+# matrix below. Historical wheelhouse directories are not used by this build.
+find "$OUT" -maxdepth 1 -type f -name 'torchcodec-*.whl' \
+  ! -name 'torchcodec-0.10.0-*' -delete
+
 grep -E '^[a-zA-Z0-9].*==' "$REQ" | tr '[:upper:]' '[:lower:]' |
   grep -v '^arctic_inference==' |
   grep -v '^torchcodec==' |
-  xargs -P 8 -n 1 -I{} pip download {} --no-deps \
+  xargs -P 8 -I{} pip download {} --no-deps \
     -d "$OUT" \
     -i https://mirrors.huaweicloud.com/repository/pypi/simple \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
@@ -50,10 +55,12 @@ grep -E '^[a-zA-Z0-9].*==' "$REQ" | tr '[:upper:]' '[:lower:]' |
 # release from source with CUDA disabled instead.
 if ! compgen -G "$OUT/torchcodec-0.10.0-*.whl" >/dev/null; then
   TORCHCODEC_SRC_DIR="$OUT/.torchcodec-src"
+  TORCHCODEC_SRC="$TORCHCODEC_SRC_DIR/torchcodec-0.10.0.tar.gz"
+  TORCHCODEC_URL="https://api.github.com/repos/meta-pytorch/torchcodec/tarball/v0.10.0"
+  TORCHCODEC_SHA256="104460ff4baef82365d27dbbb15f440ee5de852c444e8d5303454495f960fb54"
   mkdir -p "$TORCHCODEC_SRC_DIR"
-  pip download torchcodec==0.10.0 --no-deps --no-binary=:all: \
-    -d "$TORCHCODEC_SRC_DIR" -i https://pypi.org/simple --no-cache-dir -q
-  TORCHCODEC_SRC=$(echo "$TORCHCODEC_SRC_DIR"/torchcodec-0.10.0.tar.gz)
+  curl -fsSL --retry 10 --retry-all-errors -o "$TORCHCODEC_SRC" "$TORCHCODEC_URL"
+  echo "$TORCHCODEC_SHA256  $TORCHCODEC_SRC" | sha256sum -c -
   ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
     pip wheel "$TORCHCODEC_SRC" --no-deps --no-build-isolation \
       --no-cache-dir -w "$OUT" -q

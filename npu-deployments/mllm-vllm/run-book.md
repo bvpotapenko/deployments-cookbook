@@ -61,6 +61,12 @@ vLLM-Ascend source tree before running `docker build` or an offline serve.
 builder fetches its pinned source archive from PyPI, verifies it, and builds
 the wheel while the host is networked.
 
+Only `wheels/` is the active wheelhouse. Delete obsolete directories such as
+`wheels-030` and `wheels-032-backup`: they contain failed or superseded
+matrices, are not copied into the image, and cannot be used as rollbacks. The
+builder removes stale TorchCodec wheels from the active wheelhouse before
+rebuilding.
+
 The CPU-only TorchCodec choice is required on this image: the default Linux
 aarch64 wheel is CUDA-enabled and imports `libnvrtc.so.13`/`libcuda.so.1`.
 
@@ -70,7 +76,7 @@ install itself, into `KOT_VENV`.
 ### Layout
 
 ```text
-/opt/engines/mllm-vllm           this directory
+~/kot_deployments/npu-deployments/mllm-vllm  this directory
 /models/Qwen/Qwen3.8-27B         the weights; a hub snapshot directory
 ```
 
@@ -79,8 +85,8 @@ install itself, into `KOT_VENV`.
 ```bash
 rsync -a --partial -e "ssh -p $PORT" \
   --exclude __pycache__ --exclude .DS_Store \
-  ./mllm-vllm/ root@$HOST:/opt/engines/mllm-vllm/
-ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-vllm/*.sh'
+  ./mllm-vllm/ root@$HOST:/home/bogdan/kot_deployments/npu-deployments/mllm-vllm/
+ssh -p $PORT root@$HOST 'chmod +x /home/bogdan/kot_deployments/npu-deployments/mllm-vllm/*.sh'
 ```
 
 ### Start
@@ -250,7 +256,7 @@ The answer describes the video, and `usage.prompt_tokens` equals the count the
 score path computes for the same clip:
 
 ```bash
-cd /opt/engines/mllm-vllm && /scratch/kot-vllm-venv/bin/python -c '
+cd /home/bogdan/kot_deployments/npu-deployments/mllm-vllm && /scratch/kot-vllm-venv/bin/python -c '
 import kot_serve
 kot_serve._MODEL_DIR = "/models/Qwen/Qwen3.8-27B"
 print(len(kot_serve._expanded_template_ids("/inputs/video.mp4")))'
