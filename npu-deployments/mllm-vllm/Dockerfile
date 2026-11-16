@@ -41,7 +41,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake ninja-build \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir --break-system-packages "setuptools>=61" wheel
-RUN ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
+RUN TORCH_DEVICE_BACKEND_AUTOLOAD=0 ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
     pip wheel /wheels/torchcodec-0.10.0.tar.gz --no-deps \
       --no-build-isolation --no-cache-dir -w /wheels \
     && pip install --no-cache-dir --break-system-packages \
