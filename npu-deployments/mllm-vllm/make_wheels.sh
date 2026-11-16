@@ -54,20 +54,14 @@ grep -E '^[a-zA-Z0-9].*==' "$REQ" | tr '[:upper:]' '[:lower:]' |
 # CPU index has no 0.10 aarch64 artifact. Build the torch-2.10-compatible
 # release from source with CUDA disabled instead.
 if ! compgen -G "$OUT/torchcodec-0.10.0-*.whl" >/dev/null; then
-  TORCHCODEC_SRC_DIR="$OUT/.torchcodec-src"
-  TORCHCODEC_SRC="$TORCHCODEC_SRC_DIR/torchcodec-0.10.0.tar.gz"
+  TORCHCODEC_SRC="$OUT/torchcodec-0.10.0.tar.gz"
   TORCHCODEC_URL="https://api.github.com/repos/meta-pytorch/torchcodec/tarball/v0.10.0"
   TORCHCODEC_SHA256="104460ff4baef82365d27dbbb15f440ee5de852c444e8d5303454495f960fb54"
-  mkdir -p "$TORCHCODEC_SRC_DIR"
   curl -fsSL --retry 10 --retry-all-errors -o "$TORCHCODEC_SRC" "$TORCHCODEC_URL"
   echo "$TORCHCODEC_SHA256  $TORCHCODEC_SRC" | sha256sum -c -
-  ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
-    pip wheel "$TORCHCODEC_SRC" --no-deps --no-build-isolation \
-      --no-cache-dir -w "$OUT" -q
-  rm -rf "$TORCHCODEC_SRC_DIR"
 fi
-if ! compgen -G "$OUT/torchcodec-0.10.0-*aarch64*.whl" >/dev/null; then
-  echo "missing aarch64 CPU-only TorchCodec 0.10.0 wheel" >&2
+if [[ ! -s "$OUT/torchcodec-0.10.0.tar.gz" ]]; then
+  echo "missing verified TorchCodec 0.10.0 source archive" >&2
   exit 1
 fi
 
@@ -99,7 +93,6 @@ for pattern in \
   'torch_npu-2.10.0.post7-*.whl' \
   'torchvision-0.25.0-*.whl' \
   'torchaudio-2.10.0-*.whl' \
-  'torchcodec-0.10.0-*.whl' \
   'arctic_inference-0.1.1-*.whl'
 do
   if ! compgen -G "$OUT/$pattern" >/dev/null; then

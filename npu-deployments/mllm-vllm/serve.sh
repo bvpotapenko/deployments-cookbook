@@ -162,7 +162,7 @@ find_python() {
     # copies satisfy the pins), torch_npu (the image carries the same 2.10.0.post7
     # line), and vllm itself (installed just above).
     PINS=$(grep -E '^[a-zA-Z0-9].*==' "$DIR/wheels-requirements.txt" \
-      | grep -vE '^(torch==|torchvision==|torch_npu==|vllm==)')
+      | grep -vE '^(torch==|torchvision==|torch_npu==|torchcodec==|vllm==)')
     if [ -x "$DIR/bin/uv" ]; then
       # Vendored uv: seconds instead of minutes, no network touched.
       "$DIR/bin/uv" pip install --python "$venv/bin/python" --offline --no-cache \
