@@ -34,11 +34,18 @@ RUN pip install --no-cache-dir --break-system-packages \
     /wheels/torchvision-0.25.0-cp312-cp312-manylinux_2_28_aarch64.whl \
     /wheels/torchaudio-2.10.0-cp312-cp312-manylinux_2_28_aarch64.whl
 
-# TorchCodec is part of the video ABI and must come from the same offline
-# wheelhouse; the base image is not an installation source.
-RUN pip install --no-cache-dir --break-system-packages \
-    --no-index --find-links /wheels \
-    "torchcodec==0.10.0"
+# TorchCodec 0.10 imports torch during setup, so build it inside this image
+# after the matching NPU torch is installed. The host wheel builder only
+# fetches and verifies the source archive.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake ninja-build \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --break-system-packages "setuptools>=61" wheel
+RUN ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
+    pip wheel /wheels/torchcodec-0.10.0.tar.gz --no-deps \
+      --no-build-isolation --no-cache-dir -w /wheels \
+    && pip install --no-cache-dir --break-system-packages \
+      --no-index --find-links /wheels "torchcodec==0.10.0"
 
 # family-llm.txt + the versions this deployment was verified with. The
 # harness's own dependency graph pins transformers==5.16.1, which overrides a

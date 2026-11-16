@@ -25,29 +25,21 @@ wheel. The CANN image is 9.2.1.
 | host | 8 x Ascend 910B2, `npu-smi 26.1.1` | host installation |
 | CANN | 9.2.1, Ubuntu 22.04, CPython 3.12 | `quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12-devel` |
 | vLLM / vLLM-Ascend | 0.30.0 / 0.30.0 | Huawei PyPI mirrors in `make_wheels.sh` |
-| TorchCodec | 0.10.0 CPU-only aarch64 wheel | built from the PyPI sdist by `make_wheels.sh` with `ENABLE_CUDA=OFF` |
+| TorchCodec | 0.10.0 CPU-only aarch64 wheel | source fetched by `make_wheels.sh`; built inside the Docker image with `ENABLE_CUDA=OFF` |
 
 ```bash
-# networked host
-uv venv /scratch/kot-vllm-venv --python 3.12
-uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.30.0"
-uv pip install --python /scratch/kot-vllm-venv/bin/python \
-  "torch==2.10.0" "torchvision==0.25.0"
-# Build the CPU-only TorchCodec wheel with make_wheels.sh below; do not use
-# the default Linux aarch64 binary, which links CUDA.
-
-# offline host: build the closure, then install from it
+# The host only downloads wheels and the TorchCodec source archive. It does
+# not install torch, torch_npu, torchvision, or TorchCodec.
 ./make_wheels.sh
-uv venv --seed /scratch/kot-vllm-venv --python 3.12
-/scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
-  --find-links ./wheels "vllm==0.30.0" "torch==2.10.0" \
-  "torch_npu==2.10.0.post7" "torchvision==0.25.0" \
-  "torchaudio==2.10.0" "torchcodec==0.10.0"
+
+# Build the image. It installs one exact torch platform stack, then builds
+# and installs TorchCodec against that stack.
+docker build -t kot-mllm-ascend-910b:latest .
 ```
 
 vLLM-Ascend 0.30.0 uses the CANN 9.2.1 image and the torch_npu
 2.10.0.post7 platform stack. TorchCodec 0.10.0 is the release line paired
-with torch 2.10.0. On Linux aarch64, `make_wheels.sh` builds it from source
+with torch 2.10.0. On Linux aarch64, the Docker build compiles it from source
 with CUDA disabled; the default binary wheel selects CUDA and requires
 libnvrtc/libcuda.
 matching aarch64 engine wheels carry the Qwen video processor and NPU runtime.
@@ -57,6 +49,9 @@ platform, including the CPU-only `torchcodec==0.10.0` wheel. The exact pins live
 `wheels-requirements.txt`; the script fails unless all six platform wheels
 are present. Build the closure on a matching aarch64 host or from the
 vLLM-Ascend source tree before running `docker build` or an offline serve.
+`torchcodec==0.10.0` is fetched from its verified upstream release archive by
+`make_wheels.sh`, then built inside the Docker image after the matching torch
+stack is installed, with CUDA disabled.
 `arctic_inference==0.1.1` has no wheel on the configured mirror, so the
 builder fetches its pinned source archive from PyPI, verifies it, and builds
 the wheel while the host is networked.
