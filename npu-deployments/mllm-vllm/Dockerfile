@@ -38,10 +38,17 @@ RUN pip install --no-cache-dir --break-system-packages \
 # after the matching NPU torch is installed. The host wheel builder only
 # fetches and verifies the source archive.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake ninja-build \
+    && apt-get install -y --no-install-recommends \
+      cmake ninja-build pkg-config ffmpeg \
+      libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+      libavutil-dev libswresample-dev libswscale-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir --break-system-packages "setuptools>=61" wheel
-RUN TORCH_DEVICE_BACKEND_AUTOLOAD=0 ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
+    && pip install --no-cache-dir --break-system-packages \
+      "setuptools>=61" wheel pybind11
+RUN CMAKE_PREFIX_PATH="$(python -m pybind11 --cmakedir):${CMAKE_PREFIX_PATH:-}" \
+    BUILD_VERSION=0.10.0 TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 \
+    ENABLE_CUDA=OFF TORCHCODEC_BUILD_IMAGE=ON \
     pip wheel /wheels/torchcodec-0.10.0.tar.gz --no-deps \
       --no-build-isolation --no-cache-dir -w /wheels \
     && pip install --no-cache-dir --break-system-packages \

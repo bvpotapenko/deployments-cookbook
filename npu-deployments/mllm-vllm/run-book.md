@@ -25,7 +25,8 @@ wheel. The CANN image is 9.2.1.
 | host | 8 x Ascend 910B2, `npu-smi 26.1.1` | host installation |
 | CANN | 9.2.1, Ubuntu 22.04, CPython 3.12 | `quay.io/ascend/cann:9.2.1-910b-ubuntu22.04-py3.12-devel` |
 | vLLM / vLLM-Ascend | 0.30.0 / 0.30.0 | Huawei PyPI mirrors in `make_wheels.sh` |
-| TorchCodec | 0.10.0 CPU-only aarch64 wheel | source fetched by `make_wheels.sh`; built inside the Docker image with `ENABLE_CUDA=OFF` |
+| TorchCodec | 0.10.0 CPU-only aarch64 wheel | source fetched by `make_wheels.sh`; built inside the Docker image against Ubuntu FFmpeg with `ENABLE_CUDA=OFF` |
+| Flash Linear Attention NPU | 26.10.0 A2 aarch64 wheel | `flash-linear-attention-npu-a2` from the Ascend mirror; provides `fla_npu` for Qwen3.8's gated-delta attention |
 
 ```bash
 # The host only downloads wheels and the TorchCodec source archive. It does
@@ -51,7 +52,18 @@ are present. Build the closure on a matching aarch64 host or from the
 vLLM-Ascend source tree before running `docker build` or an offline serve.
 `torchcodec==0.10.0` is fetched from its verified upstream release archive by
 `make_wheels.sh`, then built inside the Docker image after the matching torch
-stack is installed, with CUDA disabled.
+stack is installed. The image installs Ubuntu FFmpeg development libraries and
+`pkg-config`; TorchCodec links the system FFmpeg selected by pkg-config with
+`ENABLE_CUDA=OFF`. The build sets
+`TORCH_DEVICE_BACKEND_AUTOLOAD=0` so importing torch for setup does not load
+the Ascend backend before the runtime library path is configured, and sets
+`I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1` as required by TorchCodec's
+wheel-build guard. The host does not install any torch package. Qwen3.8 uses
+the gated-delta attention path; `make_wheels.sh` therefore also fetches
+`flash-linear-attention-npu-a2==26.10.0` from the configured Ascend mirror and
+`serve.sh` installs it into the same offline venv as vLLM-Ascend.
+The NPU launcher sets `VLLM_WORKER_MULTIPROC_METHOD=spawn`; the default fork
+mode would try to reinitialize Ascend's NPU runtime in the engine child.
 `arctic_inference==0.1.1` has no wheel on the configured mirror, so the
 builder fetches its pinned source archive from PyPI, verifies it, and builds
 the wheel while the host is networked.
@@ -116,7 +128,7 @@ every capture carries its own.
 | `KOT_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
 | `KOT_VENV` | `/scratch/kot-vllm-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-venv` |
 | `KOT_VLLM_NPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under even a 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
-| `KOT_VLLM_MAX_MODEL_LEN` | `24576` | the window: a video prompt up to the pixel budget (12,288 video tokens plus the template) plus the 8192-token decode. vLLM checks only the prompt against it and caps the output at the window without an error; the server then refuses a decode with `allow_eos` false that is short of `max_new_tokens` |
+| `KOT_VLLM_MAX_MODEL_LEN` | `8192` | the safe one-card window: the 27B checkpoint consumes about 51 GiB of a 64 GiB card, so a 24,576-token KV cache cannot fit. Raise it explicitly on a larger-memory or tensor-parallel launch |
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | the chunk size of every prefill, shared by capture and speed. The size is part of the numerics and is reported in `/kot/info` |
 | `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (an 8,192-row tail is 32 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
 | `KOT_VLLM_MAX_NUM_SEQS` | `4` | the Ascend-graph profiling KV and the capture sizes scale with the concurrent-request count; the API-server default asks for too much temporary KV during boot |
