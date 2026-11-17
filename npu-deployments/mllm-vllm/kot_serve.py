@@ -808,12 +808,14 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     args.served_model_name = [model_id, model]
     # One video per request.
     args.limit_mm_per_prompt = {"video": 1}
-    # The video units run prompts up to ~12.4k tokens (the checkpoint's pixel
-    # budget allows 12,288 video tokens, plus the template) and an 8192-token
-    # decode; the window covers both with room. vLLM checks only the prompt
-    # against it and caps the output at the window without an error.
-    args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "24576"))
-    args.additional_config = {"runtime_report_dir": "/tmp/kot-vllm-runtime"}
+    # This 27B checkpoint consumes about 51 GiB on a 64 GiB card, leaving
+    # enough KV cache for an 8192-token one-card launch. Larger cards or
+    # tensor-parallel runs can raise the window explicitly with the env var.
+    args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "8192"))
+    # vLLM 0.30.0 rejects this newer runtime-report key while constructing
+    # ``VllmConfig``.  The deployment does not consume that directory, so
+    # leave the version-specific option unset and keep the pinned stack
+    # compatible.
     # The chunk size of every prefill. Under the V2 runner the score path
     # has no full-vocab gather, so the #29 budget that forced 128 is void:
     # 2048 is vLLM's API-server default for this card class and serves both
@@ -990,6 +992,12 @@ def main() -> int:
     parser.add_argument("--device", default="cuda", help="torch device string from the platform row")
     cli = parser.parse_args()
     _MODEL_DIR = cli.model
+
+    # vLLM defaults to fork when no CUDA context has initialized the parent.
+    # Ascend's runtime cannot be reinitialized in a forked worker, so the NPU
+    # path must use a clean interpreter for each engine process.
+    if cli.device.startswith("npu"):
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     _install_logprobs_tap()
     model_id, model_revision = _resolve_identity(cli.model)

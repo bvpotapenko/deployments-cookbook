@@ -17,6 +17,9 @@
 # - vllm itself is the 266MB pypi aarch64 wheel; fetch it separately with
 #   curl -sfC - --retry if pip's download stalls (it is just a pinned name
 #   in wheels-requirements.txt).
+# - flash-linear-attention-npu-a2 supplies the fla_npu kernels required by
+#   Qwen3.5/Qwen3.8's gated-delta attention path. It is published on the
+#   configured Ascend mirror, so the box never needs GitHub access.
 # - arctic_inference==0.1.1 ships only an sdist and is absent from the
 #   configured mirrors. The special-case below fetches that pinned sdist from
 #   PyPI, verifies it, and builds the wheel locally.
@@ -40,6 +43,8 @@ esac
 # matrix below. Historical wheelhouse directories are not used by this build.
 find "$OUT" -maxdepth 1 -type f -name 'torchcodec-*.whl' \
   ! -name 'torchcodec-0.10.0-*' -delete
+find "$OUT" -maxdepth 1 -type f -name 'flash_linear_attention_npu_a2-*.whl' \
+  ! -name 'flash_linear_attention_npu_a2-26.10.0-*' -delete
 
 grep -E '^[a-zA-Z0-9].*==' "$REQ" | tr '[:upper:]' '[:lower:]' |
   grep -v '^arctic_inference==' |
@@ -93,6 +98,7 @@ for pattern in \
   'torch_npu-2.10.0.post7-*.whl' \
   'torchvision-0.25.0-*.whl' \
   'torchaudio-2.10.0-*.whl' \
+  'flash_linear_attention_npu_a2-26.10.0-*.whl' \
   'arctic_inference-0.1.1-*.whl'
 do
   if ! compgen -G "$OUT/$pattern" >/dev/null; then
