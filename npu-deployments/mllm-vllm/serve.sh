@@ -36,6 +36,12 @@ while [ $# -gt 0 ]; do
 done
 : "${PORT:?--port is required}" "${MODEL:?--model is required}" "${DEVICE:?--device is required}"
 
+# The documented one-card profile must cover the long video contract. Keep
+# these defaults in the launcher so host wrapping and direct container starts
+# pass the same values into the engine. Both remain explicit overrides.
+export KOT_VLLM_GPU_MEM="${KOT_VLLM_GPU_MEM:-0.99}"
+export KOT_VLLM_MAX_MODEL_LEN="${KOT_VLLM_MAX_MODEL_LEN:-24576}"
+
 # The speed harness opens thousands of pooled connections at once; vLLM adds
 # its ZMQ sockets and shm handles on top. The docker default soft limit (1024)
 # kills the engine core mid-benchmark with "Too many open files". A process
@@ -43,6 +49,17 @@ done
 ULIMIT_SOFT=$(ulimit -Sn) ULIMIT_HARD=$(ulimit -Hn)
 if [ "$ULIMIT_HARD" -gt "$ULIMIT_SOFT" ] 2>/dev/null; then
   ulimit -n "$ULIMIT_HARD" 2>/dev/null || ulimit -n 65536 2>/dev/null || true
+fi
+
+# Configure the image runtime before probing torch_npu. The CANN setup can
+# leave the ATB libraries out of LD_LIBRARY_PATH even though they are
+# installed in the image. Keep the runtime path explicit so torch_npu's
+# libop_plugin_atb.so is loadable by the EngineCore child.
+source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
+ATB_HOME_PATH="${ATB_HOME_PATH:-/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1}"
+if [[ -d "$ATB_HOME_PATH/lib" ]]; then
+  export ATB_HOME_PATH
+  export LD_LIBRARY_PATH="$ATB_HOME_PATH/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
 if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
@@ -123,6 +140,25 @@ if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
       DOCKER_ARGS+=(-v "${KOT_VENV}:${KOT_VENV}")
     fi
   fi
+
+  # Forward engine tuning knobs into the image. Without this, a host-mode
+  # launch silently falls back to kot_serve.py defaults because the inner
+  # shell has a fresh environment.
+  for variable in \
+    KOT_VLLM_GPU_MEM \
+    KOT_VLLM_MAX_MODEL_LEN \
+    KOT_VLLM_MAX_BATCHED_TOKENS \
+    KOT_VLLM_MAX_NUM_SEQS \
+    KOT_VLLM_REPLAY_SEGMENT_ROWS \
+    KOT_VLLM_REQUEST_TIMEOUT \
+    KOT_VLLM_MOE_BACKEND \
+    KOT_VLLM_DTYPE \
+    KOT_VLLM_COMPILATION
+  do
+    if [[ -n "${!variable:-}" ]]; then
+      DOCKER_ARGS+=(-e "$variable=${!variable}")
+    fi
+  done
   exec docker run "${DOCKER_ARGS[@]}" "$IMAGE" bash -c '
     source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
     exec bash /deployment/serve.sh --port '"$PORT"' --model '"$MODEL"' --device '"$DEVICE"'
@@ -181,9 +217,9 @@ find_python() {
   printf '%s' "$venv/bin/python"
 }
 
-source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 PY="$(find_python)"
 echo "[kot-vllm] python: $PY" >&2
+"$PY" "$DIR/patch_vllm_ascend_logprob.py" >&2
 "$PY" -c "import vllm, torch_npu; assert vllm.__version__.startswith('$VLLM_PIN'), vllm.__version__" >&2
 
 exec "$PY" "$DIR/kot_serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

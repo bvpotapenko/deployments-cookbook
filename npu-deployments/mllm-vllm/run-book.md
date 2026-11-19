@@ -64,6 +64,19 @@ the gated-delta attention path; `make_wheels.sh` therefore also fetches
 `serve.sh` installs it into the same offline venv as vLLM-Ascend.
 The NPU launcher sets `VLLM_WORKER_MULTIPROC_METHOD=spawn`; the default fork
 mode would try to reinitialize Ascend's NPU runtime in the engine child.
+
+The CANN setup script may omit the ATB library directory from
+`LD_LIBRARY_PATH`. `serve.sh` restores the image's ATB path before importing
+the serving stack. This is required for `torch_npu`'s
+`libop_plugin_atb.so` and must remain in the launcher rather than depending on
+an interactive shell environment.
+The vLLM-Ascend 0.30.0 wheel carries an older full-vocabulary log-probability
+Triton tile than the matching vLLM sampler. On 910B2 that tile exceeds the
+unified buffer when `/kot/score` requests all 248,320 vocabulary entries.
+`serve.sh` applies `patch_vllm_ascend_logprob.py` after installing the pinned
+wheel. The patch keeps the same fp32 log-softmax calculation while emitting
+the requested entries in 1,024-entry tiles. It checks the expected source
+shape and fails if a future wheel changes it.
 `arctic_inference==0.1.1` has no wheel on the configured mirror, so the
 builder fetches its pinned source archive from PyPI, verifies it, and builds
 the wheel while the host is networked.
@@ -108,12 +121,11 @@ The model uses one visible Ascend 910B card. Set
 `ASCEND_RT_VISIBLE_DEVICES=0`; the engine then uses TP=1. The first boot
 compiles the engine; a warm compile cache makes the second boot faster.
 
-One launch profile serves both surfaces. Under the V2 runner the score path
-has no full-vocab gather, so the capture surfaces no longer need a small
-chunk: the API-server default (2048) fits the replay's memory budget with
-the same margin as 128 did, and capture and speed share chunk shapes.
-Measured at 2048: the 64-row probe replay completes in ~2.8 s engine time,
-the 4,096-row segmented replay in ~118 s wall, byte-identical across runs.
+One launch profile serves both surfaces. The checked one-card profile uses
+`KOT_VLLM_GPU_MEM=0.99`, `KOT_VLLM_MAX_MODEL_LEN=24576`, and V1's native
+full-vocabulary prompt-logprob path. V1 computes those rows in bounded 256
+token chunks, which keeps the temporary NPU logits and log-softmax buffers
+under the one-card headroom. The same chunk size is used by capture and speed.
 
 The chunk size is part of the numerics: a chunked prefill splits the
 attention and GatedDeltaNet state passes at chunk boundaries, so rows
@@ -127,9 +139,9 @@ every capture carries its own.
 |---|---|---|
 | `KOT_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
 | `KOT_VENV` | `/scratch/kot-vllm-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-venv` |
-| `KOT_VLLM_NPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under even a 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
-| `KOT_VLLM_MAX_MODEL_LEN` | `8192` | the safe one-card window: the 27B checkpoint consumes about 51 GiB of a 64 GiB card, so a 24,576-token KV cache cannot fit. Raise it explicitly on a larger-memory or tensor-parallel launch |
-| `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | the chunk size of every prefill, shared by capture and speed. The size is part of the numerics and is reported in `/kot/info` |
+| `KOT_VLLM_GPU_MEM` | `0.99` | `gpu_memory_utilization`; this is the checked one-card profile for the long-video contract. Lower values remain available for smaller requests |
+| `KOT_VLLM_MAX_MODEL_LEN` | `24576` | the checked one-card context window for the long-video contract |
+| `KOT_VLLM_MAX_BATCHED_TOKENS` | `256` | the V1 full-vocabulary prompt-logprob chunk size. The size is part of the numerics and is reported in `/kot/info` |
 | `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (an 8,192-row tail is 32 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
 | `KOT_VLLM_MAX_NUM_SEQS` | `4` | the Ascend-graph profiling KV and the capture sizes scale with the concurrent-request count; the API-server default asks for too much temporary KV during boot |
 | `KOT_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
@@ -141,36 +153,21 @@ every capture carries its own.
 
 ### Host memory
 
-The V2 runner removed the V1 floor: no full-prompt pinned buffer, no
-full-prompt message, no top-k. The measured host peak during a 4,096-row
-replay was 56.5 GiB against the container's 120.7 GiB limit (V1 needed
-~122 GiB at the final relay and the cgroup OOM-killed the server). The
-server holds one block of 256 decode steps, or one replay segment, at a
-time. Each one goes into `log_probs.npy` through a memmap at the final
-shape, and then the server releases it.
+The V1 tap keeps only the latest full-vocabulary tensor chunk for each
+segment. The final rows are copied into a final-shape `log_probs.npy` memmap,
+then the segment tensors are released before the next segment starts. This
+keeps the host relay bounded by one 256-token chunk plus the output file.
 
-### The V2 runner
+### Replay implementation
 
-The launcher pins `VLLM_USE_V2_MODEL_RUNNER=1`. The replay scores only the
-tail rows against fixed token ids (`prompt_logprob_token_ids` +
-`prompt_logprob_start`): the engine keeps `[rows, vocab]` ids, mask and
-scores on the GPU at ~3.08 MiB per row from the first chunk to the last,
-so a long tail arrives as segments of at most `KOT_VLLM_REPLAY_SEGMENT_ROWS`
-(default 256: the measured 2,431 MiB free with a request in flight shrinks
-by ~3.08 MiB per tail row, and the video encoder asks up to ~1.2 GiB more
-during the prefill - 640 rows OOMs it, measured; a 4,096-row tail is 16
-segments). Each segment re-feeds the prompt and the video, cut off right after its last scored token -
-causality makes the cut exact. Segment boundaries change the last chunk's
-shapes, so replay rows are reproducible only at a fixed segment size;
-`/kot/info` reports both the chunk size and the segment size, and every
-capture carries its own. The 64-row probe replay completes in ~6 s end to
-end. The deployment computes the expanded prompt length through the
-checkpoint's own HF processor (cached per video, the same pins including
-the per-frame pixel cap) and verifies the engine's expansion against it,
-so the absolute start index cannot drift. The rows arrive already
-scattered, `[rows, vocab]` float32 in token-id order. The scores come from
-a Triton fp32 kernel, not torch `log_softmax`: expect different low-order
-bits from the V1 mechanism.
+The launcher selects vLLM's V1 runner because vLLM-Ascend 0.30.0 rejects the
+newer V2-only `prompt_logprob_token_ids` and `prompt_logprob_start` arguments.
+Replay requests use native `prompt_logprobs=-1`, which asks vLLM for the full
+vocabulary in the pinned version. Each segment re-feeds the prompt and video,
+cut off immediately after its final scored token. Causality makes the cut
+exact. The engine's expanded prompt length is checked against the checkpoint's
+HF processor on every segment. The rows are scattered into token-id order as
+`float32` arrays before they are written.
 
 ## Video contract
 
@@ -210,6 +207,13 @@ python3 self_check.py --deployment . \
 ```
 
 It checks `/kot/info`, video decode, replay prefill, and both chat modes.
+
+On the Ascend 910B2 box, independent one-card `0.99 / 24576` servers passed
+the long-video checks on 2026-11-18. The decode request for
+`video_10014.mp4` returned HTTP 200 with 16 finite `float32` rows shaped
+`(16, 248320)`. In parallel, a 1,024-row replay returned HTTP 200 and wrote
+finite `float32` scores for all requested rows. Both paths used the normal
+`serve.sh` entry point and the same image and pinned wheel set.
 Stop an existing server first.
 
 The identity surface answers with the engine's own facts:
