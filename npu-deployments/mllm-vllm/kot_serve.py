@@ -74,15 +74,10 @@ from pathlib import Path
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 # Only "1" turns off vLLM's usage report, so an ambient value must not win.
 os.environ["VLLM_NO_USAGE_STATS"] = "1"
-# The V2 model runner is the replay path: its tail scoring
-# (prompt_logprob_token_ids + prompt_logprob_start) scores only the kept
-# rows, with no top-k and no full-prompt buffer. The old pin-off reason -
-# the V2 prompt_logprob path accumulating the whole prompt's top-k on the
-# GPU - no longer applies: the replay never requests prompt_logprobs. The
-# decode tap's per-step tensors work under both runners (verified
-# byte-identical). The launcher exports 1; this setdefault covers a direct
-# python launch.
-os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "1")
+# vLLM 0.30.0's V2 Ascend runner rejects prompt logprobs. Replay uses the
+# pinned V1 prompt-logprob implementation with prompt_logprobs=-1, which
+# requests the complete vocabulary and returns raw tensors for our tap.
+os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
 # torch 2.14's triton refuses the non-constexpr globals vLLM's kernels read
 # (LOG2E et al.); triton's own documented escape hatch for exactly this.
 os.environ.setdefault("TRITON_ALLOW_NON_CONSTEXPR_GLOBALS", "1")
@@ -160,24 +155,10 @@ faulthandler.register(signal.SIGUSR1, all_threads=True)
 # raw tensors. Only score requests (SCORE_PREFIX) are registered.
 SINKS: dict[str, LogprobsProcessor] = {}
 
-# The V2 model runner (VLLM_USE_V2_MODEL_RUNNER=1, exported by the
-# launcher and defaulted at the module level) scores only the tail rows
-# against fixed token ids (prompt_logprob_token_ids + prompt_logprob_start):
-# no top-k, no full-prompt pinned buffer, and the rows arrive on
-# RequestOutput.prompt_token_id_logprobs as [rows, vocab] float32 in
-# token-id order - already scattered, no permutation to undo.
-
-# The GPU holds [rows, vocab] ids, mask and scores for the whole tail from
-# the first chunk to the last (~3.08 MiB per row at this vocabulary), so a
-# long tail arrives as several requests of at most this many rows. Fixed,
-# not derived: segment boundaries change the last chunk's shapes, so rows
-# are reproducible only at a fixed segment size. The budget: the measured
-# free memory with a 64-row request in flight is 2,431 MiB, and every row
-# above 64 takes another ~3.08 MiB, so free_at_N = 2431 - (N-64) x 3.08 MiB.
-# The video encoder asks up to ~1.2 GiB more during the prefill (measured:
-# 640 rows OOM it - a 1.19 GiB allocation fails with ~0.66 GiB left), so
-# 256 rows keeps ~1.8 GiB free: the transient fits with margin. The env
-# override is for experiments; captures run at the default.
+# V1 computes full-vocabulary prompt logprobs in chunks. Replay still feeds a
+# bounded tail segment at a time so retained tensors and the final mmap stay
+# bounded. Segment size is part of the replay numerics and is reported in
+# /kot/info.
 REPLAY_SEGMENT_ROWS = int(os.environ.get("KOT_VLLM_REPLAY_SEGMENT_ROWS", "256"))
 
 
@@ -195,18 +176,21 @@ def _install_logprobs_tap() -> None:
     def from_new_request(cls, tokenizer, request):
         processor = original_from_new_request(cls, tokenizer, request)
         processor.kot_sample_lists = []
+        processor.kot_prompt_lists = []
         rid = getattr(request, "request_id", "?")
         if rid.startswith(SCORE_PREFIX):
             SINKS[rid] = processor
         return processor
 
     def update_from_output(self, output):
-        # The V2 runner's tail scores ride this field; vLLM's own
-        # update_from_output would move it onto the processor, and the
-        # RequestOutput reads it from there. Without the passthrough the
-        # field arrives as None.
-        if getattr(output, "prompt_token_id_logprobs", None) is not None:
-            self.prompt_token_id_logprobs = output.prompt_token_id_logprobs.numpy()
+        # Keep V1's raw prompt tensors. The stock method expands every
+        # vocabulary entry into Python Logprob objects, which is unnecessary
+        # for the contract and too expensive at this vocabulary size.
+        if getattr(output, "new_prompt_logprobs_tensors", None) is not None:
+            # The final engine output contains the tail rows needed by this
+            # segment. Keep only that latest chunk instead of retaining the
+            # complete prompt's full-vocabulary tensors in host memory.
+            self.kot_prompt_lists = [output.new_prompt_logprobs_tensors]
         if output.new_logprobs is not None:
             lists = output.new_logprobs
             self.kot_sample_lists.append(lists)
@@ -461,10 +445,8 @@ def _expanded_template_ids(video_path: str) -> list[int]:
     timestamp structure the engine expands the placeholder into, at the same
     pins. Cached per video; a CPU pass of a second or two.
 
-    The V2 runner scores rows by absolute expanded position
-    (prompt_logprob_start), so the deployment must know the expanded length
-    before the request; the engine's own expansion is verified against it
-    after the request.
+    The engine's own expansion is verified against the cached processor
+    expansion after each request, so the selected tail rows cannot drift.
     """
     if video_path not in _EXPANDED_CACHE:
         processor = _processor()
@@ -640,14 +622,10 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     if keep >= n:
         raise ValueError(f"n_rows {keep} asks for more rows than {n} ids can predict")
 
-    # Tail-only scoring in segments: the V2 runner scores rows [A, B)
-    # against the full vocabulary in natural order, keeping [rows, vocab]
-    # ids, mask and scores on the GPU (~3.1 MiB per row) from the first
-    # chunk to the last. Row r predicts token r+1, so a segment sends the
-    # transcript cut off right after token B: the prompt and the video are
-    # re-fed in full every time, the cost is bounded by the segment, not
-    # the prompt - no top-k, no full-prompt pinned buffer. Causality makes
-    # the cut exact: tokens after B+1 never touch rows below B.
+    # Replay bounded tail segments. V1 computes prompt logprobs for the full
+    # cut, so each segment selects only its final rows from the raw tensors.
+    # The prompt and video are re-fed for every segment, preserving causal
+    # rows while bounding the retained output.
     video_path = body["attachments"][VIDEO]
     raw_ids = _raw_template_ids(video_path)
     expanded_template = len(_expanded_template_ids(video_path))
@@ -671,17 +649,16 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
             params = SamplingParams(
                 max_tokens=1,
                 temperature=1.0,
-                prompt_logprob_token_ids=np.tile(
-                    np.arange(vocab_size, dtype=np.int64), (b - a, 1)
-                ),
-                prompt_logprob_start=a,
+                prompt_logprobs=-1,
             )
+            processor = None
             try:
                 final = None
                 async for output in engine.generate(
                     _video_prompt(cut, video_path), params, segment_id
                 ):
                     final = output
+                processor = _peek_sink(segment_id)
                 if final is None or not final.finished:
                     raise RuntimeError("the engine ended the request without finishing it")
             finally:
@@ -695,17 +672,24 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
                     f"the engine expanded the segment prompt to {expanded_actual} ids, "
                     f"the processor computed {b + 1}; the start index cannot be trusted"
                 )
-            rows = getattr(final, "prompt_token_id_logprobs", None)
-            if rows is None:
+            tensors = getattr(processor, "kot_prompt_lists", None)
+            if not tensors:
                 raise RuntimeError(
-                    "the V2 runner returned no prompt_token_id_logprobs; the "
-                    "tap passthrough did not run"
+                    "the V1 runner returned no raw prompt logprob tensors"
                 )
-            rows = np.asarray(rows, dtype=np.float32)
-            if filled + rows.shape[0] > keep:
+            token_ids = np.concatenate(
+                [np.asarray(item.logprob_token_ids) for item in tensors]
+            )
+            values = np.concatenate([np.asarray(item.logprobs) for item in tensors])
+            segment_rows = b - a
+            if token_ids.shape[0] < segment_rows:
                 raise RuntimeError(
-                    f"the segments produced more than the requested {keep} rows"
+                    f"the segment produced {token_ids.shape[0]} prompt rows, "
+                    f"expected at least {segment_rows}"
                 )
+            rows = _scatter_full_vocab(
+                token_ids[-segment_rows:], values[-segment_rows:], vocab_size
+            )
             # The checks are per row: every segment passing is the tail passing.
             _check_well_formed(rows)
             log_probs[filled:filled + rows.shape[0]] = rows
@@ -808,20 +792,19 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     args.served_model_name = [model_id, model]
     # One video per request.
     args.limit_mm_per_prompt = {"video": 1}
-    # This 27B checkpoint consumes about 51 GiB on a 64 GiB card, leaving
-    # enough KV cache for an 8192-token one-card launch. Larger cards or
-    # tensor-parallel runs can raise the window explicitly with the env var.
-    args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "8192"))
+    # This 27B checkpoint leaves a narrow one-card margin. The launcher-tested
+    # default reserves the documented long-video window. Smaller profiles can
+    # still override it explicitly.
+    args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "24576"))
     # vLLM 0.30.0 rejects this newer runtime-report key while constructing
     # ``VllmConfig``.  The deployment does not consume that directory, so
     # leave the version-specific option unset and keep the pinned stack
     # compatible.
-    # The chunk size of every prefill. Under the V2 runner the score path
-    # has no full-vocab gather, so the #29 budget that forced 128 is void:
-    # 2048 is vLLM's API-server default for this card class and serves both
-    # surfaces with one profile, so capture and speed share chunk shapes.
-    # The size is still part of the numerics - it is reported in /kot/info.
-    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "2048"))
+    # Full-vocabulary prompt logprobs run through the V1 sampler in chunks.
+    # 256 keeps the temporary float32 logits/log-softmax tensors below the
+    # one-card NPU headroom. The size is part of the numerics and is reported
+    # in /kot/info.
+    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "256"))
     # The contract serves one request at a time. vLLM's API-server default
     # on a 32G card is 256, and the temporary KV vLLM allocates for
     # CUDA-graph profiling is sized by the request count, not the window:
@@ -853,15 +836,10 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # MoE backend runs sm_120 fine. KOT_VLLM_MOE_BACKEND overrides for
     # hosts that do carry the toolkit.
     args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
-    # The 52G of weights over two cards leave ~5G per card for the KV cache
-    # and the scoring transient. The V2 runner's own accounting is tighter
-    # than V1's: at 0.89 the available KV falls 20 MiB under even a 20,480-token
-    # window (0.70 GiB available vs 0.72 needed) and the engine refuses to
-    # boot. 0.91 sizes the pool at 38,229 KV tokens and still leaves ~2.4 GiB
-    # free beside the pool - the V2 tail scoring needs at most ~3.1 MiB per
-    # row, so the 64-row replay costs ~0.2 GiB and even a 512-row segment
-    # fits.
-    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.91"))
+    # The 27B checkpoint leaves a narrow one-card runtime margin. 0.99 is the
+    # tested profile for the documented long-video window. Lower values can
+    # still be selected explicitly for smaller requests.
+    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.99"))
     # KOT_VLLM_DTYPE exists for cross-checking numerics; a capture runs the
     # engine's own default ("auto": the checkpoint's dtype).
     dtype_override = os.environ.get("KOT_VLLM_DTYPE", "")

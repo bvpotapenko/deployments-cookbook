@@ -1,125 +1,0 @@
-[serve] starting the deployment: /deployment/serve.sh --port 33043 --model /model --device npu
-[transformers] You are using a model of type `deepseek_vl_v2` to instantiate a model of type `DeepseekOCR2`. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
-Loading weights:   0%|          | 0/2707 [00:00<?, ?it/s]Loading weights:  13%|█▎        | 353/2707 [00:00<00:00, 3520.90it/s]Loading weights:  26%|██▋       | 714/2707 [00:00<00:00, 3572.58it/s]Loading weights:  40%|███▉      | 1072/2707 [00:00<00:00, 3427.82it/s]Loading weights:  52%|█████▏    | 1416/2707 [00:00<00:00, 3381.74it/s]Loading weights:  65%|██████▍   | 1755/2707 [00:00<00:00, 3356.06it/s]Loading weights:  93%|█████████▎| 2526/2707 [00:00<00:00, 4801.83it/s]Loading weights: 100%|██████████| 2707/2707 [00:00<00:00, 4283.42it/s]
-The repository /model contains custom code which must be executed to correctly load the model. You can inspect the repository content at /model .
- You can inspect the repository content at https://hf.co//model.
-You can avoid this prompt in future by passing the argument `trust_remote_code=True`.
-
-Do you wish to run the custom code? [y/N] [transformers] You are using a model of type `deepseek_vl_v2` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
-[transformers] `tokenizer_class` is `LlamaTokenizerFast` but `tokenizer.json` is ByteLevel; loading `TokenizersBackend`. Set `tokenizer_class` to `TokenizersBackend` in `tokenizer_config.json`.
-/deployment/ocr2/language.py:273: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
-  new_x = torch.empty_like(outs)
-[ocr-deepseek-ocr-2] serving on 127.0.0.1:33043: {'contract_version': 1, 'model_id': 'deepseek-ai/DeepSeek-OCR-2', 'model_revision': '', 'engine': 'transformers 5.22.1', 'dtype': 'bfloat16', 'device': 'npu:0', 'vocab_size': 129280, 'torch_version': '2.10.0+cpu', 'plugin_version': '2.10.0.post2', 'driver_version': '26.1.1', 'toolkit_version': 'cann-9.2.1', 'started_at': '2026-11-13T04:00:46+00:00'}
-[serve] up: transformers 5.22.1 serving deepseek-ai/DeepSeek-OCR-2 on npu:0, vocabulary 129280, torch 2.10.0+cpu
-[speed] inference-endpoint benchmark online --load-pattern concurrency --concurrency 8 --endpoints http://127.0.0.1:33043 --api-type openai --model deepseek-ai/DeepSeek-OCR-2 --tokenizer /tmp/kot-speed-mlc_endpoints-6p2b4cvk --seed 42 --model-params.temperature 0.0001 --model-params.top_p 1.0 --model-params.top_k 0 --streaming on --client.num-workers 8 --client.warmup-connections 8 --client.max-concurrent-warmup-connects 8 --client.worker-initialization-timeout 300 --dataset /tmp/kot-speed-mlc_endpoints-tacbcuvm/rvlcdip_2k.jsonl --num-samples 100 --report-dir /speed_out/mlc_endpoints
-2026-11-13 04:00:55,859 - inference_endpoint.endpoint_client.cpu_affinity - INFO - CPU affinity: 192 online CPUs available to process
-2026-11-13 04:00:55,900 - inference_endpoint.endpoint_client.cpu_affinity - INFO - CPU affinity: 192 physical cores across 8 NUMA nodes, requesting 5 for loadgen, 8 workers
-2026-11-13 04:00:55,928 - inference_endpoint.endpoint_client.cpu_affinity - INFO - LoadGen pinned to 5 CPUs (5 physical cores)
-2026-11-13 04:00:55,935 - inference_endpoint.commands.benchmark.execute - INFO - Tokenizer available for model: /tmp/kot-speed-mlc_endpoints-6p2b4cvk
-2026-11-13 04:00:55,935 - inference_endpoint.commands.benchmark.execute - INFO - Streaming: enabled (on)
-2026-11-13 04:00:55,935 - inference_endpoint.commands.benchmark.execute - INFO - No separate accuracy datasets provided
-2026-11-13 04:00:56,120 - inference_endpoint.commands.benchmark.execute - INFO - Loaded 100 samples
-2026-11-13 04:00:56,120 - inference_endpoint.commands.benchmark.execute - INFO - Mode: TestMode.PERF, Target QPS: None, Responses: False
-2026-11-13 04:00:56,120 - inference_endpoint.commands.benchmark.execute - INFO - Expected samples: 100
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):   0%|          | 0/100 [00:00<?, ?it/s]2026-11-13 04:00:56,126 - inference_endpoint.async_utils.transport.zmq.pubsub - INFO - Publisher bound to ipc:///dev/shm/zmq_34xhqygu/ev_pub_ae04fae5
-2026-11-13 04:00:56,127 - inference_endpoint.async_utils.transport.zmq.pubsub - INFO - Subscriber connected to ipc:///dev/shm/zmq_34xhqygu/metrics_pub_311449d3
-2026-11-13 04:00:56,127 - inference_endpoint.async_utils.services.launcher - INFO - Launching service: inference_endpoint.async_utils.services.metrics_aggregator (id=0)
-2026-11-13 04:00:56,128 - inference_endpoint.async_utils.services.launcher - INFO - Launching service: inference_endpoint.async_utils.services.event_logger (id=1)
-2026-11-13 04:00:56,489 - inference_endpoint.async_utils.transport.zmq.pubsub - INFO - Subscriber connected to ipc:///dev/shm/zmq_34xhqygu/ev_pub_ae04fae5
-2026-11-13 04:01:00,426 - inference_endpoint.async_utils.services.metrics_aggregator.token_metrics - ERROR - Failed to compute chat-template baseline for /tmp/kot-speed-mlc_endpoints-6p2b4cvk; tool-call token counts may be over-estimated
-Traceback (most recent call last):
-  File "/opt/harness/lib/python3.12/site-packages/inference_endpoint/async_utils/services/metrics_aggregator/token_metrics.py", line 294, in _load_tokenizer
-    tok.apply_chat_template(
-  File "/opt/harness/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 3085, in apply_chat_template
-    chat_template = self.get_chat_template(chat_template, tools)
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/harness/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 3270, in get_chat_template
-    raise ValueError(
-ValueError: Cannot use chat template functions because tokenizer.chat_template is not set and no template argument was passed! For information about writing templates and setting the tokenizer.chat_template attribute, please see the documentation at https://huggingface.co/docs/transformers/main/en/chat_templating
-2026-11-13 04:01:16,519 - inference_endpoint.async_utils.services.metrics_aggregator.token_metrics - INFO - BatchTokenizer: 24 shards across 190 CPUs (setup 16.1s)
-2026-11-13 04:01:16,520 - inference_endpoint.async_utils.transport.zmq.pubsub - INFO - Publisher bound to ipc:///dev/shm/zmq_34xhqygu/metrics_pub_311449d3
-2026-11-13 04:01:16,520 - inference_endpoint.async_utils.transport.zmq.pubsub - INFO - Subscriber connected to ipc:///dev/shm/zmq_34xhqygu/ev_pub_ae04fae5
-2026-11-13 04:01:16,522 - inference_endpoint.async_utils.services.launcher - INFO - All 2 services ready
-2026-11-13 04:01:16,523 - inference_endpoint.commands.benchmark.execute - INFO - Connecting: ['http://127.0.0.1:33043']
-2026-11-13 04:01:21,141 - inference_endpoint.endpoint_client.http_client - INFO - EndpointClient initialized with num_workers=8, endpoints=['http://127.0.0.1:33043/v1/chat/completions'], adapter=OpenAIMsgspecAdapter, accumulator=OpenAISSEAccumulator, transport=zmq
-2026-11-13 04:01:21,141 - inference_endpoint.load_generator.session - INFO - Starting phase: performance (performance)
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):   1%|          | 1/100 [00:25<42:27, 25.73s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):   2%|▏         | 2/100 [00:28<23:14, 14.23s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):   5%|▌         | 5/100 [00:29<09:14,  5.83s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):   8%|▊         | 8/100 [00:30<05:52,  3.83s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  11%|█         | 11/100 [00:32<04:26,  2.99s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  14%|█▍        | 14/100 [00:35<03:36,  2.51s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  17%|█▋        | 17/100 [00:37<03:01,  2.19s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  20%|██        | 20/100 [00:40<02:40,  2.01s/it][engine] steps=200 batch=8 vision=9.8s prefill=9.3s decode=18.0s (90ms/step) wall=68.4s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  20%|██        | 20/100 [01:00<04:00,  3.00s/it][engine] steps=400 batch=8 vision=9.8s prefill=9.3s decode=36.8s (92ms/step) wall=18.8s
-[engine] steps=600 batch=8 vision=9.8s prefill=9.3s decode=54.8s (91ms/step) wall=17.9s
-[engine] steps=800 batch=8 vision=9.8s prefill=9.3s decode=72.7s (91ms/step) wall=17.9s
-[engine] steps=1000 batch=8 vision=9.8s prefill=9.3s decode=91.0s (91ms/step) wall=18.3s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  21%|██        | 21/100 [02:14<08:24,  6.39s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  28%|██▊       | 28/100 [02:17<05:52,  4.89s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  35%|███▌      | 35/100 [02:19<04:18,  3.98s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  42%|████▏     | 42/100 [02:26<03:21,  3.48s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  42%|████▏     | 42/100 [02:40<03:40,  3.81s/it][engine] steps=1200 batch=8 vision=15.3s prefill=16.0s decode=108.6s (90ms/step) wall=29.8s
-[engine] steps=1400 batch=8 vision=15.3s prefill=16.0s decode=125.9s (90ms/step) wall=17.4s
-[engine] steps=1600 batch=8 vision=15.3s prefill=16.0s decode=143.4s (90ms/step) wall=17.5s
-[engine] steps=1800 batch=8 vision=15.3s prefill=16.0s decode=161.1s (90ms/step) wall=17.7s
-[engine] steps=2000 batch=8 vision=15.3s prefill=16.0s decode=178.7s (89ms/step) wall=17.6s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  43%|████▎     | 43/100 [03:56<05:12,  5.49s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  45%|████▌     | 45/100 [03:57<04:50,  5.28s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  50%|█████     | 50/100 [03:57<03:57,  4.76s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  55%|█████▌    | 55/100 [04:02<03:18,  4.41s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  60%|██████    | 60/100 [04:06<02:44,  4.10s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  60%|██████    | 60/100 [04:20<02:53,  4.33s/it][engine] steps=2200 batch=8 vision=20.2s prefill=22.4s decode=196.2s (89ms/step) wall=28.8s
-[engine] steps=2400 batch=8 vision=20.2s prefill=22.4s decode=214.0s (89ms/step) wall=17.8s
-[engine] steps=2600 batch=8 vision=20.2s prefill=22.4s decode=232.1s (89ms/step) wall=18.1s
-[engine] steps=2800 batch=8 vision=20.2s prefill=22.4s decode=250.2s (89ms/step) wall=18.1s
-[engine] steps=3000 batch=8 vision=20.2s prefill=22.4s decode=268.5s (90ms/step) wall=18.3s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  61%|██████    | 61/100 [05:39<03:37,  5.57s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  62%|██████▏   | 62/100 [05:39<03:28,  5.48s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  65%|██████▌   | 65/100 [05:40<03:03,  5.24s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  68%|██████▊   | 68/100 [05:44<02:42,  5.06s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  71%|███████   | 71/100 [05:46<02:21,  4.88s/it][engine] steps=3200 batch=8 vision=23.9s prefill=26.9s decode=286.8s (90ms/step) wall=26.5s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  72%|███████▏  | 72/100 [06:00<02:20,  5.00s/it][engine] steps=3400 batch=8 vision=23.9s prefill=26.9s decode=305.1s (90ms/step) wall=18.3s
-[engine] steps=3600 batch=8 vision=23.9s prefill=26.9s decode=323.5s (90ms/step) wall=18.4s
-[engine] steps=3800 batch=8 vision=23.9s prefill=26.9s decode=341.6s (90ms/step) wall=18.1s
-[engine] steps=4000 batch=8 vision=23.9s prefill=26.9s decode=359.0s (90ms/step) wall=17.3s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  73%|███████▎  | 73/100 [07:20<02:42,  6.03s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  77%|███████▋  | 77/100 [07:22<02:12,  5.74s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  81%|████████  | 81/100 [07:24<01:44,  5.49s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  85%|████████▌ | 85/100 [07:27<01:18,  5.27s/it][engine] steps=4200 batch=8 vision=27.4s prefill=31.0s decode=376.8s (90ms/step) wall=25.5s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  85%|████████▌ | 85/100 [07:40<01:21,  5.41s/it][engine] steps=4400 batch=8 vision=27.4s prefill=31.0s decode=394.6s (90ms/step) wall=17.8s
-[engine] steps=4600 batch=8 vision=27.4s prefill=31.0s decode=412.4s (90ms/step) wall=17.8s
-[engine] steps=4800 batch=8 vision=27.4s prefill=31.0s decode=430.4s (90ms/step) wall=18.0s
-[engine] steps=5000 batch=8 vision=27.4s prefill=31.0s decode=447.8s (90ms/step) wall=17.4s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  86%|████████▌ | 86/100 [08:58<01:27,  6.27s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  88%|████████▊ | 88/100 [08:59<01:13,  6.13s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  90%|█████████ | 90/100 [09:00<01:00,  6.00s/it]deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  92%|█████████▏| 92/100 [09:02<00:47,  5.90s/it]2026-11-13 04:09:58,911 - inference_endpoint.load_generator.session - INFO - Draining 7 in-flight responses...
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  95%|█████████▌| 95/100 [09:03<00:28,  5.72s/it][engine] steps=5200 batch=3 vision=29.8s prefill=33.1s decode=465.6s (90ms/step) wall=22.2s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  97%|█████████▋| 97/100 [09:20<00:17,  5.77s/it][engine] steps=5400 batch=3 vision=29.8s prefill=33.1s decode=482.3s (89ms/step) wall=16.8s
-[engine] steps=5600 batch=3 vision=29.8s prefill=33.1s decode=499.0s (89ms/step) wall=16.7s
-[engine] steps=5800 batch=3 vision=29.8s prefill=33.1s decode=515.9s (89ms/step) wall=16.9s
-[engine] steps=6000 batch=3 vision=29.8s prefill=33.1s decode=532.9s (89ms/step) wall=17.0s
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True):  98%|█████████▊| 98/100 [10:30<00:12,  6.43s/it]2026-11-13 04:11:26,463 - inference_endpoint.load_generator.session - INFO - Phase performance complete: 100 samples issued
-2026-11-13 04:11:26,463 - inference_endpoint.commands.benchmark.pipeline - INFO - Closing publisher (buffer=0, pending=0)...
-2026-11-13 04:11:26,463 - inference_endpoint.commands.benchmark.pipeline - INFO - Waiting for services to finish processing...
-2026-11-13 04:11:26,534 - inference_endpoint.async_utils.services.metrics_aggregator.aggregator - INFO - ENDED event received, shutting down aggregator
-2026-11-13 04:11:26,534 - inference_endpoint.async_utils.services.metrics_aggregator.aggregator - INFO - Draining 186 pending tokenizations...
-2026-11-13 04:11:26,547 - inference_endpoint.async_utils.services.metrics_aggregator.token_metrics - ERROR - apply_chat_template failed for /tmp/kot-speed-mlc_endpoints-6p2b4cvk (ValueError); falling back to whitespace tokenization. Structured ISL may diverge.
-Traceback (most recent call last):
-  File "/opt/harness/lib/python3.12/site-packages/inference_endpoint/async_utils/services/metrics_aggregator/token_metrics.py", line 532, in _token_count_prompt
-    encoded = self._tokenizer.apply_chat_template(  # type: ignore[union-attr]
-              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/harness/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 3085, in apply_chat_template
-    chat_template = self.get_chat_template(chat_template, tools)
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/harness/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 3270, in get_chat_template
-    raise ValueError(
-ValueError: Cannot use chat template functions because tokenizer.chat_template is not set and no template argument was passed! For information about writing templates and setting the tokenizer.chat_template attribute, please see the documentation at https://huggingface.co/docs/transformers/main/en/chat_templating
-2026-11-13 04:12:26,702 - inference_endpoint.async_utils.services.metrics_aggregator.aggregator - INFO - Tokenizations fully drained (n_pending_tasks=0)
-2026-11-13 04:12:26,711 - inference_endpoint.async_utils.services.metrics_aggregator.registry - INFO - sample_latency_ns early-stopping detail (confidence 0.99): p99.9: estimate=None empirical=109078558345 n=100 min_queries=6636 discarded=0; p99.0: estimate=None empirical=109078558345 n=100 min_queries=662 discarded=0; p97.0: estimate=None empirical=109075016200 n=100 min_queries=219 discarded=0; p95.0: estimate=None empirical=103431713858 n=100 min_queries=130 discarded=0; p90.0: estimate=109076219856 empirical=101842324442 n=100 min_queries=64 discarded=2; p80.0: estimate=101929844007 empirical=99734954610 n=100 min_queries=31 discarded=9; p75.0: estimate=100756704043 empirical=98290438183 n=100 min_queries=24 discarded=13; p50.0: estimate=96894415782 empirical=3017002896 n=100 min_queries=11 discarded=36
-2026-11-13 04:12:26,715 - inference_endpoint.async_utils.services.metrics_aggregator.registry - INFO - ttft_ns early-stopping detail (confidence 0.99): p99.9: estimate=None empirical=3436311662 n=43 min_queries=6636 discarded=0; p99.0: estimate=None empirical=3436311662 n=43 min_queries=662 discarded=0; p97.0: estimate=None empirical=3433920064 n=43 min_queries=219 discarded=0; p95.0: estimate=None empirical=3432369608 n=43 min_queries=130 discarded=0; p90.0: estimate=None empirical=3017514632 n=43 min_queries=64 discarded=0; p80.0: estimate=3436311662 empirical=2463566236 n=43 min_queries=31 discarded=1; p75.0: estimate=3432369608 empirical=2391826968 n=43 min_queries=24 discarded=3; p50.0: estimate=2391797027 empirical=1824710477 n=43 min_queries=11 discarded=12
-2026-11-13 04:12:26,718 - inference_endpoint.async_utils.services.metrics_aggregator.registry - INFO - tpot_ns early-stopping detail (confidence 0.99): p99.9: estimate=None empirical=103267272.54349951 n=43 min_queries=6636 discarded=0; p99.0: estimate=None empirical=103267272.54349951 n=43 min_queries=662 discarded=0; p97.0: estimate=None empirical=103267155.22189638 n=43 min_queries=219 discarded=0; p95.0: estimate=None empirical=103266932.45356794 n=43 min_queries=130 discarded=0; p90.0: estimate=None empirical=99693906.34506354 n=43 min_queries=64 discarded=0; p80.0: estimate=103267272.54349951 empirical=96878556.40980393 n=43 min_queries=31 discarded=1; p75.0: estimate=103266932.45356794 empirical=96819958.68719453 n=43 min_queries=24 discarded=3; p50.0: estimate=96681051.97360703 empirical=95616808.68817204 n=43 min_queries=11 discarded=12
-2026-11-13 04:12:26,724 - inference_endpoint.async_utils.services.metrics_aggregator.aggregator - INFO - Aggregator finalized: 247 total records processed
-2026-11-13 04:12:27,131 - inference_endpoint.commands.benchmark.pipeline - INFO - Built report from final_snapshot.json
-deepseek-ai/DeepSeek-OCR-2 (Streaming: True): 100%|██████████| 100/100 [11:31<00:00,  6.91s/it]
-2026-11-13 04:12:27,136 - inference_endpoint.endpoint_client.http_client - INFO - [8e344420] Shutting down...
-2026-11-13 04:12:27,673 - inference_endpoint.endpoint_client.http_client - INFO - [8e344420] Shutdown complete.
-2026-11-13 04:12:27,702 - inference_endpoint.commands.benchmark.execute - INFO - ----------------- Summary -----------------
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - Version: 0.1.0
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - Run config:
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO -   load_pattern: type=concurrency, target_qps=None, target_concurrency=8
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO -   warmup: enabled=False, n_requests=None, salt=False, drain=False, warmup_random_seed=42
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO -   scheduler_random_seed: 42
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO -   dataloader_random_seed: 42
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - Total samples issued: 100
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - Total samples succeeded: 100
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - Total samples failed: 0
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - Total samples dropped: 0
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - Duration: 605.29 seconds
-2026-11-13 04:12:27,703 - inference_endpoint.commands.benchmark.execute - INFO - QPS: 0.17
-2026-11-13 04:12:27,704 - inference_endpoint.commands.benchmark.execute - INFO - TPS: 72.74
-2026-11-13 04:12:27,704 - inference_endpoint.commands.benchmark.execute - INFO - E2E average interactivity: 9.99 tokens/s
-2026-11-13 04:12:27,704 - inference_endpoint.commands.benchmark.execute - INFO - ----------------- End of Summary -----------------
-2026-11-13 04:12:27,706 - inference_endpoint.commands.benchmark.execute - INFO - Report written to /speed_out/mlc_endpoints/report.txt
-2026-11-13 04:12:27,706 - inference_endpoint.commands.benchmark.execute - INFO - Completed in 605.3s
-2026-11-13 04:12:27,706 - inference_endpoint.commands.benchmark.execute - INFO - Results: 100/100 successful
-2026-11-13 04:12:27,706 - inference_endpoint.commands.benchmark.execute - INFO - Estimated QPS: 0.2
-2026-11-13 04:12:27,760 - inference_endpoint.commands.benchmark.execute - INFO - Partial results saved to /speed_out/mlc_endpoints
-sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
-[run] 1 results -> /speed_out/response.json
-[serve] stopping the deployment (pid 307)
