@@ -112,6 +112,7 @@ ssh -p $PORT root@$HOST 'chmod +x /home/bogdan/kot_deployments/npu-deployments/m
 ### Start
 
 ```bash
+KOT_VLLM_REQUEST_TIMEOUT=3300 \
 ASCEND_RT_VISIBLE_DEVICES=0 \
 KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
   ./serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device npu
@@ -144,7 +145,7 @@ every capture carries its own.
 | `KOT_VLLM_MAX_BATCHED_TOKENS` | `256` | the V1 full-vocabulary prompt-logprob chunk size. The size is part of the numerics and is reported in `/kot/info` |
 | `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (an 8,192-row tail is 32 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
 | `KOT_VLLM_MAX_NUM_SEQS` | `4` | the Ascend-graph profiling KV and the capture sizes scale with the concurrent-request count; the API-server default asks for too much temporary KV during boot |
-| `KOT_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
+| `KOT_VLLM_REQUEST_TIMEOUT` | `1800` in the server; `3300` in the reference launch | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - the reference long-replay value leaves time for an 8,192-row tail split into 32 replay segments; keep it below KOT's 3,600-second client timeout |
 | `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
 | `KOT_VLLM_DTYPE` | unset | numeric cross-check override |
 | `KOT_VLLM_COMPILATION` | unset | `eager` disables Ascend graphs |
