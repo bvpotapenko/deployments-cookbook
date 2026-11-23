@@ -41,6 +41,7 @@ done
 # pass the same values into the engine. Both remain explicit overrides.
 export KOT_VLLM_GPU_MEM="${KOT_VLLM_GPU_MEM:-0.99}"
 export KOT_VLLM_MAX_MODEL_LEN="${KOT_VLLM_MAX_MODEL_LEN:-24576}"
+export KOT_VLLM_REQUEST_TIMEOUT="${KOT_VLLM_REQUEST_TIMEOUT:-3300}"
 
 # The speed harness opens thousands of pooled connections at once; vLLM adds
 # its ZMQ sockets and shm handles on top. The docker default soft limit (1024)
