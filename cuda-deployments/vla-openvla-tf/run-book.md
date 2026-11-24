@@ -17,14 +17,50 @@ weights; its docstring gives the reason.
 |---|---|---|---|---|
 | openvla/openvla-7b | `47a0ec7fc4ec123775a391911046cf33cf9ed83f` | 1 | bfloat16 | greedy, 7 tokens |
 
-One stack serves the model: CPython 3.12, transformers 5.22.1, timm 0.9.16,
-torch 2.14.1+cu130, torchvision 0.29.1+cu130. Greedy decoding uses no seed.
+The 5090 stack uses CPython 3.12, transformers 5.22.1, timm 0.9.16,
+torch 2.14.1+cu130 and torchvision 0.29.1+cu130. Greedy decoding uses no
+seed.
+
+## Server: NVIDIA A100 (sm80)
+
+### Host environment
+
+
+```bash
+export VLA_HOME="$HOME/kotvenv-vla-cu128"
+export VLA_PYTHON="$VLA_HOME/bin/python"
+export UV_CACHE_DIR="$HOME/.cache/uv"
+export UV_HTTP_TIMEOUT=600
+export UV_NO_CACHE=0
+mkdir -p "$UV_CACHE_DIR"
+uv venv "$VLA_HOME" --python 3.12
+uv pip install --python "$VLA_PYTHON" \
+  torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python "$VLA_PYTHON" --no-deps \
+  torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python "$VLA_PYTHON" \
+  transformers==5.22.1 timm==0.9.16 numpy pillow
+```
+
+The verified stack is CPython 3.12.3, torch 2.11.0+cu128, torchvision 0.26.0+cu128, transformers 5.22.1, timm 0.9.16 and BF16 on NVIDIA A100-PCIE-40GB (`sm80`). 
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+export KOT_VLA_PYTHON="$VLA_PYTHON"
+"$VLA_PYTHON" -c 'import torch, torchvision, transformers, timm; \
+assert torch.cuda.is_available(); \
+print(torch.__version__, torch.version.cuda, torchvision.__version__, \
+      transformers.__version__, timm.__version__, \
+      torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0), \
+      torch.cuda.is_bf16_supported())'
+uv pip check --python "$VLA_PYTHON"
+```
 
 ## Server: NVIDIA RTX 5090 (sm_120)
 
 ### Environment
 
-Build the venv at `/root/kotvenv-vla`. The launcher uses this path.
+The launcher uses this path.
 
 ```bash
 uv venv /root/kotvenv-vla --python 3.12
@@ -38,8 +74,7 @@ uv pip install --python /root/kotvenv-vla/bin/python \
 
 The torch build must carry sm_120; cu130 does. torchvision 0.29.x pairs with
 torch 2.14.x. `--no-deps` keeps the torch build. timm builds the two vision
-towers and imports torchvision. Use timm 0.9.x only: timm 1.0 changed
-`get_intermediate_layers`, and the reference code refuses it.
+towers and imports torchvision. Use timm 0.9.x only: timm 1.0 changed `get_intermediate_layers`, and the reference code refuses it.
 
 Verify the stack:
 
@@ -58,10 +93,6 @@ Verify the stack:
 
 ### Transfer
 
-Push and pull over the provider-mapped ssh port. rsync makes no parent
-directories and drops execute bits; `--partial` resumes an interrupted
-transfer. The excludes keep `__pycache__` and `.DS_Store` off the box.
-
 ```bash
 ssh -p $PORT user@$HOST 'mkdir -p /opt/engines/vla-openvla-tf'
 rsync -a --partial -e "ssh -p $PORT" \
@@ -71,8 +102,7 @@ ssh -p $PORT user@$HOST 'chmod +x /opt/engines/vla-openvla-tf/*.sh /opt/engines/
 rsync -a --partial -e "ssh -p $PORT" user@$HOST:/outputs/ ./outputs/
 ```
 
-Download the weights on the box into the hub cache. The snapshot directory
-carries the revision; `/kot/info` reports it. On vast, huggingface.co times
+Download the weights on the box into the hub cache. The snapshot directory carries the revision; `/kot/info` reports it. On vast, huggingface.co times
 out, so the download goes through the mirror endpoint:
 
 ```bash
@@ -84,8 +114,7 @@ export MODEL=/models/hub/models--openvla--openvla-7b/snapshots/47a0ec7fc4ec12377
 ls $MODEL
 ```
 
-Verify: the directory holds three `model-*-of-00003.safetensors` shards,
-`config.json`, `preprocessor_config.json` and the tokenizer files. The
+Verify: the directory holds three `model-*-of-00003.safetensors` shards, `config.json`, `preprocessor_config.json` and the tokenizer files. The
 weights take 15.1 GB.
 
 ### Start
@@ -96,18 +125,6 @@ mkdir -p /outputs
 export CUDA_VISIBLE_DEVICES=0
 ./serve.sh --port 8090 --model $MODEL --device cuda 2>&1 | tee /outputs/vla-openvla-tf.log
 ```
-
-The model needs one card. The server uses the first visible card only, so
-set CUDA_VISIBLE_DEVICES to one card. The process listens on 127.0.0.1 only.
-
-The start loads the weights, then runs one warm-up prediction. The port
-opens after the warm-up. The startup line `[vla-openvla-tf] serving on ...`
-holds the `/kot/info` content. A load error stops the start and names the
-tensor or the parameter.
-
-Each request writes one log line. A `/kot/infer` line holds the prompt id,
-the prediction time in ms, the 7 tokens and the action. A `/kot/score` line
-holds the prompt id, the mode, the time in ms, the row count and the tokens.
 
 ### Parameters
 
