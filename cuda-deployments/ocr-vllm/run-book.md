@@ -13,7 +13,7 @@ at the deployment default. Read a model's row against the same row in the
 other engine run books. A mismatch between engines is the first suspect when
 a comparison fails.
 
-| model | revision | cards | `KOT_VLLM_GPU_MEM` | `KOT_VLLM_MAX_BATCHED_TOKENS` | `KOT_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
+| model | revision | cards | `SERVE_VLLM_GPU_MEM` | `SERVE_VLLM_MAX_BATCHED_TOKENS` | `SERVE_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
 |---|---|---|---|---|---|---|---|
 | deepseek-ai/DeepSeek-OCR-2 | `aaa02f3811945a91062062994c5c4a3f4c0af2b0` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.0001, top_p 1.0 |
 
@@ -29,13 +29,13 @@ The stack runs on CPython 3.12.
 
 ```bash
 # networked host
-uv venv /root/kotvenv-vllm-ocr --python 3.12
-uv pip install --python /root/kotvenv-vllm-ocr/bin/python "vllm==0.33.0"
+uv venv /root/serve-venv-vllm-ocr --python 3.12
+uv pip install --python /root/serve-venv-vllm-ocr/bin/python "vllm==0.33.0"
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
-uv venv --seed /scratch/kot-vllm-ocr-venv --python 3.12
-/scratch/kot-vllm-ocr-venv/bin/pip install --no-index --no-cache-dir \
+uv venv --seed /scratch/serve-vllm-ocr-venv --python 3.12
+/scratch/serve-vllm-ocr-venv/bin/pip install --no-index --no-cache-dir \
   --find-links ./wheels "vllm==0.33.0"
 ```
 
@@ -50,14 +50,14 @@ pin, eight in parallel, each with `--no-deps`. Files already present are
 skipped, so a rerun resumes. Rerun the script until the two counts it
 prints match. The repository does not carry `wheels/`.
 
-Without `KOT_PYTHON`, and with no ambient vllm, the launcher runs the
-offline install itself, into `KOT_VENV`.
+Without `SERVE_PYTHON`, and with no ambient vllm, the launcher runs the
+offline install itself, into `SERVE_VENV`.
 
 ### Layout
 
 ```text
 /opt/engines/ocr-vllm     this directory
-  kot_ngram.py            copied into the venv's site-packages at every start
+  ngram.py            copied into the venv's site-packages at every start
   wheels/                 the offline closure, built by make_wheels.sh, not committed
 /models/DeepSeek-OCR-2    weights; a hub snapshot plus one patched file
 ```
@@ -98,16 +98,16 @@ same push.
 ### Start
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 KOT_PYTHON=/root/kotvenv-vllm-ocr/bin/python \
+CUDA_VISIBLE_DEVICES=0 SERVE_PYTHON=/root/serve-venv-vllm-ocr/bin/python \
   ./serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device cuda
 ```
 
 The engine opens tensor parallel over every visible card. This model fits
 on one card. Pin one with `CUDA_VISIBLE_DEVICES`.
 
-At every start the launcher copies `kot_ngram.py` into the venv's
+At every start the launcher copies `ngram.py` into the venv's
 site-packages and passes `--logits-processors
-kot_ngram:KotNoRepeatNGramLogitsProcessor` to the engine. The rule runs at
+ngram:ServeNoRepeatNGramLogitsProcessor` to the engine. The rule runs at
 engine level, so the module must resolve inside every worker. The copy is
 what makes it resolve.
 
@@ -122,16 +122,16 @@ requested rows of the cached prefix never computed.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_PYTHON` | ambient `python3` | interpreter that carries vllm 0.33.0. The launcher's search never finds `/root/kotvenv-vllm-ocr`; set the variable. |
-| `KOT_VENV` | `/scratch/kot-vllm-ocr-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-ocr-venv`. |
-| `KOT_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom is needed for the log-probability pass. |
-| `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | caps the per-step transient of that pass. |
-| `KOT_VLLM_MAX_MODEL_LEN` | the checkpoint's 8192 | caps `max_model_len`, and with it the reserved KV cache. |
-| `KOT_VLLM_MOE_BACKEND` | `triton` | MoE kernels. `auto` picks flashinfer-cutlass, whose JIT needs nvcc; without a toolkit it dies at engine init. |
-| `KOT_VLLM_DTYPE` | engine auto | compute dtype, for example `float32` for a cross-check. |
-| `KOT_VLLM_COMPILATION` | engine default | `eager` disables torch.compile. |
-| `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived | override the reported identity. |
-| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It applies on chat only, not on `/kot/score`, so the launcher turns it off and both routes take the same documents. |
+| `SERVE_PYTHON` | ambient `python3` | interpreter that carries vllm 0.33.0. The launcher's search never finds `/root/serve-venv-vllm-ocr`; set the variable. |
+| `SERVE_VENV` | `/scratch/serve-vllm-ocr-venv` | where the launcher builds the offline venv; it falls back to `/tmp/serve-vllm-ocr-venv`. |
+| `SERVE_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom is needed for the log-probability pass. |
+| `SERVE_VLLM_MAX_BATCHED_TOKENS` | `2048` | caps the per-step transient of that pass. |
+| `SERVE_VLLM_MAX_MODEL_LEN` | the checkpoint's 8192 | caps `max_model_len`, and with it the reserved KV cache. |
+| `SERVE_VLLM_MOE_BACKEND` | `triton` | MoE kernels. `auto` picks flashinfer-cutlass, whose JIT needs nvcc; without a toolkit it dies at engine init. |
+| `SERVE_VLLM_DTYPE` | engine auto | compute dtype, for example `float32` for a cross-check. |
+| `SERVE_VLLM_COMPILATION` | engine default | `eager` disables torch.compile. |
+| `SERVE_MODEL_ID` / `SERVE_MODEL_REVISION` | derived | override the reported identity. |
+| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It applies on chat only, not on `/score`, so the launcher turns it off and both routes take the same documents. |
 | `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value. |
 
 ## Models
@@ -163,18 +163,17 @@ The checkpoint's tokenizer ships no chat template, and vLLM's fallback for its
 format: BOS, the image placeholder, a newline, the instruction. Exactly one
 image rides a request.
 
-Chat and `/kot/score` load the image with the same vLLM `ImageMediaIO`, which
+Chat and `/score` load the image with the same vLLM `ImageMediaIO`, which
 applies the EXIF rotation and composites alpha on white; the checkpoint's own
 recipe also rotates but drops alpha, so a transparent image differs from it.
 
-A decode on `/kot/score` writes three files into the request's `out_dir`:
+A decode on `/score` writes three files into the request's `out_dir`:
 `log_probs.npy`, `input_ids.npy` and `text.txt`. `text.txt` holds the
 generated ids as UTF-8 text. The checkpoint's tokenizer decodes the ids with
 `skip_special_tokens=False`, then the server removes the trailing EOS token.
 The tokenizer flags the table tags `<td>` and `<tr>` as special tokens, so
 `skip_special_tokens=True` would remove them. `ocr-transformers` and
-`ocr-sglang` use the same rule. A replay prefill writes no `text.txt`. The
-eval reads only the `.npy` files. `text.txt` lets a person compare the
+`ocr-sglang` use the same rule. A replay prefill writes no `text.txt`. The `text.txt` file lets a person compare the
 transcripts of the engines.
 
 ## Check

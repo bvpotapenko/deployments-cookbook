@@ -1,27 +1,7 @@
 #!/usr/bin/env python3
-"""The kot deployment of openvla/openvla-7b on transformers.
+"""Serve the model with Transformers.
 
-    serve.py --port P --model /path/to/openvla-7b --device cuda
-
-GET /kot/info. POST /kot/infer reads the kot observation (.npz) the request
-names, predicts one action and writes it as actions.npy, float32 [1, 1, 7]:
-OpenVLA's chunk is one action of seven dimensions (x, y, z, roll, pitch, yaw,
-gripper). POST /kot/score writes the log-probs of the action tokens, for a
-comparison of distributions instead of actions:
-
-  decode   takes the ids as sent, or builds the prompt from the observation's
-           task when they are empty, decodes the 7 greedy tokens, writes one
-           row per token and the ids prompt + tokens
-  prefill  takes the ids as sent (a decode's stored ids), re-encodes the
-           observation's frame, and writes the teacher-forced rows: n - 1,
-           or the last n_rows when the request names them; more than n - 1
-           is an error
-
-Both read the frame from the observation; seed and sampling are not read,
-because OpenVLA decodes greedily, as its reference does. There is no chat
-route. One robot, one card: the server is a single-threaded http.server, so
-requests wait on the socket and each one runs alone on the card.
-"""
+    serve.py --port P --model /path/to/openvla-7b --device cuda"""
 
 from __future__ import annotations
 
@@ -41,9 +21,9 @@ from PIL import Image
 from openvla import PROMPT, Policy
 
 HOST = "127.0.0.1"
-INFO = "/kot/info"
-INFER = "/kot/infer"
-SCORE = "/kot/score"
+INFO = "/info"
+INFER = "/infer"
+SCORE = "/score"
 ACTIONS = "actions.npy"
 LOG_PROBS = "log_probs.npy"
 INPUT_IDS = "input_ids.npy"
@@ -62,8 +42,8 @@ def log(message: str) -> None:
 
 
 def read_observation(path: str) -> tuple[Image.Image, str]:
-    """The task and the one camera of a kot observation. A camera is float32
-    [3, H, W], 1.0 = full scale, as kot's freeze writes it."""
+    """The task and the one camera of an observation. A camera is float32
+    [3, H, W], 1.0 = full scale."""
     with np.load(path, allow_pickle=False) as observation:
         cameras = [key for key in observation.files if key not in NOT_CAMERAS]
         if len(cameras) != 1:
@@ -73,8 +53,7 @@ def read_observation(path: str) -> tuple[Image.Image, str]:
     if pixels.ndim != 3 or pixels.shape[0] != 3:
         raise ValueError(f"camera {cameras[0]!r} must be [3, H, W], got {pixels.shape}")
     # Back to the 8-bit RGB frame the model's processor takes: round to the
-    # nearest level (ties to even), then saturate. A photo and kot's cameras
-    # both hold exact levels k / 255, so every level comes back exact.
+    # nearest level (ties to even), then saturate. This recovers each original level for pixels stored as k / 255.
     levels = np.clip(np.rint(pixels.transpose(1, 2, 0) * 255), 0, 255).astype(np.uint8)
     return Image.fromarray(levels), task
 
@@ -195,7 +174,7 @@ def main() -> None:
 
     policy = Policy(args.model, args.device, UNNORM_KEY)
     # The first call pays for CUDA context, cuBLAS handles and kernel choice;
-    # /kot/info answers only after it, so no timed request pays for it.
+    # /info answers only after it, so no timed request pays for it.
     policy(Image.new("RGB", (224, 224)), "warm up")
 
     model_id, revision = identity(args.model)

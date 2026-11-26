@@ -1,6 +1,6 @@
-"""kot deployment contract adapter around a vLLM engine, mllm family, one process.
+"""Serve inference and token scores with vLLM.
 
-    kot_serve.py --port P --model /path/to/Qwen3.8-27B --device cuda
+    serve.py --port P --model /path/to/Qwen3.8-27B --device cuda
 
 The model is Qwen/Qwen3.8-27B (the native qwen3_5 architecture). It serves
 video units: the checkpoint's own instruct chat prompt rendered around the
@@ -13,8 +13,8 @@ The vLLM OpenAI app is mounted as-is for /v1/chat/completions (the speed
 harness drives it; the video rides the chat surface). The contract endpoints
 are added to the same app:
 
-  GET  /kot/info   provenance: the running engine, its dtype, the vocab width
-  POST /kot/score  writes log_probs.npy + input_ids.npy into out_dir; a decode
+  GET  /info   provenance: the running engine, its dtype, the vocab width
+  POST /score  writes log_probs.npy + input_ids.npy into out_dir; a decode
                    answers in JSON lines, one per 256-row block, so a long
                    generation streams instead of answering at the end
 
@@ -52,8 +52,7 @@ Logprob objects per position on the frontend. The tap below keeps the raw
 tensors instead and leaves cheap placeholders in vLLM's own lists, so its
 invariants hold and nothing else changes. vLLM keeps the prompt-logprob
 tensors on the CPU per chunk (in_progress_prompt_logprobs_cpu), so the stash
-never holds GPU memory.
-"""
+never holds GPU memory."""
 
 from __future__ import annotations
 
@@ -114,21 +113,17 @@ from vllm.multimodal.media.image import ImageMediaIO  # noqa: E402
 from vllm.multimodal.media.video import VideoMediaIO  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
-INFO = "/kot/info"
-SCORE = "/kot/score"
-INFER = "/kot/infer"
+INFO = "/info"
+SCORE = "/score"
+INFER = "/infer"
 CONTRACT_VERSION = 1
-SCORE_PREFIX = "kot-score-"
+SCORE_PREFIX = "serve-score-"
 UTF8 = "utf-8"
 SUPPORTED_TASKS = ("generate",)
 BLOCK_ROWS = 256  # one streamed line per block of decode rows: bounded memory, visible progress
 
 VIDEO = "video"
 VIDEO_TAG = "<|video_pad|>"
-# The pinned media pipeline, the same values the transformers reference
-# serves: the prompt text, the frame sampling and the reference per-frame
-# pixel cap. A candidate must report the same values or its capture
-# compares nothing.
 VIDEO_PROMPT = "Describe what you see in the video."
 VIDEO_FPS = 2.0
 CAP_PIXELS_PER_FRAME = True
@@ -147,7 +142,7 @@ SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
 # A stall bound for the score body: past it, the faulthandler watchdog
 # dumps every thread's stack to the log and exits the process. A dead
 # server with a named culprit beats a hung one.
-REQUEST_TIMEOUT_S = float(os.environ.get("KOT_VLLM_REQUEST_TIMEOUT", "1800"))
+REQUEST_TIMEOUT_S = float(os.environ.get("SERVE_VLLM_REQUEST_TIMEOUT", "1800"))
 
 
 # A stack of every thread, on demand, without ptrace (the serving container
@@ -166,18 +161,7 @@ SINKS: dict[str, LogprobsProcessor] = {}
 # RequestOutput.prompt_token_id_logprobs as [rows, vocab] float32 in
 # token-id order - already scattered, no permutation to undo.
 
-# The GPU holds [rows, vocab] ids, mask and scores for the whole tail from
-# the first chunk to the last (~3.08 MiB per row at this vocabulary), so a
-# long tail arrives as several requests of at most this many rows. Fixed,
-# not derived: segment boundaries change the last chunk's shapes, so rows
-# are reproducible only at a fixed segment size. The budget: the measured
-# free memory with a 64-row request in flight is 2,431 MiB, and every row
-# above 64 takes another ~3.08 MiB, so free_at_N = 2431 - (N-64) x 3.08 MiB.
-# The video encoder asks up to ~1.2 GiB more during the prefill (measured:
-# 640 rows OOM it - a 1.19 GiB allocation fails with ~0.66 GiB left), so
-# 256 rows keeps ~1.8 GiB free: the transient fits with margin. The env
-# override is for experiments; captures run at the default.
-REPLAY_SEGMENT_ROWS = int(os.environ.get("KOT_VLLM_REPLAY_SEGMENT_ROWS", "256"))
+REPLAY_SEGMENT_ROWS = int(os.environ.get("SERVE_VLLM_REPLAY_SEGMENT_ROWS", "256"))
 
 
 def _install_logprobs_tap() -> None:
@@ -193,7 +177,7 @@ def _install_logprobs_tap() -> None:
 
     def from_new_request(cls, tokenizer, request):
         processor = original_from_new_request(cls, tokenizer, request)
-        processor.kot_sample_lists = []
+        processor.serve_sample_lists = []
         rid = getattr(request, "request_id", "?")
         if rid.startswith(SCORE_PREFIX):
             SINKS[rid] = processor
@@ -208,7 +192,7 @@ def _install_logprobs_tap() -> None:
             self.prompt_token_id_logprobs = output.prompt_token_id_logprobs.numpy()
         if output.new_logprobs is not None:
             lists = output.new_logprobs
-            self.kot_sample_lists.append(lists)
+            self.serve_sample_lists.append(lists)
             if self.logprobs is not None:
                 self.logprobs.extend([{} for _ in lists.logprobs])
 
@@ -266,8 +250,8 @@ def _drain_steps(processor, steps: int, log_probs: np.ndarray, written: int, voc
     """Write the first ``steps`` stashed steps into log_probs from row ``written``
     and drop them from the stash, so it holds one block, never the unit.
     Returns the rows written so far."""
-    entries = processor.kot_sample_lists[:steps]
-    del processor.kot_sample_lists[:steps]
+    entries = processor.serve_sample_lists[:steps]
+    del processor.serve_sample_lists[:steps]
     block = _decode_rows(entries, vocab_size)
     del entries
     _check_well_formed(block)
@@ -299,9 +283,7 @@ def _refuse_occupied_out_dir(body: dict, out_dir: Path) -> None:
     """A score request must not silently replace another run's rows.
 
     The out_dir is client-named; two runs over the same directory would make
-    the second overwrite the first without a trace (it happened once during
-    the #31 gate: a reused request body pointed the candidate at the
-    golden's directory). Refuse unless the request names ``overwrite``.
+    the second overwrite the first without a trace. Refuse unless the request names ``overwrite``.
     """
     if (out_dir / "log_probs.npy").exists() and not body.get("overwrite"):
         raise ValueError(
@@ -540,7 +522,7 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
         async for output in engine.generate(prompt, params, request_id):
             final = output
             processor = processor or _peek_sink(request_id)
-            while processor is not None and len(processor.kot_sample_lists) >= BLOCK_ROWS:
+            while processor is not None and len(processor.serve_sample_lists) >= BLOCK_ROWS:
                 written = _drain_steps(processor, BLOCK_ROWS, log_probs, written, vocab_size)
                 blocks += 1
                 yield _line({"block": blocks - 1, "rows": written})
@@ -551,15 +533,15 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
             )
             return
         processor = processor or _pop_sink(request_id)
-        if processor is None or not (written or processor.kot_sample_lists):
+        if processor is None or not (written or processor.serve_sample_lists):
             yield _line(
                 {"error": "RuntimeError",
                  "detail": "no logprob tap for the request; the V1 LogprobsProcessor patch did not run"}
             )
             return
-        if processor.kot_sample_lists:
+        if processor.serve_sample_lists:
             written = _drain_steps(
-                processor, len(processor.kot_sample_lists), log_probs, written, vocab_size
+                processor, len(processor.serve_sample_lists), log_probs, written, vocab_size
             )
             yield _line({"block": blocks, "rows": written})
         output_ids = [int(token) for token in final.outputs[0].token_ids]
@@ -629,7 +611,7 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     _refuse_occupied_out_dir(body, out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # The prompt rows cover the whole expanded prompt (the frozen template's
+    # The prompt rows cover the whole expanded prompt (the prompt template's
     # image block plus the ids the request carried); the rows the family
     # keeps are the tail: the classic n - 1, or the last n_rows when the
     # request trims (the OCR replay keeps only the rows over the
@@ -723,16 +705,14 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
-    # The stored ids are the sequence the rows live in, verbatim: the OCR
-    # replay's rows predict the trailing generated ids, and the eval joins
-    # them to decode_ids by name.
+    # Keep the token IDs in request order.
     np.save(
         out_dir / "input_ids.npy",
         np.ascontiguousarray(np.asarray(transcript, dtype=np.int32)),
         allow_pickle=False,
     )
     print(
-        f"[kot-vllm-mllm] prefill {body['prompt_id']}: ids {n}, keep {keep}, "
+        f"[serve-vllm-mllm] prefill {body['prompt_id']}: ids {n}, keep {keep}, "
         f"segments and rows {time.monotonic() - started:.1f}s",
         flush=True,
     )
@@ -759,12 +739,12 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
     A hub snapshot's path names both. Any other directory does not name its
-    hub id; ``_name_or_path`` in config.json usually does. KOT_MODEL_ID /
-    KOT_MODEL_REVISION override both,
-    e.g. when the runner knows the id and the directory does not.
+    hub id; ``_name_or_path`` in config.json usually does. SERVE_MODEL_ID /
+    SERVE_MODEL_REVISION override both,
+    e.g. when the client knows the ID and the directory does not.
     """
-    override_id = os.environ.get("KOT_MODEL_ID", "")
-    override_revision = os.environ.get("KOT_MODEL_REVISION", "")
+    override_id = os.environ.get("SERVE_MODEL_ID", "")
+    override_revision = os.environ.get("SERVE_MODEL_REVISION", "")
     if override_id:
         return override_id, override_revision
     model_id = Path(model_dir).name
@@ -797,7 +777,7 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
 
     container.add_argument = _shimmed_add_argument
     try:
-        args = make_arg_parser(argparse.ArgumentParser(prog="kot_serve")).parse_args([])
+        args = make_arg_parser(argparse.ArgumentParser(prog="serve")).parse_args([])
     finally:
         container.add_argument = original_add_argument
     args.model = model
@@ -811,13 +791,13 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # budget allows 12,288 video tokens, plus the template) and an 8192-token
     # decode; the window covers both with room. vLLM checks only the prompt
     # against it and caps the output at the window without an error.
-    args.max_model_len = int(os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "24576"))
+    args.max_model_len = int(os.environ.get("SERVE_VLLM_MAX_MODEL_LEN", "24576"))
     # The chunk size of every prefill. Under the V2 runner the score path
     # has no full-vocab gather, so the #29 budget that forced 128 is void:
     # 2048 is vLLM's API-server default for this card class and serves both
     # surfaces with one profile, so capture and speed share chunk shapes.
-    # The size is still part of the numerics - it is reported in /kot/info.
-    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "2048"))
+    # The size is still part of the numerics - it is reported in /info.
+    args.max_num_batched_tokens = int(os.environ.get("SERVE_VLLM_MAX_BATCHED_TOKENS", "2048"))
     # The contract serves one request at a time. vLLM's API-server default
     # on a 32G card is 256, and the temporary KV vLLM allocates for
     # CUDA-graph profiling is sized by the request count, not the window:
@@ -825,7 +805,7 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # block holds a full GatedDeltaNet state per sequence, so 256 asked for
     # 6.12 GiB beside 25.8G of weights and OOMed boot; 4 drops the profile
     # cache to ~0.1 GiB.
-    args.max_num_seqs = int(os.environ.get("KOT_VLLM_MAX_NUM_SEQS", "4"))
+    args.max_num_seqs = int(os.environ.get("SERVE_VLLM_MAX_NUM_SEQS", "4"))
     args.max_logprobs = 1_000_000
     args.enable_prefix_caching = False
     args.disable_log_requests = True
@@ -841,14 +821,14 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # template's default adds a system message and an open think block.
     args.default_chat_template_kwargs = {"enable_thinking": False}
     args.media_io_kwargs = MEDIA_IO_KWARGS
-    # file:// URLs from anywhere, since a --no-container run has no /inputs
+    # file:// URLs from anywhere, since a host process has no /inputs
     # mount. "/" is safe here because the server binds only to 127.0.0.1.
     args.allowed_local_media_path = "/"
     # "auto" picks flashinfer's cutlass MoE on Blackwell, whose JIT needs
     # nvcc - absent on serving hosts - and dies at engine init. The triton
-    # MoE backend runs sm_120 fine. KOT_VLLM_MOE_BACKEND overrides for
+    # MoE backend runs sm_120 fine. SERVE_VLLM_MOE_BACKEND overrides for
     # hosts that do carry the toolkit.
-    args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
+    args.moe_backend = os.environ.get("SERVE_VLLM_MOE_BACKEND", "triton")
     # The 52G of weights over two cards leave ~5G per card for the KV cache
     # and the scoring transient. The V2 runner's own accounting is tighter
     # than V1's: at 0.89 the available KV falls 20 MiB under even a 20,480-token
@@ -857,13 +837,11 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     # free beside the pool - the V2 tail scoring needs at most ~3.1 MiB per
     # row, so the 64-row replay costs ~0.2 GiB and even a 512-row segment
     # fits.
-    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.91"))
-    # KOT_VLLM_DTYPE exists for cross-checking numerics; a capture runs the
-    # engine's own default ("auto": the checkpoint's dtype).
-    dtype_override = os.environ.get("KOT_VLLM_DTYPE", "")
+    args.gpu_memory_utilization = float(os.environ.get("SERVE_VLLM_GPU_MEM", "0.91"))
+    dtype_override = os.environ.get("SERVE_VLLM_DTYPE", "")
     if dtype_override:
         args.dtype = dtype_override
-    if os.environ.get("KOT_VLLM_COMPILATION", "").lower() == "eager":
+    if os.environ.get("SERVE_VLLM_COMPILATION", "").lower() == "eager":
         args.enforce_eager = True
     if device == "cuda":
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
@@ -874,13 +852,13 @@ def _openai_args(model: str, device: str, port: int, model_id: str, here: str) -
     return args
 
 
-def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
+def _register_serve_routes(app, engine, vocab_size: int, info: dict) -> None:
     @app.get(INFO)
-    async def kot_info() -> JSONResponse:
+    async def serve_info() -> JSONResponse:
         return JSONResponse(info)
 
     @app.post(INFER)
-    async def kot_infer(request: Request):
+    async def serve_infer(request: Request):
         """The speed surface: one video decode, the description written into
         out_dir, the file named back. Only the clock reads what lands here."""
         try:
@@ -894,7 +872,7 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
                 max_tokens=512, temperature=1.0, top_p=0.95, top_k=20, seed=42
             )
             final = None
-            async for output in engine.generate(prompt, params, f"kot-infer-{uuid.uuid4().hex}"):
+            async for output in engine.generate(prompt, params, f"serve-infer-{uuid.uuid4().hex}"):
                 final = output
             if final is None or not final.finished:
                 raise RuntimeError("the engine ended the request without finishing it")
@@ -909,7 +887,7 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
             )
 
     @app.post(SCORE)
-    async def kot_score(request: Request):
+    async def serve_score(request: Request):
         try:
             body = await request.json()
             if body.get("mode") == "decode":
@@ -942,10 +920,8 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
                 status_code=500,
             )
 
-    # One deployment, one engine: the harness names the model as
-    # /kot/info reported it (both spellings are in served_model_name), and
-    # kot's probe sends no model field at all, which vLLM answers with the
-    # sole served model. No model-name rewriting is needed.
+    # The engine may also register POST /score. Dispatch our score handler first.
+    app.router.routes.insert(0, app.router.routes.pop())
 
 
 def _nvidia_driver() -> str:
@@ -972,7 +948,7 @@ def _placed_devices(device: str, parallel_config) -> str:
 
 def main() -> int:
     global _MODEL_DIR
-    parser = argparse.ArgumentParser(prog="kot_serve.py", description=__doc__)
+    parser = argparse.ArgumentParser(prog="serve.py", description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True, help="the weights directory, read-only")
     parser.add_argument("--device", default="cuda", help="torch device string from the platform row")
@@ -1013,7 +989,7 @@ def main() -> int:
                 # The chunk size is part of the numerics: a chunked prefill
                 # splits the attention and state passes at chunk boundaries,
                 # so rows produced at one size need not be bit-identical to
-                # rows produced at another. Every capture carries its own.
+                # rows produced at another.
                 "max_num_batched_tokens": args.max_num_batched_tokens,
                 # The segment size is numerics too: segment boundaries
                 # change the last chunk's shapes, so replay rows are
@@ -1023,9 +999,9 @@ def main() -> int:
             }
             # Routes and middleware go on before init_app_state: it starts the
             # app, and Starlette refuses middleware on a started application.
-            _register_kot_routes(app, engine, vocab_size, info)
+            _register_serve_routes(app, engine, vocab_size, info)
             await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
-            print(f"[kot-vllm-mllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
+            print(f"[serve-vllm-mllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(
                 app, sock=None, host=args.host, port=args.port, log_level="warning",
             )

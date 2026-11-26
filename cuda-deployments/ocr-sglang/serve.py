@@ -1,28 +1,12 @@
-"""The kot deployment contract for the OCR family, over one embedded SGLang engine.
+"""Serve inference and token scores with SGLang.
 
-    kot_server.py --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
+    serve.py --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
 
 Started by ``serve.sh``. One asyncio process: the adapter (this file)
-embeds ``sglang.Engine`` inside its own event loop, so /kot/score and the
-speed harness drive the same resident engine, as the contract requires. The
+embeds ``sglang.Engine`` inside its own event loop, so /score and the
+load-test client drive the same resident engine, as the contract requires. The
 architecture is the llm-sglang deployment's; what changes is the family: the
 model is DeepSeek-OCR-2, a vision-language checkpoint whose units are images.
-
-Endpoints:
-
-* ``GET /kot/info`` -- provenance from the running process.
-* ``POST /kot/score`` -- writes ``log_probs.npy`` and ``input_ids.npy`` into
-  ``out_dir`` and names them back. The request's transcript ids are consumed
-  verbatim, appended to the image template the checkpoint itself defines
-  (plain format: BOS, one image placeholder, "\nFree OCR."); the image
-  arrives as an attachment path and is passed to the engine as multimodal
-  data, which expands the placeholder into the block its processor computes
-  for the image (257 tokens for a <=768px image, 144 more per crop tile).
-* ``POST /v1/completions`` and ``/v1/chat/completions`` -- the OpenAI-shaped
-  surface the speed harness drives, with SSE streaming. The chat surface is
-  multimodal: a text part and the document as an image_url data URI, the
-  placeholder first, exactly the shape the score path builds.
-* ``POST /kot/infer`` -- 404: this family serves no such endpoint.
 
 Numerics of the score path, in one place:
 
@@ -49,17 +33,7 @@ Numerics of the score path, in one place:
 Rows land on disk through ``open_memmap`` at the final shape, filled block by
 block as the engine's stash arrives: the full-vocabulary log-softmax of a
 4,096-token decode at this vocabulary is about 2 GB, and no stage of this
-file holds one.
-
-Concurrency: one event loop; the Engine is created inside it. /kot/score is
-serialised by a lock -- the runner sends one at a time, and
-one-request-at-a-time is what makes the stash collection sound (see
-sitecustomize.py). /v1/chat/completions takes no lock. Chat asks for no
-logprobs, so alone it writes no stash. A score that shares a batch with chat
-traffic stashes their rows too, with no request id, so the row counts
-(``prompt_tokens`` on a prefill, the generated ids on a decode) fail that score
-loudly; the chat is untouched. The runner must not overlap the two.
-"""
+file holds one."""
 
 from __future__ import annotations
 
@@ -98,7 +72,7 @@ def _utc_stamp() -> str:
 
 def _clean_stash() -> set[str]:
     """Empty the stash dir, return what is there now: the baseline for one request."""
-    stash = os.environ["KOT_SGLANG_STASH_DIR"]
+    stash = os.environ["SERVE_SGLANG_STASH_DIR"]
     for name in os.listdir(stash):
         path = Path(stash) / name
         try:
@@ -120,7 +94,7 @@ def _stash_order(name: str) -> int:
 
 async def _collect_stash(kind: str) -> list[np.ndarray]:
     """Every complete stash archive of one kind, in write order, then delete them."""
-    stash = os.environ["KOT_SGLANG_STASH_DIR"]
+    stash = os.environ["SERVE_SGLANG_STASH_DIR"]
     deadline = time.monotonic() + STASH_WAIT_S
     while True:
         blocks: list[tuple[int, Path]] = []
@@ -250,7 +224,7 @@ def _consumed_guard(done: dict, ids: list[int], engine) -> None:
     prompt_tokens = int(meta.get("prompt_tokens", 0) or 0)
     if not prompt_tokens:
         return
-    note_path = Path(os.environ["KOT_SGLANG_STASH_DIR"]) / "last_counts.json"
+    note_path = Path(os.environ["SERVE_SGLANG_STASH_DIR"]) / "last_counts.json"
     try:
         counts = json.loads(note_path.read_text(encoding="utf-8")).get("counts", [])
     except Exception:
@@ -272,7 +246,7 @@ def _consumed_guard(done: dict, ids: list[int], engine) -> None:
 async def _score_prefill(engine, body: dict) -> dict:
     """Teacher forced over the ids the request carried, verbatim.
 
-    The version's frozen template ids ride every request (a decode's prompt;
+    The prompt template ids ride every request (a decode's prompt;
     a replay's template plus generated ids), so the deployment consumes ids
     and never tokenizes. The engine expands the single image placeholder
     into the block its processor computes for this image, so the stashed
@@ -357,7 +331,7 @@ async def _score_prefill(engine, body: dict) -> dict:
 
 
 async def _score_decode(engine, body: dict) -> dict:
-    """Generate from the frozen template ids; one row per generated token."""
+    """Generate from the prompt template ids; one row per generated token."""
     image_path = body["attachments"][IMAGE]
     max_new_tokens = int(body["max_new_tokens"])
     allow_eos = bool(body.get("allow_eos", False))
@@ -366,7 +340,7 @@ async def _score_decode(engine, body: dict) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     template_ids = [int(token) for token in body["input_ids"]]
     if not template_ids:
-        raise ScoreFailure("empty input_ids: the version's frozen template is missing")
+        raise ScoreFailure("empty input_ids: a prompt template is required")
     image = _decode_image(image_path)
     ids = list(template_ids)
 
@@ -400,7 +374,7 @@ async def _score_decode(engine, body: dict) -> dict:
             f"decode produced {len(output_ids)} ids for a cap of {max_new_tokens}"
         )
 
-    # The raw prompt the request carried (the version's frozen template)
+    # The raw prompt the request carried (the prompt template)
     # plus the generated ids: the pre-expansion sequence, so the replay of
     # this file carries exactly one image placeholder.
     _write_rows(out_dir, "log_probs.npy", blocks)
@@ -424,7 +398,7 @@ async def _score_decode(engine, body: dict) -> dict:
 
 
 async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
-    """POST /kot/score: write the two arrays into out_dir, name them back."""
+    """POST /score: write the two arrays into out_dir, name them back."""
     if body["mode"] == "prefill":
         async with lock:
             return await _score_prefill(engine, body)
@@ -480,7 +454,7 @@ def _usage(prompt_tokens: int, done: dict) -> dict:
 def _chat_parts(messages: list[dict]) -> tuple[str, object]:
     """The chat surface's user turn as (instruction text, image).
 
-    The harness sends multimodal messages: a text part and the document as an
+    Clients send multimodal messages: a text part and the document as an
     image_url data URI. The prompt the checkpoint expects is the image
     placeholder first, then the instruction -- exactly the shape the score
     path builds -- so the text is what follows the placeholder, the image is
@@ -501,7 +475,7 @@ def _chat_parts(messages: list[dict]) -> tuple[str, object]:
                 text_parts.append(str(part.get("text", "")))
             elif kind in ("image", "image_url"):
                 if image is not None:
-                    raise ScoreFailure("one image per request: the harness sends one document")
+                    raise ScoreFailure("one image per request: expected a single document")
                 if kind == "image":
                     image = part.get("image")
                 else:
@@ -548,7 +522,7 @@ async def _completions(engine, body: dict, _lock: asyncio.Lock) -> dict:
 
 
 async def _chat_completions(engine, body: dict, _lock: asyncio.Lock) -> dict:
-    """POST /v1/chat/completions: the multimodal surface the speed harness drives."""
+    """POST /v1/chat/completions: the multimodal surface the load-test client drives."""
     text, image = _chat_parts(list(body["messages"]))
     params, max_tokens = _openai_sampling(body)
     ids = [BOS_ID, engine.image_token_id, *engine.tokenize("\n" + text)]
@@ -639,11 +613,11 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
     A hub snapshot's path names both. Any other directory does not name its
-    hub id; ``_name_or_path`` in config.json usually does. KOT_MODEL_ID /
-    KOT_MODEL_REVISION override both.
+    hub id; ``_name_or_path`` in config.json usually does. SERVE_MODEL_ID /
+    SERVE_MODEL_REVISION override both.
     """
-    override_id = os.environ.get("KOT_MODEL_ID", "")
-    override_revision = os.environ.get("KOT_MODEL_REVISION", "")
+    override_id = os.environ.get("SERVE_MODEL_ID", "")
+    override_revision = os.environ.get("SERVE_MODEL_REVISION", "")
     if override_id:
         return override_id, override_revision
     model_id = Path(model_dir).name
@@ -659,7 +633,7 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     return snapshot_id or model_id, override_revision or snapshot_revision or revision
 
 
-class KotEngine:
+class ServingEngine:
     """What the endpoints need from the engine, named once."""
 
     def __init__(self, model_dir: str, device: str):
@@ -702,7 +676,7 @@ class KotEngine:
             kwargs["tp_size"] = torch.cuda.device_count()
             kwargs["attention_backend"] = "triton"
             kwargs["enable_deterministic_inference"] = True
-        print(f"[kot_server] engine args: {kwargs}", flush=True)
+        print(f"[serve] engine args: {kwargs}", flush=True)
         self.engine = Engine(**kwargs)
 
         model_config = self.engine.tokenizer_manager.model_config
@@ -734,9 +708,9 @@ class KotEngine:
         # delivery (sglang's custom_logit_processor): the scheduler
         # deserializes it by name, so serve.sh installs the module into
         # site-packages. Applied to every sampling request.
-        from kot_ocr_ngram import KotOCR2NoRepeatNGram
+        from ocr_ngram import ServeOCR2NoRepeatNGram
 
-        self.ngram_processor = KotOCR2NoRepeatNGram.to_str()
+        self.ngram_processor = ServeOCR2NoRepeatNGram.to_str()
 
     def slice_vocab(self, block: np.ndarray) -> np.ndarray:
         """A padded engine's lm_head emits -inf over the pad columns; the
@@ -862,7 +836,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
             method, path, headers, body = request
             close = headers.get("connection", "").lower() == "close"
             try:
-                if method == "GET" and path == "/kot/info":
+                if method == "GET" and path == "/info":
                     writer.write(_json_bytes(200, info))
                     await writer.drain()
                 elif method == "POST" and path in ROUTES:
@@ -889,7 +863,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                             # already on the wire: the failure travels as an
                             # event, then the connection closes.
                             traceback.print_exc()
-                            print(f"[kot_server] stream {path} failed", flush=True)
+                            print(f"[serve] stream {path} failed", flush=True)
                             payload = {
                                 "error": type(stream_failure).__name__,
                                 "detail": str(stream_failure),
@@ -907,19 +881,19 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                     else:
                         writer.write(_json_bytes(200, result))
                         await writer.drain()
-                elif method == "POST" and path == "/kot/score":
+                elif method == "POST" and path == "/score":
                     payload = json.loads(body or b"{}")
                     result = await score(engine, payload, score_lock)
                     writer.write(_json_bytes(200, result))
                     await writer.drain()
                 else:
-                    served = "no such endpoint" if path != "/kot/infer" else \
-                        "this family serves no /kot/infer"
+                    served = "no such endpoint" if path != "/infer" else \
+                        "this family serves no /infer"
                     writer.write(_json_bytes(404, {"error": "not_served", "detail": f"{path}: {served}"}))
                     await writer.drain()
             except Exception as failure:
                 traceback.print_exc()
-                print(f"[kot_server] request {path} failed", flush=True)
+                print(f"[serve] request {path} failed", flush=True)
                 try:
                     writer.write(_json_bytes(
                         500, {"error": type(failure).__name__, "detail": str(failure)}
@@ -945,15 +919,15 @@ def _warmup_image():
 
 
 async def run_server(port: int, model: str, device: str) -> None:
-    if not os.environ.get("KOT_SGLANG_STASH_DIR"):
-        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
+    if not os.environ.get("SERVE_SGLANG_STASH_DIR"):
+        print("[serve] SERVE_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
         raise SystemExit(2)
 
     # Created inside the running loop, the Engine adopts it: tokenizer
     # manager, HTTP server and every generation stream share one loop.
-    engine = KotEngine(model, device)
+    engine = ServingEngine(model, device)
     info = _engine_info(engine)
-    print(f"[kot_server] serving: {info}", flush=True)
+    print(f"[serve] serving: {info}", flush=True)
 
     # One tiny image-driven generation so the first real request does not pay
     # compile and graph costs; the stash it would write is cleaned on both
@@ -973,13 +947,13 @@ async def run_server(port: int, model: str, device: str) -> None:
         port,
         backlog=2048,
     )
-    print(f"[kot_server] listening on 127.0.0.1:{port}", flush=True)
+    print(f"[serve] listening on 127.0.0.1:{port}", flush=True)
     async with server:
         await server.serve_forever()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="kot_server.py")
+    parser = argparse.ArgumentParser(prog="serve.py")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--device", required=True)

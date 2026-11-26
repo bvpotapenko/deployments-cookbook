@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# kot_serve.sh -- port, model, device: the whole contract surface this script takes.
-#
-# Two ways this script is started:
-#
-# * inside the graded container (gather built it from the CANN base image with
-#   torch_npu): run serve.py directly. A container cannot start another one.
-# * on a bare Ascend host (a golden capture with --no-container, or a human):
-#   the host interpreter has no torch_npu, so wrap docker run with the Ascend
-#   driver mounts and device nodes, mirroring kot.platforms' ascend-910b row.
+# Launch the model on Ascend, using the local engine or the deployment container.
 set -euo pipefail
 
 PORT=""
@@ -24,13 +16,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device DEVICE" >&2
+  echo "usage: serve.sh --port P --model PATH --device DEVICE" >&2
   exit 2
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# The speed harness's auto warmup opens hundreds of pooled connections in one
+# The load-test client's auto warmup opens hundreds of pooled connections in one
 # burst; the docker default soft nofile (1024) makes accept() fail with EMFILE
 # past the first thousand and the accept loop wedges with a full backlog. A
 # process may raise its own soft limit to the hard limit.
@@ -41,9 +33,9 @@ if python3 -c "import torch_npu" >/dev/null 2>&1; then
   exec python3 "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
 fi
 
-IMAGE="${KOT_NPU_IMAGE:-kot-llm-ascend-910b:latest}"
+IMAGE="${SERVE_NPU_IMAGE:-serve-llm-ascend-910b:latest}"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "[kot_serve] building $IMAGE from $HERE/Dockerfile (first run only)" >&2
+  echo "[serve] building $IMAGE from $HERE/Dockerfile (first run only)" >&2
   docker build -t "$IMAGE" "$HERE" >&2
 fi
 
@@ -58,11 +50,11 @@ else
   DOCKER_ARGS+=(-e HF_HOME=/tmp/hf -e HF_HUB_OFFLINE=1)
 fi
 
-# Every directory in KOT_OUT_MOUNTS (colon separated) is mounted rw at the same
-# path: /kot/score writes exactly where the host-side runner will read. Point
-# it at the capture tree; never at a store that holds goldens.
-for dir in ${KOT_OUT_MOUNTS:-}; do
-  [[ -d "$dir" ]] || { echo "KOT_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
+# Every directory in SERVE_OUT_MOUNTS (colon separated) is mounted rw at the same
+# path: /score writes exactly where the host-side runner will read. Point
+# it at the output directory.
+for dir in ${SERVE_OUT_MOUNTS:-}; do
+  [[ -d "$dir" ]] || { echo "SERVE_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
   DOCKER_ARGS+=(-v "${dir}:${dir}")
 done
 

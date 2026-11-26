@@ -1,27 +1,10 @@
-"""The kot deployment contract, served over one embedded SGLang engine (NPU).
+"""Serve inference and token scores with SGLang.
 
-    kot_server.py --port P --model /model --device npu
+    serve.py --port P --model /model --device npu
 
-Started by ``kot_serve.sh``. One asyncio process: the adapter (this file)
-embeds ``sglang.Engine`` inside its own event loop, so /kot/score and the
-speed harness drive the same resident engine, as the contract requires.
-
-Endpoints:
-
-* ``GET /kot/info`` -- provenance from the running process: the engine
-  version, the dtype the parameters actually sit in, the vocabulary width
-  the lm_head was built with (the configured one, before any padding).
-* ``POST /kot/score`` -- writes ``log_probs.npy`` and ``input_ids.npy`` into
-  ``out_dir`` and names them back. The ids are consumed verbatim: they are
-  passed to the engine as ``input_ids``, which bypasses the tokenizer
-  entirely, so nothing prepends BOS, applies a template or truncates. Rows
-  are the pre-sampling distributions of ``sitecustomize.py``: float32
-  log-softmax over the configured vocabulary.
-* ``POST /v1/completions`` and ``/v1/chat/completions`` -- the OpenAI-shaped
-  surface the speed harness drives, with SSE streaming. This is the one
-  place a prompt is tokenized, by the engine's own tokenizer (the files
-  beside the weights at --model).
-* ``POST /kot/infer`` -- 404: a token family serves no such endpoint.
+Started by ``serve.sh``. One asyncio process: the adapter (this file)
+embeds ``sglang.Engine`` inside its own event loop, so /score and the
+load-test client drive the same resident engine, as the contract requires.
 
 Numerics of the score path, in one place:
 
@@ -40,14 +23,7 @@ Numerics of the score path, in one place:
 
 Rows land on disk through ``open_memmap`` at the final shape, filled block by
 block as the engine's stash arrives: the full-vocabulary log-softmax of an
-8,192-token decode is about 5 GB, and no stage of this file holds one.
-
-Concurrency: one event loop; the Engine is created inside it, so the
-tokenizer manager, the HTTP server and every generation stream share the
-loop and the engine batches whatever is in flight. /kot/score is serialised
-by a lock -- the runner sends one at a time, and one-request-at-a-time is
-also what makes the stash collection sound (see sitecustomize.py).
-"""
+8,192-token decode is about 5 GB, and no stage of this file holds one."""
 
 from __future__ import annotations
 
@@ -80,7 +56,7 @@ def _utc_stamp() -> str:
 
 def _clean_stash() -> set[str]:
     """Empty the stash dir, return what is there now: the baseline for one request."""
-    stash = os.environ["KOT_SGLANG_STASH_DIR"]
+    stash = os.environ["SERVE_SGLANG_STASH_DIR"]
     for name in os.listdir(stash):
         path = Path(stash) / name
         try:
@@ -92,7 +68,7 @@ def _clean_stash() -> set[str]:
 
 async def _collect_stash(kind: str) -> list[np.ndarray]:
     """Every complete stash archive of one kind, in write order, then delete them."""
-    stash = os.environ["KOT_SGLANG_STASH_DIR"]
+    stash = os.environ["SERVE_SGLANG_STASH_DIR"]
     deadline = time.monotonic() + STASH_WAIT_S
     while True:
         blocks: list[tuple[int, Path]] = []
@@ -234,14 +210,14 @@ async def _score_decode(engine, input_ids: list[int], max_new_tokens: int,
         *blocks, last = blocks
         if last.shape[0] > 1:
             blocks.append(np.ascontiguousarray(last[:-1]))
-        print("[kot_server] trimmed 1 overlap phantom decode row", flush=True)
+        print("[serve] trimmed 1 overlap phantom decode row", flush=True)
     elif rows != len(output_ids):
         raise ScoreFailure(f"{rows} stashed rows for {len(output_ids)} generated ids")
     return blocks, output_ids
 
 
 async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
-    """POST /kot/score: write the two arrays into out_dir, name them back, never return tensors."""
+    """POST /score: write the two arrays into out_dir, name them back, never return tensors."""
     input_ids = [int(token) for token in body["input_ids"]]
     if not input_ids:
         raise ScoreFailure("empty input_ids")
@@ -317,7 +293,7 @@ def _usage(prompt_tokens: int, done: dict) -> dict:
 async def _completions(engine, body: dict, _lock: asyncio.Lock) -> dict:
     """POST /v1/completions: the OpenAI surface.
 
-    The harness may send `prompt` as a pre-tokenized id list -- the ids go to
+    Clients may send `prompt` as a pre-tokenized id list -- the ids go to
     the engine verbatim, exactly like the score path. A string prompt is
     tokenized by the engine's own tokenizer.
     """
@@ -437,7 +413,7 @@ def _model_identity(model_dir: Path, config: dict) -> tuple[str, str]:
     return model_id.split("/")[-1], revision
 
 
-class KotEngine:
+class ServingEngine:
     """What the endpoints need from the engine, named once."""
 
     def __init__(self, model_dir: str, device: str):
@@ -474,7 +450,7 @@ class KotEngine:
             "mem_fraction_static": 0.85,
             "log_level": "info",
         }
-        print(f"[kot_server] engine args: {kwargs}", flush=True)
+        print(f"[serve] engine args: {kwargs}", flush=True)
         self.engine = Engine(**kwargs)
 
         model_config = self.engine.tokenizer_manager.model_config
@@ -597,7 +573,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
             method, path, headers, body = request
             close = headers.get("connection", "").lower() == "close"
             try:
-                if method == "GET" and path == "/kot/info":
+                if method == "GET" and path == "/info":
                     writer.write(_json_bytes(200, info))
                     await writer.drain()
                 elif method == "POST" and path in ROUTES:
@@ -625,7 +601,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                             # land inside the body. The failure travels as an
                             # event, then the connection closes.
                             traceback.print_exc()
-                            print(f"[kot_server] stream {path} failed", flush=True)
+                            print(f"[serve] stream {path} failed", flush=True)
                             payload = {
                                 "error": type(stream_failure).__name__,
                                 "detail": str(stream_failure),
@@ -644,19 +620,19 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                     else:
                         writer.write(_json_bytes(200, result))
                         await writer.drain()
-                elif method == "POST" and path == "/kot/score":
+                elif method == "POST" and path == "/score":
                     payload = json.loads(body or b"{}")
                     result = await score(engine, payload, score_lock)
                     writer.write(_json_bytes(200, result))
                     await writer.drain()
                 else:
-                    served = "no such endpoint" if path != "/kot/infer" else \
-                        "a token family serves no /kot/infer"
+                    served = "no such endpoint" if path != "/infer" else \
+                        "a token family serves no /infer"
                     writer.write(_json_bytes(404, {"error": "not_served", "detail": f"{path}: {served}"}))
                     await writer.drain()
             except Exception as failure:
                 traceback.print_exc()
-                print(f"[kot_server] request {path} failed", flush=True)
+                print(f"[serve] request {path} failed", flush=True)
                 try:
                     writer.write(_json_bytes(
                         500, {"error": type(failure).__name__, "detail": str(failure)}
@@ -675,15 +651,15 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
 
 
 async def run_server(port: int, model: str, device: str) -> None:
-    if not os.environ.get("KOT_SGLANG_STASH_DIR"):
-        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through kot_serve.sh", flush=True)
+    if not os.environ.get("SERVE_SGLANG_STASH_DIR"):
+        print("[serve] SERVE_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
         raise SystemExit(2)
 
     # Created inside the running loop, the Engine adopts it: tokenizer
     # manager, HTTP server and every generation stream share one loop.
-    engine = KotEngine(model, device)
+    engine = ServingEngine(model, device)
     info = _engine_info(engine, device)
-    print(f"[kot_server] serving: {info}", flush=True)
+    print(f"[serve] serving: {info}", flush=True)
 
     # One tiny generation so the first real request does not pay compile and
     # graph costs; the stash it would write is cleaned on both sides.
@@ -701,13 +677,13 @@ async def run_server(port: int, model: str, device: str) -> None:
         port,
         backlog=2048,
     )
-    print(f"[kot_server] listening on 127.0.0.1:{port}", flush=True)
+    print(f"[serve] listening on 127.0.0.1:{port}", flush=True)
     async with server:
         await server.serve_forever()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="kot_server.py")
+    parser = argparse.ArgumentParser(prog="serve.py")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--device", required=True)

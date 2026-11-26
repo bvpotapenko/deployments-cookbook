@@ -8,7 +8,7 @@ default): a token that would complete an n-gram that already occurred
 within the lookback window is banned from sampling, except the table
 tokens, so table structure may repeat.
 
-The logprobs kot stores stay raw: ``logprobs_mode`` defaults to
+The returned logprobs stay raw: ``logprobs_mode`` defaults to
 ``raw_logprobs``, which computes them from the logits before this stage
 runs.
 """
@@ -21,7 +21,7 @@ NGRAM_WINDOW = 90
 NGRAM_WHITELIST = frozenset({128821, 128822})  # <td>, </td>
 
 
-class KotNoRepeatNGramLogitsProcessor(LogitsProcessor):
+class ServeNoRepeatNGramLogitsProcessor(LogitsProcessor):
     """Ban tokens that would complete a repeated n-gram, per request."""
 
     def __init__(self, vllm_config, device, is_pin_memory):

@@ -12,7 +12,7 @@ at the deployment default. Read a model's row against the same row in the
 other engine run books. A mismatch between engines is the first suspect when
 a comparison fails.
 
-| model | revision | cards | `KOT_VLLM_GPU_MEM` | `KOT_VLLM_MAX_BATCHED_TOKENS` | `KOT_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
+| model | revision | cards | `SERVE_VLLM_GPU_MEM` | `SERVE_VLLM_MAX_BATCHED_TOKENS` | `SERVE_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
 |---|---|---|---|---|---|---|---|
 | Qwen/Qwen3-0.6B | `c1899de289a04d12100db370d81485cdf75e47ca` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.6, top_p 0.95, top_k 20 |
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.60 | 1024 | unset | bfloat16 | temperature 0.3, top_p 0.95 |
@@ -30,16 +30,16 @@ CPython 3.12.
 
 ```bash
 # networked host
-uv venv /scratch/kot-vllm-venv --python 3.12
-uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.33.0"
+uv venv /scratch/serve-vllm-venv --python 3.12
+uv pip install --python /scratch/serve-vllm-venv/bin/python "vllm==0.33.0"
 
 # offline host: rebuild the closure, then install from it
 ./make_wheels.sh
-/scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
+/scratch/serve-vllm-venv/bin/pip install --no-index --no-cache-dir \
   --find-links ./wheels "vllm==0.33.0"
 ```
 
-Verify: `/scratch/kot-vllm-venv/bin/python -c "import vllm; print(vllm.__version__)"` prints `0.33.0`.
+Verify: `/scratch/serve-vllm-venv/bin/python -c "import vllm; print(vllm.__version__)"` prints `0.33.0`.
 
 Run long installs inside tmux; an ssh drop then costs nothing. Export
 `UV_CACHE_DIR=/workspace/uvcache` and `UV_HTTP_TIMEOUT=600` in the same
@@ -103,7 +103,7 @@ matches the source.
 ### Start
 
 ```bash
-KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
+SERVE_PYTHON=/scratch/serve-vllm-venv/bin/python \
   ./serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
 ```
 
@@ -114,14 +114,14 @@ requested rows of the cached prefix never computed.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_PYTHON` | ambient python3 | interpreter that has vllm. Set it when the venv is not at the default path. |
-| `KOT_VENV` | `/scratch/kot-vllm-venv` | offline venv location. |
-| `KOT_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom is needed for the log-probability pass. |
-| `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | caps the per-step transient of that pass. |
-| `KOT_VLLM_MAX_MODEL_LEN` | engine config | caps `max_model_len`, and with it the reserved KV cache. |
-| `KOT_VLLM_DTYPE` | engine auto | compute dtype, for example `float32` for a cross-check. |
-| `KOT_VLLM_MOE_BACKEND` | `triton` | MoE backend. `auto` picks flashinfer's cutlass MoE on Blackwell, whose JIT needs nvcc and dies at init on hosts without it. |
-| `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived | override the reported identity. |
+| `SERVE_PYTHON` | ambient python3 | interpreter that has vllm. Set it when the venv is not at the default path. |
+| `SERVE_VENV` | `/scratch/serve-vllm-venv` | offline venv location. |
+| `SERVE_VLLM_GPU_MEM` | `0.35` | `gpu_memory_utilization`. Headroom is needed for the log-probability pass. |
+| `SERVE_VLLM_MAX_BATCHED_TOKENS` | `2048` | caps the per-step transient of that pass. |
+| `SERVE_VLLM_MAX_MODEL_LEN` | engine config | caps `max_model_len`, and with it the reserved KV cache. |
+| `SERVE_VLLM_DTYPE` | engine auto | compute dtype, for example `float32` for a cross-check. |
+| `SERVE_VLLM_MOE_BACKEND` | `triton` | MoE backend. `auto` picks flashinfer's cutlass MoE on Blackwell, whose JIT needs nvcc and dies at init on hosts without it. |
+| `SERVE_MODEL_ID` / `SERVE_MODEL_REVISION` | derived | override the reported identity. |
 | `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value. |
 
 ## Models
@@ -136,8 +136,8 @@ bf16, 29.3 GB. It needs both cards; the engine opens tensor parallel over
 every visible card.
 
 ```bash
-KOT_VLLM_GPU_MEM=0.60 KOT_VLLM_MAX_BATCHED_TOKENS=1024 \
-KOT_VLLM_MAX_MODEL_LEN=16384 \
+SERVE_VLLM_GPU_MEM=0.60 SERVE_VLLM_MAX_BATCHED_TOKENS=1024 \
+SERVE_VLLM_MAX_MODEL_LEN=16384 \
   ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
@@ -145,13 +145,13 @@ Both directions fail. A higher memory setting fills the card and the
 full-vocabulary top-k of the log-probability pass dies out of memory
 (verified on the 0.32 line: 0.70 leaves 803 MB free where the top-k over
 a 1024-token chunk needs about 1 GB). A lower setting falls under the
-per-card weights, 14.65 GB. `KOT_VLLM_MAX_MODEL_LEN=16384` shrinks the
+per-card weights, 14.65 GB. `SERVE_VLLM_MAX_MODEL_LEN=16384` shrinks the
 engine's KV floor from 163,840 tokens to a few hundred MB, and every
 workload here stays under 16k tokens. The same memory setting serves every
 launch of this model:
 
 ```bash
-KOT_VLLM_GPU_MEM=0.60 KOT_VLLM_MAX_MODEL_LEN=16384 \
+SERVE_VLLM_GPU_MEM=0.60 SERVE_VLLM_MAX_MODEL_LEN=16384 \
   ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
@@ -193,4 +193,4 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 ```
 
 The `model` field must equal one of the aliases the server prints in its
-log (`/kot/info` names them: the checkpoint id and the weights path).
+log (`/info` names them: the checkpoint id and the weights path).

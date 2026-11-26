@@ -1,13 +1,9 @@
-"""kot deployment contract adapter around a vLLM engine, in one process.
+"""Serve inference and token scores with vLLM.
 
-    kot_serve.py --port P --model /path/to/weights --device cuda
+    serve.py --port P --model /path/to/weights --device cuda
 
-The vLLM OpenAI app is mounted as-is for /v1/completions and
-/v1/chat/completions (the speed harness drives it, sending pre-tokenized
-prompts as a list of ids). The contract endpoints are added to the same app:
-
-  GET  /kot/info   provenance: the running engine, its dtype, the vocab width
-  POST /kot/score  writes log_probs.npy + input_ids.npy into out_dir; a decode
+  GET  /info   provenance: the running engine, its dtype, the vocab width
+  POST /score  writes log_probs.npy + input_ids.npy into out_dir; a decode
                    answers in JSON lines, one per 256-row block, so a long
                    generation streams instead of answering at the end
 
@@ -40,8 +36,7 @@ The one patch: vLLM pythonizes those full-vocab tensors into ~vocab_size
 Logprob objects per position on the frontend (78M objects for a 512-token
 prompt). The tap below keeps the raw tensors instead and leaves cheap
 placeholders in vLLM's own lists, so its invariants hold and nothing else
-changes.
-"""
+changes."""
 
 from __future__ import annotations
 
@@ -94,10 +89,10 @@ from vllm.entrypoints.launchers.launcher import serve_http  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
-INFO = "/kot/info"
-SCORE = "/kot/score"
+INFO = "/info"
+SCORE = "/score"
 CONTRACT_VERSION = 1
-SCORE_PREFIX = "kot-score-"
+SCORE_PREFIX = "serve-score-"
 # This server mounts completions and chat; generate is the only task it
 # serves. Passing it explicitly keeps vLLM's deprecation warning away and
 # pins the value a future vllm line will demand.
@@ -123,8 +118,8 @@ def _install_logprobs_tap() -> None:
 
     def from_new_request(cls, tokenizer, request):
         processor = original_from_new_request(cls, tokenizer, request)
-        processor.kot_prompt_tensors = []
-        processor.kot_sample_lists = []
+        processor.serve_prompt_tensors = []
+        processor.serve_sample_lists = []
         # vLLM randomizes request_id (8 characters appended) and moves the
         # caller's id to external_req_id; the tap keys on the caller's id,
         # which the score handlers look up. Older lines have no such field.
@@ -136,13 +131,13 @@ def _install_logprobs_tap() -> None:
     def update_from_output(self, output):
         if output.new_prompt_logprobs_tensors is not None:
             tensors = output.new_prompt_logprobs_tensors
-            self.kot_prompt_tensors.append(tensors)
+            self.serve_prompt_tensors.append(tensors)
             self.prompt_logprobs.extend(
                 [{} for _ in range(tensors.logprob_token_ids.shape[0])]
             )
         if output.new_logprobs is not None:
             lists = output.new_logprobs
-            self.kot_sample_lists.append(lists)
+            self.serve_sample_lists.append(lists)
             self.logprobs.extend([{} for _ in range(len(lists.logprobs))])
 
     LogprobsProcessor.from_new_request = classmethod(from_new_request)
@@ -174,12 +169,12 @@ def _scatter_full_vocab(token_ids, logprobs, vocab_size: int) -> np.ndarray:
 
 def _prompt_rows(processor: LogprobsProcessor, vocab_size: int) -> np.ndarray:
     """The stashed prompt tensors as one [rows, vocab_size] float32 array."""
-    if not processor.kot_prompt_tensors:
+    if not processor.serve_prompt_tensors:
         raise RuntimeError("the engine produced no prompt logprobs at all")
     token_ids = np.concatenate(
-        [t.logprob_token_ids.numpy() for t in processor.kot_prompt_tensors]
+        [t.logprob_token_ids.numpy() for t in processor.serve_prompt_tensors]
     )
-    logprobs = np.concatenate([t.logprobs.numpy() for t in processor.kot_prompt_tensors])
+    logprobs = np.concatenate([t.logprobs.numpy() for t in processor.serve_prompt_tensors])
     return _scatter_full_vocab(token_ids, logprobs, vocab_size)
 
 
@@ -358,10 +353,10 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
             processor = processor or SINKS.get(request_id)
             while (
                 processor is not None
-                and len(processor.kot_sample_lists) - consumed >= BLOCK_ROWS
+                and len(processor.serve_sample_lists) - consumed >= BLOCK_ROWS
             ):
                 block = _decode_rows(
-                    processor.kot_sample_lists[consumed:consumed + BLOCK_ROWS], vocab_size
+                    processor.serve_sample_lists[consumed:consumed + BLOCK_ROWS], vocab_size
                 )
                 _check_well_formed(block)
                 log_probs[written:written + block.shape[0]] = block
@@ -375,14 +370,14 @@ async def _decode_stream(engine, body: dict, vocab_size: int):
             )
             return
         processor = processor or SINKS.pop(request_id, None)
-        if processor is None or not processor.kot_sample_lists:
+        if processor is None or not processor.serve_sample_lists:
             yield _line(
                 {"error": "RuntimeError",
                  "detail": "no logprob tap for the request; the V1 LogprobsProcessor patch did not run"}
             )
             return
-        if len(processor.kot_sample_lists) > consumed:
-            block = _decode_rows(processor.kot_sample_lists[consumed:], vocab_size)
+        if len(processor.serve_sample_lists) > consumed:
+            block = _decode_rows(processor.serve_sample_lists[consumed:], vocab_size)
             _check_well_formed(block)
             log_probs[written:written + block.shape[0]] = block
             written += block.shape[0]
@@ -438,12 +433,12 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
     A hub snapshot's path names both. Any other directory does not name its
-    hub id; ``_name_or_path`` in config.json usually does. KOT_MODEL_ID /
-    KOT_MODEL_REVISION override both,
-    e.g. when the runner knows the id and the directory does not.
+    hub id; ``_name_or_path`` in config.json usually does. SERVE_MODEL_ID /
+    SERVE_MODEL_REVISION override both,
+    e.g. when the client knows the ID and the directory does not.
     """
-    override_id = os.environ.get("KOT_MODEL_ID", "")
-    override_revision = os.environ.get("KOT_MODEL_REVISION", "")
+    override_id = os.environ.get("SERVE_MODEL_ID", "")
+    override_revision = os.environ.get("SERVE_MODEL_REVISION", "")
     if override_id:
         return override_id, override_revision
     model_id = Path(model_dir).name
@@ -476,7 +471,7 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
 
     container.add_argument = _shimmed_add_argument
     try:
-        args = make_arg_parser(argparse.ArgumentParser(prog="kot_serve")).parse_args([])
+        args = make_arg_parser(argparse.ArgumentParser(prog="serve")).parse_args([])
     finally:
         container.add_argument = original_add_argument
     args.model = model
@@ -489,30 +484,28 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     # "auto" picks flashinfer's cutlass MoE on Blackwell, whose JIT needs
     # nvcc - absent on serving hosts - and dies at engine init (verified on
     # sm_120: flashinfer raises "No supported CUDA architectures" at boot).
-    # The triton MoE backend runs sm_120 fine. KOT_VLLM_MOE_BACKEND
+    # The triton MoE backend runs sm_120 fine. SERVE_VLLM_MOE_BACKEND
     # overrides for hosts that do carry the toolkit.
-    args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
+    args.moe_backend = os.environ.get("SERVE_VLLM_MOE_BACKEND", "triton")
     # Full-vocab logprob gathering holds ~16 bytes per (row, vocab) on the GPU
     # for every scheduled token in a step; at the default 8192 that is ~22GB
     # and an over-long prompt kills the whole engine. 2048 caps the transient
     # at ~2.5GB regardless of prompt length.
-    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "2048"))
-    if os.environ.get("KOT_VLLM_MAX_MODEL_LEN"):
-        args.max_model_len = int(os.environ["KOT_VLLM_MAX_MODEL_LEN"])
+    args.max_num_batched_tokens = int(os.environ.get("SERVE_VLLM_MAX_BATCHED_TOKENS", "2048"))
+    if os.environ.get("SERVE_VLLM_MAX_MODEL_LEN"):
+        args.max_model_len = int(os.environ["SERVE_VLLM_MAX_MODEL_LEN"])
     # And gpu_memory_utilization=0.9 hands that whole margin to the KV cache,
     # so the gather OOMs anyway. 0.35 keeps room for it even in fp32; for a
-    # 0.6B model that is still ~9GB of KV cache per rank. KOT_VLLM_GPU_MEM
+    # 0.6B model that is still ~9GB of KV cache per rank. SERVE_VLLM_GPU_MEM
     # overrides for models whose KV cache actually needs more.
-    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.35"))
-    # KOT_VLLM_DTYPE=float32 exists for cross-checking numerics against a
-    # float32 reference; a capture runs the engine's own default ("auto").
-    dtype_override = os.environ.get("KOT_VLLM_DTYPE", "")
+    args.gpu_memory_utilization = float(os.environ.get("SERVE_VLLM_GPU_MEM", "0.35"))
+    dtype_override = os.environ.get("SERVE_VLLM_DTYPE", "")
     if dtype_override:
         args.dtype = dtype_override
     # The default is vLLM's own compilation (piecewise torch.compile with CUDA
     # graphs), which the TRITON_MAX_BLOCK fix above unblocks on Blackwell.
     # "eager" is the escape hatch if a compile ever misbehaves.
-    if os.environ.get("KOT_VLLM_COMPILATION", "").lower() == "eager":
+    if os.environ.get("SERVE_VLLM_COMPILATION", "").lower() == "eager":
         args.enforce_eager = True
     if device == "cuda":
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
@@ -523,13 +516,13 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     return args
 
 
-def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
+def _register_serve_routes(app, engine, vocab_size: int, info: dict) -> None:
     @app.get(INFO)
-    async def kot_info() -> JSONResponse:
+    async def serve_info() -> JSONResponse:
         return JSONResponse(info)
 
     @app.post(SCORE)
-    async def kot_score(request: Request):
+    async def serve_score(request: Request):
         try:
             body = await request.json()
             if body.get("mode") == "decode":
@@ -546,10 +539,13 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
 
     # One deployment, one engine: served_model_name carries both the hub id
     # and the weights path, so OpenAI requests may name either (the speed
-    # harness echoes the runner's --model-id), and a request without a model
+    # client may send either), and a request without a model
     # field is answered by the sole served model. vLLM builds the
     # middleware stack inside build_app, so no middleware may be added here;
     # none is needed.
+
+    # The engine may also register POST /score. Dispatch our score handler first.
+    app.router.routes.insert(0, app.router.routes.pop())
 
 
 def _nvidia_driver() -> str:
@@ -575,7 +571,7 @@ def _placed_devices(device: str, parallel_config) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="kot_serve.py", description=__doc__)
+    parser = argparse.ArgumentParser(prog="serve.py", description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True, help="the weights directory, read-only")
     parser.add_argument("--device", default="cuda", help="torch device string from the platform row")
@@ -607,9 +603,9 @@ def main() -> int:
             # Routes go on before init_app_state, so the app starts with the
             # contract endpoints in place; the OpenAI surface never needs a
             # model-name rewrite (served_model_name answers both spellings).
-            _register_kot_routes(app, engine, int(model_config.hf_config.vocab_size), info)
+            _register_serve_routes(app, engine, int(model_config.hf_config.vocab_size), info)
             await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
-            print(f"[kot-vllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
+            print(f"[serve-vllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(app, sock=None, host=args.host, port=args.port, log_level="warning")
 
     asyncio.run(run())

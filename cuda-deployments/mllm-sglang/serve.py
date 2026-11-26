@@ -1,34 +1,13 @@
-"""The kot deployment contract for the mllm family, over one embedded SGLang engine.
+"""Serve inference and token scores with SGLang.
 
-    kot_server.py --port P --model /path/to/Qwen3.8-27B --device cpu|cuda
+    serve.py --port P --model /path/to/Qwen3.8-27B --device cpu|cuda
 
 Started by ``serve.sh``. One asyncio process: the adapter (this file)
-embeds ``sglang.Engine`` inside its own event loop, so /kot/score and the
-speed harness drive the same resident engine, as the contract requires. The
+embeds ``sglang.Engine`` inside its own event loop, so /score and the
+load-test client drive the same resident engine, as the contract requires. The
 architecture is the ocr-sglang deployment's; what changes is the family: the
 model is Qwen/Qwen3.8-27B (the native qwen3_5), a video-language checkpoint
 whose units are short clips.
-
-Endpoints:
-
-* ``GET /kot/info`` -- provenance from the running process.
-* ``POST /kot/score`` -- writes ``log_probs.npy`` and ``input_ids.npy`` into
-  ``out_dir`` and names them back. The frozen video inputs carry no ids: the
-  deployment renders the pinned instruct chat prompt itself (the
-  checkpoint's chat template, ``enable_thinking`` false, one video
-  placeholder) and consumes ids verbatim from there - the raw form on a
-  decode, the raw form plus the generated tail on a replay, the head
-  asserted. The video rides to the engine as an attachment path; the patch
-  layer samples the frames as the reference does (fps 2.0, pinned) and the
-  checkpoint's HF processor, inside the engine, resizes them under the
-  per-frame cap and expands the placeholder into the per-frame timestamp
-  structure. The patch layer puts that expansion in place of the
-  placeholder; every other id reaches the model as sent.
-* ``POST /kot/infer`` -- the speed surface: one video decode, the
-  description written as ``text.txt`` into ``out_dir``, the file named back.
-* ``POST /v1/chat/completions`` -- the OpenAI-shaped surface the speed harness
-  drives: one user message, a text part and an optional video part, rendered
-  and pinned as /kot/score renders and pins them; streams on ``stream: true``.
 
 Numerics of the score path, in one place:
 
@@ -55,20 +34,7 @@ stash archive at a time: the full-vocabulary log-softmax of an 8,192-token
 decode at this vocabulary (248,320) is 7.6 GiB, and no stage of this file
 holds one. Each archive's marker states its row count, so the counts are
 checked before any row is read; this file holds one archive (one decode
-row, or one logprob chunk of a prefill) and deletes it once copied.
-
-Concurrency: one event loop; the Engine is created inside it. /kot/score is
-serialised by a lock -- the runner sends one at a time, and
-one-request-at-a-time is what makes the stash collection sound (see
-sitecustomize.py). /v1/chat/completions takes no lock: each connection awaits
-the engine on its own, video decoding and the HF pass run off the event loop
-(the patch layer, ``mm_processor_worker_num``), and the scheduler batches what
-arrives. Chat asks for no logprobs, so alone it writes no stash. A score that
-shares a batch with chat traffic stashes their rows too, with no request id, so
-the row counts (``prompt_tokens`` on a prefill, the generated ids on a decode)
-fail that score loudly; the chat is untouched. The runner must not overlap the
-two.
-"""
+row, or one logprob chunk of a prefill) and deletes it once copied."""
 
 from __future__ import annotations
 
@@ -90,11 +56,6 @@ UTF8 = "utf-8"
 STASH_WAIT_S = 60.0
 
 VIDEO = "video"
-# The pinned media pipeline, the same values the transformers reference
-# serves (mllm-transformers/serve.py). The processor's own frame sampling
-# defaults to fps 2.0, its per-frame cap to off; both pinned here, for this
-# file's own processor call and for the engine (mm_process_config), so a
-# candidate must report the same values.
 VIDEO_PROMPT = "Describe what you see in the video."
 VIDEO_FPS = 2.0
 VIDEO_DO_SAMPLE_FRAMES = True
@@ -111,7 +72,7 @@ def _utc_stamp() -> str:
 
 def _clean_stash() -> set[str]:
     """Empty the stash dir, return what is there now: the baseline for one request."""
-    stash = os.environ["KOT_SGLANG_STASH_DIR"]
+    stash = os.environ["SERVE_SGLANG_STASH_DIR"]
     for name in os.listdir(stash):
         path = Path(stash) / name
         try:
@@ -134,7 +95,7 @@ def _stash_order(name: str) -> int:
 async def _stash_archives(kind: str) -> list[tuple[Path, int]]:
     """Every complete stash archive of one kind, in write order, with the row
     count its marker states. No rows are read here."""
-    stash = os.environ["KOT_SGLANG_STASH_DIR"]
+    stash = os.environ["SERVE_SGLANG_STASH_DIR"]
     deadline = time.monotonic() + STASH_WAIT_S
     while True:
         blocks: list[tuple[int, Path]] = []
@@ -156,7 +117,7 @@ async def _stash_archives(kind: str) -> list[tuple[Path, int]]:
         if "rows" not in marker:
             raise ScoreFailure(
                 f"the stash marker of {path.name} states no row count: the patch layer "
-                "is older than kot_server.py; start the server through serve.sh"
+                "is older than serve.py; start the server through serve.sh"
             )
         archives.append((path, int(marker["rows"])))
     return archives
@@ -283,7 +244,7 @@ def _consumed_guard(done: dict, ids: list[int], engine, raw: list[int], video_pa
             f"template's {len(raw)} expand to {len(expanded)}, so {expected} were "
             "expected: the request did not stay verbatim"
         )
-    note = Path(os.environ["KOT_SGLANG_STASH_DIR"]) / "last_video_ids.json"
+    note = Path(os.environ["SERVE_SGLANG_STASH_DIR"]) / "last_video_ids.json"
     try:
         consumed = json.loads(note.read_text(encoding=UTF8))["input_ids"]
     except (OSError, ValueError, KeyError):
@@ -432,7 +393,7 @@ async def _score_prefill(engine, body: dict) -> dict:
 def _attachment_path(entry) -> str:
     """The video attachment as the engine takes it: a plain filesystem path.
 
-    The runner sends the attachment as a dict ({"video": "..."} or the bare
+    The API accepts the attachment as a dict ({"video": "..."} or the bare
     string); both reduce to the path string.
     """
     if isinstance(entry, dict):
@@ -521,7 +482,7 @@ async def _score_decode(engine, body: dict) -> dict:
 
 
 async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
-    """POST /kot/score: write the two arrays into out_dir, name them back."""
+    """POST /score: write the two arrays into out_dir, name them back."""
     if body["mode"] == "prefill":
         async with lock:
             return await _score_prefill(engine, body)
@@ -533,8 +494,8 @@ async def score(engine, body: dict, lock: asyncio.Lock) -> dict:
     )
 
 
-async def kot_infer(engine, body: dict, lock: asyncio.Lock) -> dict:
-    """POST /kot/infer: the speed surface. One video decode, the description
+async def serve_infer(engine, body: dict, lock: asyncio.Lock) -> dict:
+    """POST /infer: the speed surface. One video decode, the description
     written into out_dir as text.txt, the file named back. Only the clock
     reads what lands here; the request runs under the same lock and the same
     engine the score path uses."""
@@ -600,14 +561,14 @@ def _chat_parts(messages: list[dict]) -> tuple[str, str | None]:
                 text_parts.append(str(part.get("text", "")))
             elif kind == "video_url":
                 if video is not None:
-                    raise ScoreFailure("one video per request: the harness sends one clip")
+                    raise ScoreFailure("one video per request: expected a single clip")
                 video = _video_source(str((part.get("video_url") or {}).get("url", "")))
     return "".join(text_parts), video
 
 
 def _chat_sampling(body: dict) -> dict:
     """The knobs a chat request may carry, in engine terms. A field left out or
-    null takes the checkpoint's own generation_config value, as /kot/infer does."""
+    null takes the checkpoint's own generation_config value, as /infer does."""
 
     def field(name: str, default):
         value = body.get(name)
@@ -630,8 +591,8 @@ def _finish_reason(done: dict) -> str:
 
 
 async def _chat_completions(engine, body: dict, _lock: asyncio.Lock) -> dict:
-    """POST /v1/chat/completions: same prompt and frame pins as /kot/score, no
-    lock, no logprobs. ``model`` in the reply is what /kot/info reports."""
+    """POST /v1/chat/completions: same prompt and frame pins as /score, no
+    lock, no logprobs. ``model`` in the reply is what /info reports."""
     text, video = _chat_parts(list(body["messages"]))
     ids = _prompt_ids(engine, text, video)
     params = _chat_sampling(body)
@@ -719,11 +680,11 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
     A hub snapshot's path names both. Any other directory does not name its
-    hub id; ``_name_or_path`` in config.json usually does. KOT_MODEL_ID /
-    KOT_MODEL_REVISION override both.
+    hub id; ``_name_or_path`` in config.json usually does. SERVE_MODEL_ID /
+    SERVE_MODEL_REVISION override both.
     """
-    override_id = os.environ.get("KOT_MODEL_ID", "")
-    override_revision = os.environ.get("KOT_MODEL_REVISION", "")
+    override_id = os.environ.get("SERVE_MODEL_ID", "")
+    override_revision = os.environ.get("SERVE_MODEL_REVISION", "")
     if override_id:
         return override_id, override_revision
     model_id = Path(model_dir).name
@@ -739,7 +700,7 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     return snapshot_id or model_id, override_revision or snapshot_revision or revision
 
 
-class KotEngine:
+class ServingEngine:
     """What the endpoints need from the engine, named once."""
 
     def __init__(self, model_dir: str, device: str):
@@ -768,7 +729,7 @@ class KotEngine:
             # budget allows 12,288 video tokens, plus the template) plus an
             # 8,192-token decode. A shorter window makes the scheduler cut
             # the decode without a message. 24,576 fits in the 25,626-token
-            # pool that KOT_SGLANG_MEM_FRACTION 0.89 sizes on 2x RTX 5090.
+            # pool that SERVE_SGLANG_MEM_FRACTION 0.89 sizes on 2x RTX 5090.
             "max_prefill_tokens": 16384,
             "context_length": 24576,
             # Explicit, because sglang's heuristic reserves
@@ -778,8 +739,8 @@ class KotEngine:
             # The fraction must also cover the weights per card and the
             # hybrid state cache: the 52G model at TP=2 holds 26G per card,
             # and 0.45 of a 32G card starves the budget before the cache is
-            # sized. KOT_SGLANG_MEM_FRACTION overrides for models that big.
-            "mem_fraction_static": float(os.environ.get("KOT_SGLANG_MEM_FRACTION", "0.45")),
+            # sized. SERVE_SGLANG_MEM_FRACTION overrides for models that big.
+            "mem_fraction_static": float(os.environ.get("SERVE_SGLANG_MEM_FRACTION", "0.45")),
             # The patch layer's frame step reads fps; the engine hands the cap
             # to the HF processor's videos_kwargs.
             "mm_process_config": {
@@ -796,7 +757,7 @@ class KotEngine:
             kwargs["tp_size"] = torch.cuda.device_count()
             kwargs["attention_backend"] = "triton"
             kwargs["enable_deterministic_inference"] = True
-        print(f"[kot_server] engine args: {kwargs}", flush=True)
+        print(f"[serve] engine args: {kwargs}", flush=True)
         self.engine = Engine(**kwargs)
 
         model_config = self.engine.tokenizer_manager.model_config
@@ -880,7 +841,7 @@ def _engine_info(engine) -> dict:
 
 
 ROUTES = {
-    "/kot/infer": kot_infer,
+    "/infer": serve_infer,
     "/v1/chat/completions": _chat_completions,
 }
 
@@ -947,7 +908,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
             method, path, headers, body = request
             close = headers.get("connection", "").lower() == "close"
             try:
-                if method == "GET" and path == "/kot/info":
+                if method == "GET" and path == "/info":
                     writer.write(_json_bytes(200, info))
                     await writer.drain()
                 elif method == "POST" and path in ROUTES:
@@ -974,7 +935,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                             # already on the wire: the failure travels as an
                             # event, then the connection closes.
                             traceback.print_exc()
-                            print(f"[kot_server] stream {path} failed", flush=True)
+                            print(f"[serve] stream {path} failed", flush=True)
                             payload = {
                                 "error": type(stream_failure).__name__,
                                 "detail": str(stream_failure),
@@ -991,7 +952,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                         break
                     writer.write(_json_bytes(200, result))
                     await writer.drain()
-                elif method == "POST" and path == "/kot/score":
+                elif method == "POST" and path == "/score":
                     payload = json.loads(body or b"{}")
                     result = await score(engine, payload, score_lock)
                     writer.write(_json_bytes(200, result))
@@ -1001,7 +962,7 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
                     await writer.drain()
             except Exception as failure:
                 traceback.print_exc()
-                print(f"[kot_server] request {path} failed", flush=True)
+                print(f"[serve] request {path} failed", flush=True)
                 try:
                     writer.write(_json_bytes(
                         500, {"error": type(failure).__name__, "detail": str(failure)}
@@ -1020,15 +981,15 @@ async def handle_connection(reader, writer, engine, info, score_lock) -> None:
 
 
 async def run_server(port: int, model: str, device: str) -> None:
-    if not os.environ.get("KOT_SGLANG_STASH_DIR"):
-        print("[kot_server] KOT_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
+    if not os.environ.get("SERVE_SGLANG_STASH_DIR"):
+        print("[serve] SERVE_SGLANG_STASH_DIR is unset; start through serve.sh", flush=True)
         raise SystemExit(2)
 
     # Created inside the running loop, the Engine adopts it: tokenizer
     # manager, HTTP server and every generation stream share one loop.
-    engine = KotEngine(model, device)
+    engine = ServingEngine(model, device)
     info = _engine_info(engine)
-    print(f"[kot_server] serving: {info}", flush=True)
+    print(f"[serve] serving: {info}", flush=True)
 
     # One text-only generation over the pinned prompt so the first real
     # request does not pay compile and graph costs, and the sampler runs
@@ -1049,13 +1010,13 @@ async def run_server(port: int, model: str, device: str) -> None:
         port,
         backlog=2048,
     )
-    print(f"[kot_server] listening on 127.0.0.1:{port}", flush=True)
+    print(f"[serve] listening on 127.0.0.1:{port}", flush=True)
     async with server:
         await server.serve_forever()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="kot_server.py")
+    parser = argparse.ArgumentParser(prog="serve.py")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--device", required=True)

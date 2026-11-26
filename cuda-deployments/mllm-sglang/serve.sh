@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Start the SGLang deployment of the kot contract, MLLM family (Qwen3.8-27B).
+# Start the SGLang deployment, MLLM family (Qwen3.8-27B).
 #
 #   ./serve.sh --port P --model /path/to/Qwen3.8-27B --device cpu|cuda
 #
-# One process serves everything: this script launches kot_server.py, which
-# embeds sglang.Engine in-process and answers /kot/info, /kot/score,
+# One process serves everything: this script launches serve.py, which
+# embeds sglang.Engine in-process and answers /info, /score,
 # /v1/completions and /v1/chat/completions (multimodal: a text part and the
 # document as an image_url data URI). The contract's one-server rule lives
-# here: the score path and the speed harness drive the same engine.
+# here: the score path and the load-test client drive the same engine.
 #
 # The engine is sglang 0.5.23 (Qwen3.8-27B runs the native qwen3_5
 # architecture). On a CUDA host it expects to find sglang,
 # sglang-kernel and triton already installed in the interpreter named
-# by KOT_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
+# by SERVE_SGLANG_PYTHON (or on PATH); see run-book.md for the exact wheel set.
 set -euo pipefail
 
 PORT=""
@@ -41,9 +41,9 @@ fi
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The interpreter that has sglang. The CUDA host names its engine venv with
-# KOT_SGLANG_PYTHON.
+# SERVE_SGLANG_PYTHON.
 PYTHON_CANDIDATES=(
-  "${KOT_SGLANG_PYTHON:-}"
+  "${SERVE_SGLANG_PYTHON:-}"
   "$HERE/.venv/bin/python"
   "$HERE/.venv-cuda/bin/python"
   "$(command -v python3 || true)"
@@ -56,14 +56,14 @@ for candidate in "${PYTHON_CANDIDATES[@]}"; do
   fi
 done
 if [[ -z "$PYTHON" ]]; then
-  echo "no interpreter with sglang found; set KOT_SGLANG_PYTHON" >&2
+  echo "no interpreter with sglang found; set SERVE_SGLANG_PYTHON" >&2
   exit 1
 fi
-echo "[kot_server] engine python: $PYTHON"
-"$PYTHON" -c "import sglang, torch; print(f'[kot_server] sglang {sglang.__version__}, torch {torch.__version__}')"
+echo "[serve] engine python: $PYTHON"
+"$PYTHON" -c "import sglang, torch; print(f'[serve] sglang {sglang.__version__}, torch {torch.__version__}')"
 
 # The engine holds CUDA + zmq + one fd per queued connection; a soft limit of
-# 1024 runs out under the harness's connection warmup (EMFILE mid-serve).
+# 1024 runs out under concurrent connection setup (EMFILE mid-serve).
 ulimit -n 65535 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 
 # sglang's scheduler subprocesses run with a curated environment that drops
@@ -72,7 +72,7 @@ ulimit -n 65535 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 # process, whatever the environment says. A foreign sitecustomize is refused;
 # ours is refreshed on every start.
 SITE_PACKAGES="$("$PYTHON" -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")"
-if [[ -f "$SITE_PACKAGES/sitecustomize.py" ]] && ! grep -q "_kot_patched" "$SITE_PACKAGES/sitecustomize.py"; then
+if [[ -f "$SITE_PACKAGES/sitecustomize.py" ]] && ! grep -q "_serve_patched" "$SITE_PACKAGES/sitecustomize.py"; then
   echo "sitecustomize.py already exists in $SITE_PACKAGES and is not ours" >&2
   exit 1
 fi
@@ -84,9 +84,9 @@ fi
 # the venv's site-packages is executed by site.py in every process whatever
 # the environment says -- that is the route that always fires.
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/sitecustomize.py"
-cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/kot_sglang_patch.py"
-echo "import kot_sglang_patch" > "$SITE_PACKAGES/kot_sglang_patch.pth"
-echo "[kot_server] patch layer installed into $SITE_PACKAGES (module + .pth)"
+cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/serve_sglang_patch.py"
+echo "import serve_sglang_patch" > "$SITE_PACKAGES/serve_sglang_patch.pth"
+echo "[serve] patch layer installed into $SITE_PACKAGES (module + .pth)"
 
 # DeepGEMM's JIT asserts at startup without NVCC >= 12.9 (serving hosts carry
 # no toolkit); the triton kernels cover these GPUs. Set before any sglang
@@ -101,13 +101,13 @@ export SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_DEEPGEMM=0
 # SGLang computes a prefill's input logprobs in chunks of this many rows
 # (2048 by default). Each chunk's fp32 [rows, 248320] copies peak on the
 # card beside the 0.89 static pool, and each chunk is one stash archive the
-# adapter holds in host memory. Deterministic inference (kot_server.py)
+# adapter holds in host memory. Deterministic inference (serve.py)
 # runs a batch-invariant matmul, so the rows should not depend on the chunk
 # size; a replay at 512 and at 2048 on the box confirms it. Set before any
 # sglang process spawns.
 export SGLANG_LOGPROB_CHUNK_SIZE="${SGLANG_LOGPROB_CHUNK_SIZE:-512}"
 
-# The weights are local and the graded container has no network; the engine
+# The weights are local and the container has no network; the engine
 # must never reach for the hub either.
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -121,11 +121,11 @@ export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
 # patch layer resolves the same default in the scheduler processes, whose
 # environment sglang replaces.
 if [[ -d /scratch && -w /scratch ]]; then
-  export KOT_SGLANG_STASH_DIR="/scratch/kot-sglang-ocr-stash"
+  export SERVE_SGLANG_STASH_DIR="/scratch/serve-sglang-ocr-stash"
 else
-  export KOT_SGLANG_STASH_DIR="/tmp/kot-sglang-ocr-stash"
+  export SERVE_SGLANG_STASH_DIR="/tmp/serve-sglang-ocr-stash"
 fi
-mkdir -p "$KOT_SGLANG_STASH_DIR"
-echo "[kot_server] stash dir: $KOT_SGLANG_STASH_DIR"
+mkdir -p "$SERVE_SGLANG_STASH_DIR"
+echo "[serve] stash dir: $SERVE_SGLANG_STASH_DIR"
 
-exec "$PYTHON" "$HERE/kot_server.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
+exec "$PYTHON" "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

@@ -34,7 +34,7 @@ they install only under that Python.
 ```bash
 # wheels/ must hold the three platform wheels first. The large PyPI
 # downloads stall at times; curl -C - resumes them.
-docker build -t kot-llm-ascend-910b:latest .
+docker build -t serve-llm-ascend-910b:latest .
 ```
 
 These pins must not float.
@@ -75,7 +75,7 @@ under hub/ stop the start; the error names them.
 ### Start
 
 ```bash
-./kot_serve.sh --port 8090 --model /models/Qwen3-0.6B --device npu
+./serve.sh --port 8090 --model /models/Qwen3-0.6B --device npu
 ```
 
 The script picks its own route. A host python3 that imports torch_npu runs
@@ -121,10 +121,10 @@ Facts about a running server:
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_DTYPE` | `bfloat16` on npu, `float32` on cpu | model dtype: bfloat16, float16 or float32. |
-| `KOT_ATTN` | `eager` on npu | attention implementation the load requests. |
-| `KOT_NPU_IMAGE` | `kot-llm-ascend-910b:latest` | image the host-mode wrap runs. |
-| `KOT_OUT_MOUNTS` | unset | colon-separated directories mounted read-write at the same path, so the server's output files land where the host reads them. Host mode only. |
+| `SERVE_DTYPE` | `bfloat16` on npu, `float32` on cpu | model dtype: bfloat16, float16 or float32. |
+| `SERVE_ATTN` | `eager` on npu | attention implementation the load requests. |
+| `SERVE_NPU_IMAGE` | `serve-llm-ascend-910b:latest` | image the host-mode wrap runs. |
+| `SERVE_OUT_MOUNTS` | unset | colon-separated directories mounted read-write at the same path, so the server's output files land where the host reads them. Host mode only. |
 | `ASCEND_RT_VISIBLE_DEVICES` | `0` when both device variables are unset | card ordinals the wrap passes to the container; `ASCEND_VISIBLE_DEVICES` is the fallback. In the direct route, export them yourself. |
 
 ## Models

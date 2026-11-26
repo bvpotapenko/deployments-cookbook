@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check one MLLM deployment against the kot contract.
+"""Check the deployment and its HTTP responses.
 python3 self_check.py --deployment DIR --model PATH --device npu --video PATH
 """
 import argparse
@@ -43,7 +43,7 @@ def wait_info(process, port):
     deadline = time.monotonic() + LOAD_TIMEOUT_S
     while process.poll() is None and time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"http://{HOST}:{port}/kot/info", timeout=10) as response:
+            with urllib.request.urlopen(f"http://{HOST}:{port}/info", timeout=10) as response:
                 info = json.loads(response.read())
             keys = ("contract_version", "model_id", "engine", "device", "vocab_size")
             return [], ", ".join(f"{key} {info.get(key)}" for key in keys), info
@@ -63,7 +63,7 @@ def post(port, path, payload):
         return response.read()
 
 def score_answer(port, payload):
-    body = post(port, "/kot/score", payload)
+    body = post(port, "/score", payload)
     lines = [json.loads(line) for line in body.splitlines() if line.strip()]
     if payload["mode"] == "prefill":
         lines = [json.loads(body)]
@@ -169,15 +169,15 @@ def main():
     parser.add_argument("--device", required=True)
     parser.add_argument("--video", required=True)
     args = parser.parse_args()
-    root, process = Path(tempfile.mkdtemp(prefix="kot-mllm-self-check-")).resolve(), None
+    root, process = Path(tempfile.mkdtemp(prefix="serve-mllm-self-check-")).resolve(), None
     try:
         with socket.socket() as probe:
             probe.bind((HOST, 0))
             port = probe.getsockname()[1]
         argv = [str(Path(args.deployment).resolve() / "serve.sh"), "--port", str(port), "--model", os.path.abspath(args.model), "--device", args.device]
         with open(root / "serve.log", "wb") as log:
-            process = check("start serve.sh", lambda: ([], " ".join(argv), subprocess.Popen(argv, cwd=args.deployment, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, env={**os.environ, "KOT_OUT_MOUNTS": str(root)})))
-        info = process and check("GET /kot/info", lambda: wait_info(process, port))
+            process = check("start serve.sh", lambda: ([], " ".join(argv), subprocess.Popen(argv, cwd=args.deployment, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, env={**os.environ, "SERVE_OUT_MOUNTS": str(root)})))
+        info = process and check("GET /info", lambda: wait_info(process, port))
         if info:
             sampling = json.loads(os.environ.get("SAMPLING") or '{"temperature": 1.0, "top_p": 0.95, "top_k": 20}')
             run_checks(port, root, info, args.model, args.video, sampling)

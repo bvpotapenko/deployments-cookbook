@@ -23,7 +23,7 @@ NGRAM_WINDOW = 90
 NGRAM_WHITELIST = frozenset({128821, 128822})  # <td>, </td>
 
 
-class KotOCR2NoRepeatNGram(CustomLogitProcessor):
+class ServeOCR2NoRepeatNGram(CustomLogitProcessor):
     """Ban tokens that would complete a repeated n-gram, per request row."""
 
     def __call__(self, logits, custom_param_list=None):

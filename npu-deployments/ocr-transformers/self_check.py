@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Self-check of the kot deployment contract for an OCR deployment.
+"""Check the deployment and its HTTP responses.
     python3 self_check.py --deployment DIR --model PATH --device npu
 """
 import argparse, base64, json, os, shutil, signal, socket, struct, subprocess, sys, tempfile, time
@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 HOST = "127.0.0.1"
 LOAD_TIMEOUT_S = 900  # the contract's startup timeout
 REQUEST_TIMEOUT_S = 600  # the longest silence one request may keep
-STOP_GRACE_S = 15  # SIGTERM, then SIGKILL, as the benchmark stops a deployment
+STOP_GRACE_S = 15  # SIGTERM, then SIGKILL, to allow graceful shutdown
 MAX_NEW_TOKENS, SEED = 16, 42
 DIGITS = [11415, 29671, 29647, 23497, 31183, 31215, 29257, 31727, 31695, 31599]  # 1234567890, 3x5
 failed = []
@@ -49,11 +49,11 @@ def template_ids(model):
         raise ValueError("model tokenizer produced no ids for the OCR instruction")
     return [int(tokenizer.bos_token_id), int(image), *map(int, instruction)]
 def wait_info(process, port):
-    """GET /kot/info until it answers. Fail at once when serve.sh exits."""
+    """GET /info until it answers. Fail at once when serve.sh exits."""
     deadline = time.monotonic() + LOAD_TIMEOUT_S
     while process.poll() is None and time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"http://{HOST}:{port}/kot/info", timeout=10) as response:
+            with urllib.request.urlopen(f"http://{HOST}:{port}/info", timeout=10) as response:
                 info = json.loads(response.read())
             keys = ("contract_version", "model_id", "engine", "device", "vocab_size")
             return [], ", ".join(f"{key} {info.get(key)}" for key in keys), info
@@ -68,7 +68,7 @@ def post(port, path, payload):
         return response.read()
 def answer(port, payload):
     """Decode answers NDJSON: block lines, then the result line. Prefill answers one object."""
-    body, prefill = post(port, "/kot/score", payload), payload["mode"] == "prefill"
+    body, prefill = post(port, "/score", payload), payload["mode"] == "prefill"
     try:
         lines = [json.loads(x) for x in ([body] if prefill else body.splitlines()) if x.strip()]
     except ValueError:
@@ -98,7 +98,7 @@ def arrays(payload, reply, model, info):
     expected = len(output_ids) if decode else payload["n_rows"]
     problems = [] if np.isfinite(log_probs).all() else ["log_probs hold NaN or inf"]
     if not log_probs.shape[1] == info.get("vocab_size") == vocab:
-        problems.append(f"rows are {log_probs.shape[1]} wide, /kot/info vocab_size is "
+        problems.append(f"rows are {log_probs.shape[1]} wide, /info vocab_size is "
                         f"{info.get('vocab_size')}, config.json vocab_size is {vocab}")
     if not 0 < count < len(stored) or count != expected or reply.get("n_positions") != count:
         problems.append(f"{count} rows for {len(stored)} stored ids and n_positions "
@@ -164,7 +164,7 @@ def main():
     parser.add_argument("--no-chat", action="store_true", help="skip the OpenAI chat checks")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))  # so that the finally below runs
-    root, process = Path(tempfile.mkdtemp(prefix="kot-self-check-")).resolve(), None
+    root, process = Path(tempfile.mkdtemp(prefix="serve-self-check-")).resolve(), None
     try:
         with socket.socket() as probe:  # a loopback port nothing listens on now
             probe.bind((HOST, 0))
@@ -174,8 +174,8 @@ def main():
         with open(root / "serve.log", "wb") as log:
             process = check("start serve.sh", lambda: ([], " ".join(argv), subprocess.Popen(
                 argv, cwd=args.deployment, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                start_new_session=True, env={**os.environ, "KOT_OUT_MOUNTS": str(root)})))
-        info = process and check("GET /kot/info", lambda: wait_info(process, port))
+                start_new_session=True, env={**os.environ, "SERVE_OUT_MOUNTS": str(root)})))
+        info = process and check("GET /info", lambda: wait_info(process, port))
         if info:
             run_checks(port, root, info, args.model, args.no_chat)
     except KeyboardInterrupt:

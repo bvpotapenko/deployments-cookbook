@@ -25,6 +25,7 @@ in a loop of its own.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -140,7 +141,10 @@ class Policy:
 
     def __init__(self, model_dir: Path, device: str, unnorm_key: str) -> None:
         config = json.loads((model_dir / "config.json").read_text())
-        self.dtype = getattr(torch, config["torch_dtype"])  # bfloat16: the weights' own precision
+        dtype_name = os.environ.get("SERVE_DTYPE", config["torch_dtype"])
+        if dtype_name not in ("bfloat16", "float32"):
+            raise ValueError(f"OpenVLA expects bfloat16 or float32, got {dtype_name!r}")
+        self.dtype = getattr(torch, dtype_name)
         self.device = torch.device(device)
         self.model = build(model_dir, config, self.device, self.dtype)
         # The concrete class: AutoTokenizer reads config.json, finds remote code

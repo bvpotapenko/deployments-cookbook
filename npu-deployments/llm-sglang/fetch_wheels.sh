@@ -18,7 +18,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WHEELS="$HERE/wheels"
-IMAGE="${KOT_NPU_IMAGE:-kot-llm-ascend-910b:latest}"
+IMAGE="${SERVE_NPU_IMAGE:-serve-llm-ascend-910b:latest}"
 KERNEL_TAG="${KERNEL_TAG:-2026.9.0.post1}"
 
 # Pin sglang at fetch time: reuse the recorded commit on reruns (main moves
@@ -37,7 +37,7 @@ echo "$SGLANG_COMMIT" >"$WHEELS/SGLANG_COMMIT.txt"
 # The vendored pyproject pins memfabric-zbal==1.1.2, which pypi does not
 # publish for cp312/aarch64 (available: 1.1.3, 1.2.x). The sglang docs'
 # CANN 9.1.0 component set mandates 1.1.3, so the pin moves to the documented
-# pairing; kot_serve.sh installs the same version explicitly.
+# pairing; serve.sh installs the same version explicitly.
 #
 # outlines and timm are dropped: outlines is only imported by the
 # constrained-generation backends (never used on the score/speed paths) and
@@ -89,7 +89,7 @@ echo "== wheels/ contents"
 # once and two wheels would both match the install glob. The torch/torch-
 # vision/torchaudio wheels the resolver pulled are the image's own stack
 # (pip download ignores installed dists); at install time the requirement is
-# satisfied by the image, so they only dead-weight the handed-back directory.
+# satisfied by the image, so they only dead-weight the deployment directory.
 cd "$WHEELS"
 ls sglang-*.whl | grep -v "g${SGLANG_COMMIT:0:9}" | xargs -r rm -f || true
 rm -f torch-*.whl torchvision-*.whl torchaudio-*.whl

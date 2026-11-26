@@ -32,7 +32,7 @@ they install only under that Python.
 ```bash
 # wheels/ must hold the three platform wheels first; copy them from any
 # existing Ascend deployment, or fetch them from PyPI.
-docker build -t kot-ocr-ascend-910b:latest .
+docker build -t serve-ocr-ascend-910b:latest .
 ```
 
 These pins must not float.
@@ -79,8 +79,8 @@ layout is refused.
 ASCEND_RT_VISIBLE_DEVICES=1 ./serve.sh --port 8090 --model /models/DeepSeek-OCR-2 --device npu
 ```
 
-The script tries one interpreter after another: `$KOT_OCR_PY`, then
-`/root/kotvenv-ocr/bin/python`, then `/root/kotvenv/bin/python`, then
+The script tries one interpreter after another: `$SERVE_OCR_PY`, then
+`/root/serve-venv-ocr/bin/python`, then `/root/serve-venv/bin/python`, then
 python3. Only an interpreter that imports both torch_npu and transformers
 runs `serve.py` directly. Every other host uses the docker wrap. The driver
 files on the host are readable by root only, so a non-root shell cannot
@@ -107,11 +107,11 @@ Facts about the load:
   code runs.
 - `build_config` reads `config.json` and builds the native configuration.
 - `load_native` stops the start when a key is missing or unexpected, or when
-  one checkpoint tensor differs from the loaded model. `/kot/info` carries
+  one checkpoint tensor differs from the loaded model. `/info` carries
   the result under `load_report`.
-- The weights run bfloat16 on npu; `KOT_DTYPE` overrides, and a typo is a
+- The weights run bfloat16 on npu; `SERVE_DTYPE` overrides, and a typo is a
   load-time error.
-- Attention runs eager on npu, and `KOT_ATTN` overrides.
+- Attention runs eager on npu, and `SERVE_ATTN` overrides.
 
 The start line prints the whole stack: engine, dtype, device, vocabulary,
 and the torch, plugin, driver and toolkit versions. A field the process
@@ -122,11 +122,11 @@ the driver and toolkit pair.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_OCR_PY` | unset | interpreter for the direct route; it must import torch_npu and transformers. |
-| `KOT_DTYPE` | `bfloat16` on npu, `float32` on cpu | model dtype. A typo is an error at load. |
-| `KOT_ATTN` | `eager` on npu | attention implementation for the whole model: the SAM encoder, the vision encoder and the language model. |
-| `KOT_NPU_IMAGE` | `kot-ocr-ascend-910b:latest` | image the host-mode wrap runs. |
-| `KOT_OUT_MOUNTS` | unset | colon-separated directories mounted read-write at the same path, so the server's output files land where the host reads them. Host mode only. |
+| `SERVE_OCR_PY` | unset | interpreter for the direct route; it must import torch_npu and transformers. |
+| `SERVE_DTYPE` | `bfloat16` on npu, `float32` on cpu | model dtype. A typo is an error at load. |
+| `SERVE_ATTN` | `eager` on npu | attention implementation for the whole model: the SAM encoder, the vision encoder and the language model. |
+| `SERVE_NPU_IMAGE` | `serve-ocr-ascend-910b:latest` | image the host-mode wrap runs. |
+| `SERVE_OUT_MOUNTS` | unset | colon-separated directories mounted read-write at the same path, so the server's output files land where the host reads them. Host mode only. |
 | `ASCEND_RT_VISIBLE_DEVICES` | `0` when both device variables are unset | card ordinals the wrap passes to the container; `ASCEND_VISIBLE_DEVICES` is the fallback. In the direct route, export them yourself. |
 
 ## Models
@@ -149,8 +149,7 @@ An image with both sides at most 768 px becomes one 257-token block. A
 larger image adds a grid of up to six 768 px crop tiles, 144 tokens per
 tile.
 
-A decode request that carries no ids gets the template the frozen inputs
-hold: BOS, the image block, then the ids of the instruction `Free OCR.`.
+For a decode without IDs, the server constructs the prompt: BOS, the image block, then the ids of the instruction `Free OCR.`.
 
 Generation applies a no-repeat n-gram rule. A token that would complete a
 30-gram already seen within the last 90 tokens is banned from sampling. The
@@ -179,7 +178,7 @@ and without streaming. Stop an existing server before starting the check.
 `POST /v1/chat/completions` accepts one user message with one `image_url` part
 and text. The URL must use `data:image/...;base64,...`. The server uses the
 same image views, image-token expansion and seeded generation path as
-`/kot/score`. `max_completion_tokens` is preferred, with `max_tokens` as an
+`/score`. `max_completion_tokens` is preferred, with `max_tokens` as an
 alias. Streaming returns assistant role, text delta, stop, and `[DONE]` SSE
 chunks. NPU sampling accepts the existing repetition and presence penalty
 contract. A non-zero presence penalty is rejected.
@@ -198,7 +197,7 @@ The identity surface answers with the engine's own facts. It serves the
 scoring route that `serve.py` defines:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+curl -s http://127.0.0.1:8090/info | python3 -m json.tool
 ```
 
 `engine` reads `transformers 5.22.1`, and `toolkit_version` reads

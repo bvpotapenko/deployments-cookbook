@@ -22,7 +22,7 @@ fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # The interpreter by absolute path: the process that starts us may run in a
-# Python environment that is not ours. KOT_VLA_PYTHON overrides it.
-PY="${KOT_VLA_PYTHON:-/root/kotvenv-vla/bin/python}"
+# Python environment that is not ours. SERVE_VLA_PYTHON overrides it.
+PY="${SERVE_VLA_PYTHON:-/root/serve-venv-vla/bin/python}"
 
 exec "$PY" "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

@@ -1,14 +1,9 @@
-"""kot deployment contract adapter around a vLLM engine, OCR family, one process.
+"""Serve inference and token scores with vLLM.
 
-    kot_serve.py --port P --model /path/to/DeepSeek-OCR-2 --device cuda
+    serve.py --port P --model /path/to/DeepSeek-OCR-2 --device cuda
 
-The vLLM OpenAI app is mounted as-is for /v1/chat/completions (the speed
-harness drives it with multimodal messages: a text part and the document as
-an image_url data URI; streaming SSE for the benchmark, plain JSON for the
-probe). The contract endpoints are added to the same app:
-
-  GET  /kot/info   provenance: the running engine, its dtype, the vocab width
-  POST /kot/score  writes log_probs.npy + input_ids.npy into out_dir; a decode
+  GET  /info   provenance: the running engine, its dtype, the vocab width
+  POST /score  writes log_probs.npy + input_ids.npy into out_dir; a decode
                    also writes its transcript as text.txt, and answers in JSON
                    lines, one per 256-row block, so a long generation streams
                    instead of answering at the end
@@ -17,7 +12,8 @@ Numerics, the whole point of this deployment:
 
   * the score path consumes ids verbatim: the request's transcript ids are
     appended, untouched, to the image template the checkpoint itself defines
-    (plain format: BOS, one image block, "\nFree OCR."), and the engine sees
+    (plain format: BOS, one image block, "
+Free OCR."), and the engine sees
     exactly those ids. The image arrives as multi_modal_data; vLLM expands
     the single placeholder token into the block its processor computes for
     the image (256+1 tokens for a <=768px image, 144 more per crop tile -
@@ -51,8 +47,7 @@ invariants hold and nothing else changes.
 
 The chat template (the checkpoint's tokenizer ships none) is vLLM's own
 template_deepseek_ocr.jinja: BOS, image placeholder, newline, instruction,
-the plain format the score path carries.
-"""
+the plain format the score path carries."""
 
 from __future__ import annotations
 
@@ -107,10 +102,10 @@ from vllm.inputs import TokensPrompt  # noqa: E402
 from vllm.multimodal.media.image import ImageMediaIO  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
-INFO = "/kot/info"
-SCORE = "/kot/score"
+INFO = "/info"
+SCORE = "/score"
 CONTRACT_VERSION = 1
-SCORE_PREFIX = "kot-score-"
+SCORE_PREFIX = "serve-score-"
 UTF8 = "utf-8"
 SUPPORTED_TASKS = ("generate",)
 BLOCK_ROWS = 256  # one streamed line per block of decode rows: bounded memory, visible progress
@@ -141,8 +136,8 @@ def _install_logprobs_tap() -> None:
 
     def from_new_request(cls, tokenizer, request):
         processor = original_from_new_request(cls, tokenizer, request)
-        processor.kot_prompt_tensors = []
-        processor.kot_sample_lists = []
+        processor.serve_prompt_tensors = []
+        processor.serve_sample_lists = []
         rid = getattr(request, "request_id", "?")
         if rid.startswith(SCORE_PREFIX):
             SINKS[rid] = processor
@@ -151,14 +146,14 @@ def _install_logprobs_tap() -> None:
     def update_from_output(self, output):
         if output.new_prompt_logprobs_tensors is not None:
             tensors = output.new_prompt_logprobs_tensors
-            self.kot_prompt_tensors.append(tensors)
+            self.serve_prompt_tensors.append(tensors)
             if self.prompt_logprobs is not None:
                 self.prompt_logprobs.extend(
                     [{} for _ in range(tensors.logprobs.shape[0])]
                 )
         if output.new_logprobs is not None:
             lists = output.new_logprobs
-            self.kot_sample_lists.append(lists)
+            self.serve_sample_lists.append(lists)
             if self.logprobs is not None:
                 self.logprobs.extend([{} for _ in lists.logprobs])
 
@@ -191,13 +186,13 @@ def _scatter_full_vocab(token_ids, logprobs, vocab_size: int) -> np.ndarray:
 
 def _prompt_rows(processor: LogprobsProcessor, vocab_size: int) -> np.ndarray:
     """The stashed prompt tensors as one [rows, vocab_size] float32 array."""
-    if not processor.kot_prompt_tensors:
+    if not processor.serve_prompt_tensors:
         raise RuntimeError("the engine produced no prompt logprobs at all")
     token_ids = np.concatenate(
-        [np.asarray(t.logprob_token_ids) for t in processor.kot_prompt_tensors]
+        [np.asarray(t.logprob_token_ids) for t in processor.serve_prompt_tensors]
     )
     logprobs = np.concatenate(
-        [np.asarray(t.logprobs) for t in processor.kot_prompt_tensors]
+        [np.asarray(t.logprobs) for t in processor.serve_prompt_tensors]
     )
     return _scatter_full_vocab(token_ids, logprobs, vocab_size)
 
@@ -311,7 +306,7 @@ def _load_image(image_path: str) -> Image.Image:
 def _score_prompt(body: dict) -> tuple[TokensPrompt, list[int]]:
     """The score request as an engine prompt: the ids verbatim, plus the image.
 
-    The version's frozen template ids ride every request (a decode's prompt;
+    The prompt template ids ride every request (a decode's prompt;
     a replay's template plus generated ids), so the deployment consumes ids
     and never tokenizes - no engine's tokenizer version can change the
     prompt. The engine's multimodal processor expands the single image
@@ -350,9 +345,9 @@ def _tokenizer():
 
 
 def _image_only_prompt(image_path: str, template_ids: list[int]) -> TokensPrompt:
-    """The decode's prompt: the frozen template ids the request carried, and the image."""
+    """The decode's prompt: the prompt template ids the request carried, and the image."""
     if not template_ids:
-        raise ValueError("empty input_ids: the version's frozen template is missing")
+        raise ValueError("empty input_ids: a prompt template is required")
     image = _load_image(image_path)
     return TokensPrompt(prompt_token_ids=template_ids, multi_modal_data={"image": image})
 
@@ -391,10 +386,10 @@ async def _decode_stream(engine, body: dict, vocab_size: int, image_token_id: in
             processor = processor or _peek_sink(request_id)
             while (
                 processor is not None
-                and len(processor.kot_sample_lists) - consumed >= BLOCK_ROWS
+                and len(processor.serve_sample_lists) - consumed >= BLOCK_ROWS
             ):
                 block = _decode_rows(
-                    processor.kot_sample_lists[consumed:consumed + BLOCK_ROWS], vocab_size
+                    processor.serve_sample_lists[consumed:consumed + BLOCK_ROWS], vocab_size
                 )
                 _check_well_formed(block)
                 log_probs[written:written + block.shape[0]] = block
@@ -408,14 +403,14 @@ async def _decode_stream(engine, body: dict, vocab_size: int, image_token_id: in
             )
             return
         processor = processor or _pop_sink(request_id)
-        if processor is None or not processor.kot_sample_lists:
+        if processor is None or not processor.serve_sample_lists:
             yield _line(
                 {"error": "RuntimeError",
                  "detail": "no logprob tap for the request; the V1 LogprobsProcessor patch did not run"}
             )
             return
-        if len(processor.kot_sample_lists) > consumed:
-            block = _decode_rows(processor.kot_sample_lists[consumed:], vocab_size)
+        if len(processor.serve_sample_lists) > consumed:
+            block = _decode_rows(processor.serve_sample_lists[consumed:], vocab_size)
             _check_well_formed(block)
             log_probs[written:written + block.shape[0]] = block
             written += block.shape[0]
@@ -449,7 +444,7 @@ async def _decode_stream(engine, body: dict, vocab_size: int, image_token_id: in
                 compact,
                 allow_pickle=False,
             )
-        # The raw prompt the request carried (the version's frozen template)
+        # The raw prompt the request carried (the prompt template)
         # plus the generated ids: the pre-expansion sequence, so the replay
         # of this file carries exactly one image placeholder. The engine's
         # final.prompt_token_ids is the EXPANDED prompt and is not what a
@@ -504,7 +499,7 @@ async def _score(engine, body: dict, vocab_size: int, image_token_id: int) -> di
             "no logprob tap for the request; the V1 LogprobsProcessor patch did not run"
         )
 
-    # The prompt rows cover the whole expanded prompt (the frozen template's
+    # The prompt rows cover the whole expanded prompt (the prompt template's
     # image block plus the ids the request carried); the rows the family
     # keeps are the tail: the classic n - 1, or the last n_rows when the
     # request trims (the OCR replay keeps only the rows over the
@@ -518,9 +513,7 @@ async def _score(engine, body: dict, vocab_size: int, image_token_id: int) -> di
     _check_well_formed(log_probs)
 
     np.save(out_dir / "log_probs.npy", log_probs, allow_pickle=False)
-    # The stored ids are the sequence the rows live in, verbatim: the OCR
-    # replay's rows predict the trailing generated ids, and the eval joins
-    # them to decode_ids by name.
+    # Keep the token IDs in request order.
     np.save(
         out_dir / "input_ids.npy",
         np.ascontiguousarray(np.asarray(transcript, dtype=np.int32)),
@@ -549,12 +542,12 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
     A hub snapshot's path names both. Any other directory does not name its
-    hub id; ``_name_or_path`` in config.json usually does. KOT_MODEL_ID /
-    KOT_MODEL_REVISION override both,
-    e.g. when the runner knows the id and the directory does not.
+    hub id; ``_name_or_path`` in config.json usually does. SERVE_MODEL_ID /
+    SERVE_MODEL_REVISION override both,
+    e.g. when the client knows the ID and the directory does not.
     """
-    override_id = os.environ.get("KOT_MODEL_ID", "")
-    override_revision = os.environ.get("KOT_MODEL_REVISION", "")
+    override_id = os.environ.get("SERVE_MODEL_ID", "")
+    override_revision = os.environ.get("SERVE_MODEL_REVISION", "")
     if override_id:
         return override_id, override_revision
     model_id = Path(model_dir).name
@@ -587,7 +580,7 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
 
     container.add_argument = _shimmed_add_argument
     try:
-        args = make_arg_parser(argparse.ArgumentParser(prog="kot_serve")).parse_args([])
+        args = make_arg_parser(argparse.ArgumentParser(prog="serve")).parse_args([])
     finally:
         container.add_argument = original_add_argument
     args.model = model
@@ -604,8 +597,8 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     args.media_io_kwargs = MEDIA_IO_KWARGS
     # The model's own max_position_embeddings (8192) covers template +
     # transcript + decode; override only if a task ever needs more.
-    if os.environ.get("KOT_VLLM_MAX_MODEL_LEN"):
-        args.max_model_len = int(os.environ["KOT_VLLM_MAX_MODEL_LEN"])
+    if os.environ.get("SERVE_VLLM_MAX_MODEL_LEN"):
+        args.max_model_len = int(os.environ["SERVE_VLLM_MAX_MODEL_LEN"])
     args.max_logprobs = 1_000_000
     args.enable_prefix_caching = False
     args.disable_log_requests = True
@@ -613,27 +606,25 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     # V1 logits processor (module copied into the venv by serve.sh, so
     # the FQCN resolves in the workers). logprobs_mode stays at its default
     # raw_logprobs: the reported rows are computed before this stage runs.
-    args.logits_processors = ["kot_ngram:KotNoRepeatNGramLogitsProcessor"]
+    args.logits_processors = ["ngram:ServeNoRepeatNGramLogitsProcessor"]
     # "auto" picks flashinfer's cutlass MoE on Blackwell, whose JIT needs
     # nvcc - absent on serving hosts - and dies at engine init. The triton
-    # MoE backend runs sm_120 fine. KOT_VLLM_MOE_BACKEND overrides for
+    # MoE backend runs sm_120 fine. SERVE_VLLM_MOE_BACKEND overrides for
     # hosts that do carry the toolkit.
-    args.moe_backend = os.environ.get("KOT_VLLM_MOE_BACKEND", "triton")
+    args.moe_backend = os.environ.get("SERVE_VLLM_MOE_BACKEND", "triton")
     # Full-vocab logprob gathering holds ~16 bytes per (row, vocab) on the GPU
     # for every scheduled token in a step; at the default batch that is tens
     # of GB and an over-long prompt kills the whole engine. 2048 caps the
     # transient at a few GB regardless of prompt length.
-    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "2048"))
+    args.max_num_batched_tokens = int(os.environ.get("SERVE_VLLM_MAX_BATCHED_TOKENS", "2048"))
     # And a high gpu_memory_utilization hands that whole margin to the KV
-    # cache, so the gather OOMs anyway. 0.35 keeps room for it; KOT_VLLM_GPU_MEM
+    # cache, so the gather OOMs anyway. 0.35 keeps room for it; SERVE_VLLM_GPU_MEM
     # overrides for models whose KV cache actually needs more.
-    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_GPU_MEM", "0.35"))
-    # KOT_VLLM_DTYPE exists for cross-checking numerics; a capture runs the
-    # engine's own default ("auto": the checkpoint's dtype).
-    dtype_override = os.environ.get("KOT_VLLM_DTYPE", "")
+    args.gpu_memory_utilization = float(os.environ.get("SERVE_VLLM_GPU_MEM", "0.35"))
+    dtype_override = os.environ.get("SERVE_VLLM_DTYPE", "")
     if dtype_override:
         args.dtype = dtype_override
-    if os.environ.get("KOT_VLLM_COMPILATION", "").lower() == "eager":
+    if os.environ.get("SERVE_VLLM_COMPILATION", "").lower() == "eager":
         args.enforce_eager = True
     if device == "cuda":
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
@@ -644,13 +635,13 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     return args
 
 
-def _register_kot_routes(app, engine, vocab_size: int, info: dict, image_token_id: int) -> None:
+def _register_serve_routes(app, engine, vocab_size: int, info: dict, image_token_id: int) -> None:
     @app.get(INFO)
-    async def kot_info() -> JSONResponse:
+    async def serve_info() -> JSONResponse:
         return JSONResponse(info)
 
     @app.post(SCORE)
-    async def kot_score(request: Request):
+    async def serve_score(request: Request):
         try:
             body = await request.json()
             if body.get("mode") == "decode":
@@ -674,10 +665,8 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict, image_token_i
                 status_code=500,
             )
 
-    # One deployment, one engine: the harness names the model as
-    # /kot/info reported it (both spellings are in served_model_name), and
-    # kot's probe sends no model field at all, which vLLM answers with the
-    # sole served model. No model-name rewriting is needed.
+    # The engine may also register POST /score. Dispatch our score handler first.
+    app.router.routes.insert(0, app.router.routes.pop())
 
 
 def _nvidia_driver() -> str:
@@ -704,7 +693,7 @@ def _placed_devices(device: str, parallel_config) -> str:
 
 def main() -> int:
     global _MODEL_DIR
-    parser = argparse.ArgumentParser(prog="kot_serve.py", description=__doc__)
+    parser = argparse.ArgumentParser(prog="serve.py", description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True, help="the weights directory, read-only")
     parser.add_argument("--device", default="cuda", help="torch device string from the platform row")
@@ -739,11 +728,11 @@ def main() -> int:
             }
             # Routes and middleware go on before init_app_state: it starts the
             # app, and Starlette refuses middleware on a started application.
-            _register_kot_routes(
+            _register_serve_routes(
                 app, engine, int(model_config.hf_config.vocab_size), info, image_token_id
             )
             await init_app_state(engine, app.state, args, supported_tasks=SUPPORTED_TASKS)
-            print(f"[kot-vllm-ocr] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
+            print(f"[serve-vllm-ocr] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(
                 app, sock=None, host=args.host, port=args.port, log_level="warning",
             )

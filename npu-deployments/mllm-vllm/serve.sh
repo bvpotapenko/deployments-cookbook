@@ -1,21 +1,5 @@
 #!/usr/bin/env bash
-# kot deployment: llm family, vllm engine, ascend-910b platform.
-#
-#   ./serve.sh --port <P> --model <weights dir> --device npu
-#
-# Three ways this script runs, chosen by what the ambient python can import:
-#
-# * ambient python has vllm AND torch_npu: serve directly (a container where
-#   the engine is already provisioned).
-# * ambient python has torch_npu but no vllm (the graded container: the image
-#   carries the platform torch and the family model stack, no engine): build
-#   a venv in a writable scratch location and install OFFLINE from ./wheels
-#   (the graded container has no network), then serve.
-# * no torch_npu at all (a bare Ascend host: the host interpreter is
-#   torch-free by design, or a human's Mac): docker-wrap the image built from
-#   ./Dockerfile with the Ascend device nodes and driver mounts, host
-#   networking, and a raised nofile, and re-enter this script inside the
-#   container -- a container cannot start another one.
+# Launch the model on Ascend, using the local engine or the deployment container.
 set -euo pipefail
 
 VLLM_PIN="0.30.0"
@@ -39,11 +23,11 @@ done
 # The documented one-card profile must cover the long video contract. Keep
 # these defaults in the launcher so host wrapping and direct container starts
 # pass the same values into the engine. Both remain explicit overrides.
-export KOT_VLLM_GPU_MEM="${KOT_VLLM_GPU_MEM:-0.99}"
-export KOT_VLLM_MAX_MODEL_LEN="${KOT_VLLM_MAX_MODEL_LEN:-24576}"
-export KOT_VLLM_REQUEST_TIMEOUT="${KOT_VLLM_REQUEST_TIMEOUT:-3300}"
+export SERVE_VLLM_GPU_MEM="${SERVE_VLLM_GPU_MEM:-0.99}"
+export SERVE_VLLM_MAX_MODEL_LEN="${SERVE_VLLM_MAX_MODEL_LEN:-24576}"
+export SERVE_VLLM_REQUEST_TIMEOUT="${SERVE_VLLM_REQUEST_TIMEOUT:-3300}"
 
-# The speed harness opens thousands of pooled connections at once; vLLM adds
+# The load-test client opens thousands of pooled connections at once; vLLM adds
 # its ZMQ sockets and shm handles on top. The docker default soft limit (1024)
 # kills the engine core mid-benchmark with "Too many open files". A process
 # may raise its own soft limit to the hard limit.
@@ -65,9 +49,9 @@ fi
 
 if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
   # Bare Ascend host: the platform stack lives in the container, not here.
-  IMAGE="${KOT_NPU_IMAGE:-kot-mllm-ascend-910b:latest}"
+  IMAGE="${SERVE_NPU_IMAGE:-serve-mllm-ascend-910b:latest}"
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    echo "[kot-vllm] building $IMAGE from $DIR/Dockerfile (first run only)" >&2
+    echo "[serve-vllm] building $IMAGE from $DIR/Dockerfile (first run only)" >&2
     docker build -t "$IMAGE" "$DIR" >&2
   fi
 
@@ -83,11 +67,11 @@ if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
     DOCKER_ARGS+=(-e HF_HOME=/tmp/hf -e HF_HUB_OFFLINE=1)
   fi
 
-  # Every directory in KOT_OUT_MOUNTS (colon separated) is mounted rw at the
-  # same path: /kot/score writes exactly where the host-side runner will
-  # read. Point it at the capture tree; never at a store that holds goldens.
-  for dir in ${KOT_OUT_MOUNTS:-}; do
-    [[ -d "$dir" ]] || { echo "KOT_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
+  # Every directory in SERVE_OUT_MOUNTS (colon separated) is mounted rw at the
+  # same path: /score writes exactly where the host-side runner will
+  # read. Point it at the output directory.
+  for dir in ${SERVE_OUT_MOUNTS:-}; do
+    [[ -d "$dir" ]] || { echo "SERVE_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
     DOCKER_ARGS+=(-v "${dir}:${dir}")
   done
 
@@ -123,38 +107,32 @@ if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
   DOCKER_ARGS+=("--name=bd-vllm-serve-$$")
   DOCKER_ARGS+=(-v "${DIR}:/deployment:ro" -w /deployment)
 
-  # The capture tree on mounted paths is written by BOTH sides: the server
-  # (root in here) and the host-side runner (the invoking user). The server
-  # hands ownership of every out_dir it writes back to the runner via this
-  # uid, so the runner's own atomic writes never hit a root-owned directory.
-  # torch_npu cannot import as a non-root uid (driver files are root-only),
-  # so the server itself must stay root.
-  DOCKER_ARGS+=(-e "KOT_UID=$(id -u)")
+  DOCKER_ARGS+=(-e "SERVE_UID=$(id -u)")
 
-  # KOT_VENV set on the host: forward it and mount the venv at the same
+  # SERVE_VENV set on the host: forward it and mount the venv at the same
   # path, so a previously provisioned interpreter is reused instead of
-  # rebuilt (diagnostics; the graded path leaves it unset and provisions
+  # rebuilt (diagnostics; offline installation leaves it unset and provisions
   # offline into /scratch from wheels/).
-  if [ -n "${KOT_VENV:-}" ]; then
-    DOCKER_ARGS+=(-e "KOT_VENV=${KOT_VENV}")
-    if [ -d "$KOT_VENV" ]; then
-      DOCKER_ARGS+=(-v "${KOT_VENV}:${KOT_VENV}")
+  if [ -n "${SERVE_VENV:-}" ]; then
+    DOCKER_ARGS+=(-e "SERVE_VENV=${SERVE_VENV}")
+    if [ -d "$SERVE_VENV" ]; then
+      DOCKER_ARGS+=(-v "${SERVE_VENV}:${SERVE_VENV}")
     fi
   fi
 
   # Forward engine tuning knobs into the image. Without this, a host-mode
-  # launch silently falls back to kot_serve.py defaults because the inner
+  # launch silently falls back to serve.py defaults because the inner
   # shell has a fresh environment.
   for variable in \
-    KOT_VLLM_GPU_MEM \
-    KOT_VLLM_MAX_MODEL_LEN \
-    KOT_VLLM_MAX_BATCHED_TOKENS \
-    KOT_VLLM_MAX_NUM_SEQS \
-    KOT_VLLM_REPLAY_SEGMENT_ROWS \
-    KOT_VLLM_REQUEST_TIMEOUT \
-    KOT_VLLM_MOE_BACKEND \
-    KOT_VLLM_DTYPE \
-    KOT_VLLM_COMPILATION
+    SERVE_VLLM_GPU_MEM \
+    SERVE_VLLM_MAX_MODEL_LEN \
+    SERVE_VLLM_MAX_BATCHED_TOKENS \
+    SERVE_VLLM_MAX_NUM_SEQS \
+    SERVE_VLLM_REPLAY_SEGMENT_ROWS \
+    SERVE_VLLM_REQUEST_TIMEOUT \
+    SERVE_VLLM_MOE_BACKEND \
+    SERVE_VLLM_DTYPE \
+    SERVE_VLLM_COMPILATION
   do
     if [[ -n "${!variable:-}" ]]; then
       DOCKER_ARGS+=(-e "$variable=${!variable}")
@@ -167,8 +145,8 @@ if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
 fi
 
 find_python() {
-  if [ -n "${KOT_PYTHON:-}" ]; then
-    printf '%s' "$KOT_PYTHON"
+  if [ -n "${SERVE_PYTHON:-}" ]; then
+    printf '%s' "$SERVE_PYTHON"
     return 0
   fi
   if python3 -c "import vllm, torch_npu" >/dev/null 2>&1; then
@@ -176,14 +154,14 @@ find_python() {
     return 0
   fi
   # The image carries the platform torch and family stack but no engine.
-  # /scratch is writable at grading; /tmp is the human fallback.
-  local venv="${KOT_VENV:-/scratch/kot-vllm-venv}"
+  # /scratch is writable in the container; /tmp is the human fallback.
+  local venv="${SERVE_VENV:-/scratch/serve-vllm-venv}"
   if ! mkdir -p "$(dirname "$venv")" 2>/dev/null || ! mkdir -p "$venv" 2>/dev/null; then
-    venv="/tmp/kot-vllm-venv"
+    venv="/tmp/serve-vllm-venv"
     mkdir -p "$venv"
   fi
   if ! "$venv/bin/python" -c "import vllm, torch_npu" >/dev/null 2>&1; then
-    echo "[kot-vllm] provisioning venv at $venv offline from $DIR/wheels" >&2
+    echo "[serve-vllm] provisioning venv at $venv offline from $DIR/wheels" >&2
     if [ ! -x "$venv/bin/python" ]; then
       if [ -x "$DIR/bin/uv" ]; then
         "$DIR/bin/uv" venv --system-site-packages --python python3 "$venv" >&2
@@ -219,8 +197,8 @@ find_python() {
 }
 
 PY="$(find_python)"
-echo "[kot-vllm] python: $PY" >&2
+echo "[serve-vllm] python: $PY" >&2
 "$PY" "$DIR/patch_vllm_ascend_logprob.py" >&2
 "$PY" -c "import vllm, torch_npu; assert vllm.__version__.startswith('$VLLM_PIN'), vllm.__version__" >&2
 
-exec "$PY" "$DIR/kot_serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
+exec "$PY" "$DIR/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

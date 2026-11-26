@@ -1,13 +1,10 @@
-"""kot deployment contract adapter around a vLLM engine, VLA family, one process.
+"""Serve inference and token scores with vLLM.
 
-    kot_serve.py --port P --model /path/to/openvla-7b --device cuda
+    serve.py --port P --model /path/to/openvla-7b --device cuda
 
-  GET  /kot/info   provenance: the running engine, its dtype, the vocab width
-  POST /kot/infer  one observation in, actions.npy out: float32 [1, 1, 7]
-  POST /kot/score  one observation in, log_probs.npy + input_ids.npy out
-
-There is no /v1: the vla_tokens family's speed run times /kot/infer, and the
-contract asks the chat surface only of families the speed harness drives.
+  GET  /info   provenance: the running engine, its dtype, the vocab width
+  POST /infer  one observation in, actions.npy out: float32 [1, 1, 7]
+  POST /score  one observation in, log_probs.npy + input_ids.npy out
 
 The network is vLLM's own OpenVLAForActionPrediction, in-tree at 0.33.0. Nothing
 imports the checkpoint's Python: vLLM carries its own config and processor
@@ -15,7 +12,7 @@ classes for model_type "openvla", trust_remote_code stays False, and --model
 stays a hub snapshot, as is. The numbers that are this deployment's
 responsibility, each pinned to the reference:
 
-  * the prompt: "In: What action should the robot take to {task}?\\nOut:", task
+  * the prompt: "In: What action should the robot take to {task}?\nOut:", task
     lower-cased, <s> from the tokenizer, 29871 appended when absent, as
     predict_action does.
   * the frame: float32 [3, H, W] back to the 8-bit levels the reference's
@@ -41,8 +38,7 @@ run for every one.
 
 The one patch: vLLM pythonizes those full-vocab tensors into ~vocab_size
 Logprob objects per position on the frontend. The tap below keeps the raw
-tensors instead and leaves cheap placeholders in vLLM's own lists.
-"""
+tensors instead and leaves cheap placeholders in vLLM's own lists."""
 
 from __future__ import annotations
 
@@ -103,9 +99,9 @@ from vllm.entrypoints.launchers.launcher import serve_http  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
-INFO = "/kot/info"
-INFER = "/kot/infer"
-SCORE = "/kot/score"
+INFO = "/info"
+INFER = "/infer"
+SCORE = "/score"
 CONTRACT_VERSION = 1
 HOST = "127.0.0.1"
 ACTIONS = "actions.npy"
@@ -130,7 +126,7 @@ SINKS: dict[str, LogprobsProcessor] = {}
 
 
 def _log(message: str) -> None:
-    print(f"[kot-vllm-vla] {message}", flush=True)
+    print(f"[serve-vllm-vla] {message}", flush=True)
 
 
 def _install_logprobs_tap() -> None:
@@ -145,8 +141,8 @@ def _install_logprobs_tap() -> None:
 
     def from_new_request(cls, tokenizer, request):
         processor = original_from_new_request(cls, tokenizer, request)
-        processor.kot_prompt_tensors = []
-        processor.kot_sample_lists = []
+        processor.serve_prompt_tensors = []
+        processor.serve_sample_lists = []
         # vLLM randomizes request_id and moves the caller's id to
         # external_req_id; the tap keys on the caller's.
         SINKS[request.external_req_id or request.request_id] = processor
@@ -155,11 +151,11 @@ def _install_logprobs_tap() -> None:
     def update_from_output(self, output):
         if output.new_prompt_logprobs_tensors is not None:
             tensors = output.new_prompt_logprobs_tensors
-            self.kot_prompt_tensors.append(tensors)
+            self.serve_prompt_tensors.append(tensors)
             self.prompt_logprobs.extend([{} for _ in range(tensors.logprob_token_ids.shape[0])])
         if output.new_logprobs is not None:
             lists = output.new_logprobs
-            self.kot_sample_lists.append(lists)
+            self.serve_sample_lists.append(lists)
             self.logprobs.extend([{} for _ in range(len(lists.logprobs))])
 
     LogprobsProcessor.from_new_request = classmethod(from_new_request)
@@ -194,7 +190,7 @@ def _scatter_full_vocab(entries: list, vocab_size: int) -> np.ndarray:
 
 
 def _read_observation(path: str) -> tuple[Image.Image, str]:
-    """The one camera and the task of a kot observation; state and noise are not read."""
+    """The one camera and the task of an observation; state and noise are not read."""
     with np.load(path, allow_pickle=False) as observation:
         cameras = [key for key in observation.files if key not in NOT_CAMERAS]
         if len(cameras) != 1:
@@ -263,7 +259,7 @@ class Policy:
                 f"the image goes right after <s>, so the ids must start with it and hold "
                 f"at least one more; got {ids[:4]}"
             )
-        request_id = f"kot-{uuid.uuid4().hex}"
+        request_id = f"serve-{uuid.uuid4().hex}"
         prompt = TokensPrompt(prompt_token_ids=ids, multi_modal_data={"image": frame})
         final = None
         try:
@@ -294,7 +290,7 @@ class Policy:
             raise RuntimeError(f"decoded {len(output_ids)} tokens, not {self.action_dim}")
         if not want_rows:
             return output_ids, None
-        rows = _scatter_full_vocab(processor.kot_sample_lists if processor else [], self.vocab_size)
+        rows = _scatter_full_vocab(processor.serve_sample_lists if processor else [], self.vocab_size)
         if rows.shape[0] != len(output_ids):
             raise ValueError(f"{rows.shape[0]} rows for {len(output_ids)} tokens")
         # A tie in the logits may pick either id, hence the comparison by value.
@@ -314,7 +310,7 @@ class Policy:
             max_tokens=1, temperature=0.0, detokenize=False, prompt_logprobs=self.vocab_size
         )
         _, processor = await self._forward(ids, frame, params)
-        rows = _scatter_full_vocab(processor.kot_prompt_tensors if processor else [], self.vocab_size)
+        rows = _scatter_full_vocab(processor.serve_prompt_tensors if processor else [], self.vocab_size)
         expected = len(ids) + IMAGE_TOKENS - 1
         if rows.shape[0] != expected:
             raise ValueError(f"the engine wrote {rows.shape[0]} prompt rows; expected {expected}")
@@ -392,15 +388,15 @@ def build_app(policy: Policy, info: dict) -> FastAPI:
         return Response(json.dumps(reply) + "\n", media_type=media_type)
 
     @app.get(INFO)
-    async def kot_info() -> JSONResponse:
+    async def serve_info() -> JSONResponse:
         return JSONResponse(info)
 
     @app.post(INFER)
-    async def kot_infer(request: Request) -> Response:
+    async def serve_infer(request: Request) -> Response:
         return await answer(request, _infer)
 
     @app.post(SCORE)
-    async def kot_score(request: Request) -> Response:
+    async def serve_score(request: Request) -> Response:
         return await answer(request, _score)
 
     return app
@@ -427,19 +423,18 @@ def _engine_args(model: str, device: str) -> AsyncEngineArgs:
         max_logprobs=1_000_000,
         # Full-vocabulary gathering holds ~16 bytes per (row, vocab) on the GPU
         # for every scheduled token in a step; 2048 caps that at about 1 GB.
-        max_num_batched_tokens=int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "2048")),
+        max_num_batched_tokens=int(os.environ.get("SERVE_VLLM_MAX_BATCHED_TOKENS", "2048")),
         # The weights alone are 14 GiB of a 5090's 32 GiB, and the fraction
         # covers them too: the 0.35 of the other vLLM deployments leaves no KV
         # cache at all. 0.6 leaves about 4.5 GiB of it, and 2048 positions take
         # about 1 GiB; what stays outside covers the gathers above.
-        gpu_memory_utilization=float(os.environ.get("KOT_VLLM_GPU_MEM", "0.6")),
+        gpu_memory_utilization=float(os.environ.get("SERVE_VLLM_GPU_MEM", "0.6")),
     )
-    if os.environ.get("KOT_VLLM_MAX_MODEL_LEN"):
-        args.max_model_len = int(os.environ["KOT_VLLM_MAX_MODEL_LEN"])
-    # A cross-check of numerics; a capture runs the checkpoint's own dtype.
-    if os.environ.get("KOT_VLLM_DTYPE"):
-        args.dtype = os.environ["KOT_VLLM_DTYPE"]
-    if os.environ.get("KOT_VLLM_COMPILATION", "").lower() == "eager":
+    if os.environ.get("SERVE_VLLM_MAX_MODEL_LEN"):
+        args.max_model_len = int(os.environ["SERVE_VLLM_MAX_MODEL_LEN"])
+    if os.environ.get("SERVE_VLLM_DTYPE"):
+        args.dtype = os.environ["SERVE_VLLM_DTYPE"]
+    if os.environ.get("SERVE_VLLM_COMPILATION", "").lower() == "eager":
         args.enforce_eager = True
     if device == "cuda":
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
@@ -510,7 +505,7 @@ async def _serve(cli: argparse.Namespace, args: AsyncEngineArgs) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="kot_serve.py", description=__doc__)
+    parser = argparse.ArgumentParser(prog="serve.py", description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True, help="the weights directory, read-only")
     parser.add_argument("--device", required=True, help="torch device string from the platform row")

@@ -111,7 +111,7 @@ def main() -> None:
         return
     changed = patch_file(target)
     print(
-        f"[kot-vllm] {'patched' if changed else 'verified'} bounded Ascend logprob kernel",
+        f"[serve-vllm] {'patched' if changed else 'verified'} bounded Ascend logprob kernel",
         flush=True,
     )
 

@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
-"""Stock-transformers serving of DEPLOYMENT_CONTRACT.md on Ascend NPU, one flat file.
-
-    ./kot_serve.sh --port P --model /path/to/weights --device npu|cpu
-
-Numerics contract, implemented exactly:
-
-* the ids sent to /kot/score are consumed verbatim: no BOS, no chat template,
-  no truncation, no re-tokenization. Row t of a prefill is the prediction for
-  input_ids[t+1], so a prefill over n ids writes n - 1 rows, streamed to disk
-  chunk by chunk: the ~8,600-id replay's distribution never sits whole in
-  memory;
-* the log-softmax is computed in float32 over the model's configured
-  vocabulary, whatever dtype the weights run in, so every row's logsumexp is 0
-  and arrays align by token id;
-* decode applies the request's sampling object exactly as given
-  (temperature, top_p, top_k, min_p; generate() takes all four natively), seed
-  planted immediately before the call, repetition_penalty=1.0, and the stored
-  logits are the raw ones before any warper (output_logits=True gives those);
-* dtype: the weights run in bfloat16 on npu and float32 on cpu; the dtype
-  the log-probs were produced in is reported in /kot/info and kot casts to
-  float32 on its side.
-
-NPU notes: torch_npu must be imported before any tensor is created; eager
-attention is the default (KOT_ATTN overrides) because the fused NPU SDPA
-kernels are the ones whose run-to-run determinism is unproven here; KOT_DTYPE
-overrides the model dtype for experiments.
-"""
+"""Serve the model with Transformers."""
 
 from __future__ import annotations
 
@@ -49,9 +23,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer, set_seed
 
 HOST = "127.0.0.1"
-INFO = "/kot/info"
-SCORE = "/kot/score"
-INFER = "/kot/infer"
+INFO = "/info"
+SCORE = "/score"
+INFER = "/infer"
 COMPLETIONS = "/v1/completions"
 CHAT_COMPLETIONS = "/v1/chat/completions"
 PREFILL = "prefill"
@@ -156,10 +130,7 @@ def route(path):
 def resolve_weights(model: str) -> tuple[Path, str]:
     """The checkpoint to load: the directory itself, or the one snapshot in an HF home.
 
-    The capture mounts the weights at --model. A handed --model-dir capture
-    mounts a checkpoint whose root has config.json; a capture without one
-    mounts the huggingface home, where the model id is not passed to this
-    script at all, so exactly one repository is expected under hub/.
+    Pass a checkpoint directory or a Hugging Face home containing one repository.
     """
     root = Path(model)
     if (root / CONFIG_NAME).is_file():
@@ -260,11 +231,11 @@ async def main():
         import torch_npu  # noqa: F401  registers the npu backend; must precede tensor creation
 
         dtype = torch.bfloat16
-        attention = os.environ.get("KOT_ATTN", "eager")
+        attention = os.environ.get("SERVE_ATTN", "eager")
     else:
         dtype = torch.float32
         attention = "eager"
-    dtype = getattr(torch, os.environ.get("KOT_DTYPE", "")) if os.environ.get("KOT_DTYPE") else dtype
+    dtype = getattr(torch, os.environ.get("SERVE_DTYPE", "")) if os.environ.get("SERVE_DTYPE") else dtype
 
     weights, name = resolve_weights(args.model)
     model_id, model_revision = snapshot_identity(weights, name)
@@ -295,7 +266,7 @@ async def main():
     }
     print(f"[llm-transformers] serving on {HOST}:{args.port}: {info}", flush=True)
 
-    # The speed harness fires every query at once. HTTP answers may interleave,
+    # The load-test client fires every query at once. HTTP answers may interleave,
     # model calls may not: one lock makes the compute path exactly as serial
     # (and as deterministic) as the score path it also serves.
     compute = Lock()
@@ -418,7 +389,7 @@ async def main():
 
     def completion_reply(body: dict, prompt_ids: list[int], chat: bool) -> dict:
         if body.get("stream") and not chat:
-            raise ValueError("stream=true is not served; run the harness offline")
+            raise ValueError("stream=true is not served; use a non-streaming request")
         max_tokens = int(
             body.get("max_tokens") or body.get("max_completion_tokens") or DEFAULT_MAX_TOKENS
         )
@@ -475,7 +446,7 @@ async def main():
         return info
 
     async def handle_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """One keep-alive HTTP/1.1 connection, asyncio: the speed harness pools
+        """One keep-alive HTTP/1.1 connection, asyncio: the load-test client pools
         thousands of idle connections, which a thread-per-connection server
         cannot hold (observed: 13k threads, the accept loop starved). The event
         loop idles through them for free; a model call blocks the loop, which
