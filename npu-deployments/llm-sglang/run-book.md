@@ -32,7 +32,7 @@ the request; 42 is the convention.
 
 ```bash
 # the image: CANN base plus the pinned python stack, no serving engine
-docker build -t kot-llm-ascend-910b:latest .
+docker build -t serve-llm-ascend-910b:latest .
 
 # the engine stack: sglang 0.5.22 from source, built and vendored
 ./fetch_wheels.sh
@@ -87,7 +87,7 @@ Pins that must not float:
 /opt/engines/llm-sglang    this directory; wheels/ is not committed (fetch_wheels.sh fills it)
 /models/<model>            weights; the engine reads the tokenizer from here
 site-packages              the engine stack, installed offline at first start
-/scratch/kot-sglang-stash  row blocks of the current request; else /tmp/kot-sglang-stash
+/scratch/serve-sglang-stash  row blocks of the current request; else /tmp/serve-sglang-stash
 ```
 
 The stash directory holds the row blocks of one request before the server
@@ -97,7 +97,7 @@ collects them. The float32 rows of an 8,600-position prefill are about
 ### Start
 
 ```bash
-./kot_serve.sh --port 8090 --model /models/Qwen3-0.6B --device npu
+./serve.sh --port 8090 --model /models/Qwen3-0.6B --device npu
 ```
 
 The launcher takes exactly three arguments: port, model path, device. Where
@@ -128,7 +128,7 @@ The launcher raises the soft open-file limit to 65536. The docker default
 (1024) fails accept() with EMFILE under one burst of many pooled
 connections.
 
-The engine flags in `kot_server.py` are load-bearing:
+The engine flags in `serve.py` are load-bearing:
 
 - `chunked_prefill_size=-1` keeps one extend per request: a chunked extend
   samples one extra token per chunk, and the extra tokens corrupt the decode
@@ -177,9 +177,9 @@ Run `npu-smi info` before you claim a card.
 | variable | default | effect |
 |---|---|---|
 | `ASCEND_RT_VISIBLE_DEVICES` | `0` | Cards the server may use, as ordinals, comma separated. The launcher reads this first, then `ASCEND_VISIBLE_DEVICES`; it exports both and maps each ordinal to its device node. |
-| `KOT_NPU_IMAGE` | `kot-llm-ascend-910b:latest` | Image the host-mode wrap runs and `fetch_wheels.sh` builds the wheel inside. |
-| `KOT_OUT_MOUNTS` | unset | Directories mounted read-write at the same path inside the container (host mode). Colon separated; every entry must exist on the host. |
-| `KOT_SGLANG_STASH_DIR` | `/scratch/kot-sglang-stash`, else `/tmp/kot-sglang-stash` | Where the row blocks land. A set value switches the patch layer on. The server refuses to start without it, so start through `kot_serve.sh`. |
+| `SERVE_NPU_IMAGE` | `serve-llm-ascend-910b:latest` | Image the host-mode wrap runs and `fetch_wheels.sh` builds the wheel inside. |
+| `SERVE_OUT_MOUNTS` | unset | Directories mounted read-write at the same path inside the container (host mode). Colon separated; every entry must exist on the host. |
+| `SERVE_SGLANG_STASH_DIR` | `/scratch/serve-sglang-stash`, else `/tmp/serve-sglang-stash` | Where the row blocks land. A set value switches the patch layer on. The server refuses to start without it, so start through `serve.sh`. |
 | `SGLANG_COMMIT` | the v0.5.22 release commit | Source commit `fetch_wheels.sh` builds. A first run records the commit in `wheels/SGLANG_COMMIT.txt`; reruns reuse the record. |
 | `KERNEL_TAG` | the release paired to torch 2.10.0 and CANN 9.1.0 | sgl-kernel-npu release `fetch_wheels.sh` downloads. The archive names carry the torch and CANN pairing. |
 

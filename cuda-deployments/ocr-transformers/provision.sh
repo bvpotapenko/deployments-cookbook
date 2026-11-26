@@ -3,7 +3,7 @@
 #
 #   ./provision.sh [python-for-uv]
 #
-# Creates /root/kotvenv-ocr with the native deepseek_ocr2 stack: transformers
+# Creates /root/serve-venv-ocr with the native deepseek_ocr2 stack: transformers
 # is PINNED to 5.22.1 (the version that ships the architecture beside a
 # Blackwell-capable torch). serve.sh finds the venv by this exact path.
 # The model itself is not downloaded here: on the box run
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 PYTHON="${1:-python3}"
-VENV=/root/kotvenv-ocr
+VENV=/root/serve-venv-ocr
 
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh

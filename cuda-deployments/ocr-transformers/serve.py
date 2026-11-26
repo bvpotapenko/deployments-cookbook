@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeepSeek-OCR-2 serving of DEPLOYMENT_CONTRACT.md, no kot imports.
+"""Serve the model with Transformers.
 
     ./serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda
 
@@ -14,7 +14,8 @@ Numerics contract, implemented exactly as our reference server's deepseek
 adapter does it:
 
 * prefill is teacher forced: the transcript's ids are appended verbatim to the
-  template the model builds from the image (BOS, then "<image>\nFree OCR."
+  template the model builds from the image (BOS, then "<image>
+Free OCR."
   in the checkpoint's own plain format, one 257-token image block), the
   forward runs over both, and the rows returned are
   logits[prompt_len : prompt_len + len(transcript) - 1], so a transcript of n
@@ -33,8 +34,7 @@ adapter does it:
   warper (output_logits=True gives those); min_new_tokens pins exactly
   max_new_tokens rows;
 * dtype: the weights run in bfloat16 on cuda and float32 on cpu; the dtype
-  the log-probs were produced in is reported in /kot/info and kot casts to
-  float32 on its side.
+  the log-probs were produced in is reported in /info.
 
 The image path is the native model's own contract, not the remote code's.
 The processor (build_processor's output) turns one image into the padded
@@ -51,8 +51,7 @@ order inside the block is irrelevant, and the count is the reference's.
 
 log_probs are written row-streamed through numpy.lib.format.open_memmap: the
 file opens at its final shape and fills chunk by chunk, so a long unit never
-holds a whole distribution in host memory.
-"""
+holds a whole distribution in host memory."""
 
 from __future__ import annotations
 
@@ -80,8 +79,8 @@ from native_load import load_native, snapshot_identity
 from native_processor import build_processor, load_image
 
 HOST = "127.0.0.1"
-INFO = "/kot/info"
-SCORE = "/kot/score"
+INFO = "/info"
+SCORE = "/score"
 CHAT_COMPLETIONS = "/v1/chat/completions"
 PREFILL = "prefill"
 UTF8 = "utf-8"
@@ -91,7 +90,7 @@ BACKLOG = 1024
 
 IMAGE = "image"
 IMAGE_TAG = "<image>"
-PROMPT_TEXT = "Free OCR."  # documented: what the frozen template_ids spell
+PROMPT_TEXT = "Free OCR."  # documented: what the prompt template_ids spell
 IMAGE_TOKEN_ID = 128815
 BOS_ID = 0
 PATCH_SIZE = 16
@@ -110,13 +109,6 @@ class ChatStream:
 
 
 ROUTES: dict = {}
-# DeepSeek's own anti-repetition rule for OCR outputs (their repo's
-# DeepSeek-OCR2-vllm run scripts and sglang's native defaults agree on the
-# values): a token that would complete an n-gram that already occurred
-# within the lookback window is banned from sampling, except the table
-# tokens, so structure may repeat. The rows kot stores are the raw
-# pre-processor logits; this rule changes which token is sampled, never
-# what is reported.
 NGRAM_SIZE = 30
 NGRAM_WINDOW = 90
 NGRAM_WHITELIST = {128821, 128822}  # <td>, </td>
@@ -251,7 +243,7 @@ def main():
     def template(raw_ids: list[int], image_tokens: list[int]) -> list[int]:
         """The expanded prompt template.
 
-        The raw ids the request carried (the version's frozen template) hold
+        The raw ids the request carried (the prompt template) hold
         one image placeholder; this replaces it with the block the image
         expands to, so the deployment consumes ids and never tokenizes. The
         native forward marks the image positions from the ids themselves, so
@@ -261,10 +253,10 @@ def main():
         return [*raw_ids[:at], *image_tokens, *raw_ids[at + 1:]]
 
     def raw_template_ids_from(body: dict) -> list[int]:
-        """The version's frozen template ids the request carried, checked present."""
+        """The prompt template ids the request carried, checked present."""
         template_ids = [int(token) for token in body["input_ids"]]
         if not template_ids:
-            fail("empty input_ids: the version's frozen template is missing")
+            fail("empty input_ids: a prompt template is required")
         return template_ids
 
     def encode(
@@ -395,7 +387,7 @@ def main():
                 bool(body.get("allow_eos", False)),
                 out_dir,
             )
-            # The stored ids are the frozen template plus the generated ids:
+            # The stored ids are the prompt template plus the generated ids:
             # the pre-expansion sequence, so the replay of this file carries
             # exactly one image placeholder.
             consumed = [*template_ids, *output_ids]

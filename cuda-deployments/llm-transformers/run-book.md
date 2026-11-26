@@ -5,7 +5,7 @@ serves the OpenAI chat and completions routes and the full-vocabulary
 log-probability surface on one port. The model thread runs one generation at
 a time, whatever many connections are held open.
 
-The launcher execs `/root/kotvenv/bin/python serve.py` on a fixed path. A
+The launcher execs `/root/serve-venv/bin/python serve.py` on a fixed path. A
 reader who builds the venv elsewhere edits that line.
 
 ## Model parameters
@@ -29,14 +29,14 @@ the request; 42 is the convention.
 
 ### Environment
 
-The venv runs CPython 3.12. Build it at `/root/kotvenv`, or edit the
+The venv runs CPython 3.12. Build it at `/root/serve-venv`, or edit the
 launcher's last line.
 
 ```bash
-uv venv /root/kotvenv --python 3.12
-uv pip install --python /root/kotvenv/bin/python \
+uv venv /root/serve-venv --python 3.12
+uv pip install --python /root/serve-venv/bin/python \
   torch --index-url https://download.pytorch.org/whl/cu130
-uv pip install --python /root/kotvenv/bin/python \
+uv pip install --python /root/serve-venv/bin/python \
   transformers==5.22.1 accelerate numpy pydantic pyyaml
 ```
 

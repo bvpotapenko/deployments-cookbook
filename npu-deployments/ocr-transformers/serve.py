@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeepSeek-OCR-2 serving of DEPLOYMENT_CONTRACT.md, no kot imports.
+"""Serve the model with Transformers.
 
     ./serve.sh --port P --model /path/to/DeepSeek-OCR-2 --device cpu|cuda|npu
 
@@ -14,7 +14,8 @@ Numerics contract, implemented exactly as our reference server's deepseek
 adapter does it:
 
 * prefill is teacher forced: the transcript's ids are appended verbatim to the
-  template the model builds from the image (BOS, then "<image>\nFree OCR."
+  template the model builds from the image (BOS, then "<image>
+Free OCR."
   in the checkpoint's own plain format, one 257-token image block), the
   forward runs over both, and the rows returned are
   logits[prompt_len : prompt_len + len(transcript) - 1], so a transcript of n
@@ -35,15 +36,15 @@ adapter does it:
 * a decode that arrives with no ids builds the same template itself: BOS, the
   image placeholder, then the instruction's ids;
 * dtype: the weights run in bfloat16 on cuda and npu and float32 on cpu
-  (KOT_DTYPE overrides, a typo fails loudly); the dtype the log-probs were
-  produced in is reported in /kot/info and kot casts to float32 on its side.
+  (SERVE_DTYPE overrides, a typo fails loudly); the dtype the log-probs were
+  produced in is reported in /info.
 
 The npu stack:
 
 * torch_npu is imported inside main(), gated on --device npu, before any
   tensor is placed: the import registers the accelerator backend;
-* attention defaults to eager on npu, and KOT_ATTN overrides;
-* /kot/info reports the stack the process can read (torch, the torch_npu
+* attention defaults to eager on npu, and SERVE_ATTN overrides;
+* /info reports the stack the process can read (torch, the torch_npu
   plugin, the driver and toolkit version files) and leaves empty what it
   cannot, never inventing one.
 
@@ -62,8 +63,7 @@ order inside the block is irrelevant, and the count is the reference's.
 
 log_probs are written row-streamed through numpy.lib.format.open_memmap: the
 file opens at its final shape and fills chunk by chunk, so a long unit never
-holds a whole distribution in host memory.
-"""
+holds a whole distribution in host memory."""
 
 from __future__ import annotations
 
@@ -91,8 +91,8 @@ from native_load import load_native, snapshot_identity
 from native_processor import build_processor, load_image
 
 HOST = "127.0.0.1"
-INFO = "/kot/info"
-SCORE = "/kot/score"
+INFO = "/info"
+SCORE = "/score"
 CHAT_COMPLETIONS = "/v1/chat/completions"
 PREFILL = "prefill"
 UTF8 = "utf-8"
@@ -102,7 +102,7 @@ BACKLOG = 1024
 
 IMAGE = "image"
 IMAGE_TAG = "<image>"
-PROMPT_TEXT = "Free OCR."  # documented: what the frozen template_ids spell
+PROMPT_TEXT = "Free OCR."  # documented: what the prompt template_ids spell
 IMAGE_TOKEN_ID = 128815
 BOS_ID = 0
 PATCH_SIZE = 16
@@ -127,13 +127,6 @@ DRIVER_VERSION_FILE = "/usr/local/Ascend/driver/version.info"
 TOOLKIT_VERSION_FILE = "/usr/local/Ascend/ascend-toolkit/version.info"
 TOOLKIT_LATEST_DIR = "/usr/local/Ascend/ascend-toolkit/latest"
 
-# DeepSeek's own anti-repetition rule for OCR outputs (their repo's
-# DeepSeek-OCR2-vllm run scripts and sglang's native defaults agree on the
-# values): a token that would complete an n-gram that already occurred
-# within the lookback window is banned from sampling, except the table
-# tokens, so structure may repeat. The rows kot stores are the raw
-# pre-processor logits; this rule changes which token is sampled, never
-# what is reported.
 NGRAM_SIZE = 30
 NGRAM_WINDOW = 90
 NGRAM_WHITELIST = {128821, 128822}  # <td>, </td>
@@ -168,8 +161,6 @@ class NoRepeatNGramLogitsProcessor:
                 scores[:, token] = -float("inf")
         return scores
 
-# Every field of kot's Sampling record. A request carries the fields the
-# model's yaml states; the rest stay at the neutral values below.
 SAMPLING_FIELDS = (
     "temperature",
     "top_p",
@@ -249,15 +240,15 @@ def main():
         import torch_npu  # noqa: F401
 
         dtype = torch.bfloat16
-        attention = os.environ.get("KOT_ATTN", "eager")
+        attention = os.environ.get("SERVE_ATTN", "eager")
     elif device.startswith("cuda"):
         dtype = torch.bfloat16
         attention = "sdpa"
     else:
         dtype = torch.float32
         attention = "eager"
-    if os.environ.get("KOT_DTYPE"):
-        dtype = getattr(torch, os.environ["KOT_DTYPE"])
+    if os.environ.get("SERVE_DTYPE"):
+        dtype = getattr(torch, os.environ["SERVE_DTYPE"])
 
     if not (Path(args.model) / "config.json").is_file():
         fail(f"{args.model} holds no config.json; this deployment loads a checkpoint directory")
@@ -318,7 +309,7 @@ def main():
     def template(raw_ids: list[int], image_tokens: list[int]) -> list[int]:
         """The expanded prompt template.
 
-        The raw ids the request carried (the version's frozen template) hold
+        The raw ids the request carried (the prompt template) hold
         one image placeholder; this replaces it with the block the image
         expands to, so the deployment consumes ids and never tokenizes. The
         native forward marks the image positions from the ids themselves, so
@@ -328,7 +319,7 @@ def main():
         return [*raw_ids[:at], *image_tokens, *raw_ids[at + 1:]]
 
     def raw_template_ids_from(body: dict) -> list[int]:
-        """The version's frozen template ids, or the checkpoint's own template when
+        """The prompt template ids, or the checkpoint's own template when
         the request carries none: the contract lets an image family's decode arrive
         empty."""
         template_ids = [int(token) for token in body["input_ids"]]
@@ -465,7 +456,7 @@ def main():
                 bool(body.get("allow_eos", False)),
                 out_dir,
             )
-            # The stored ids are the frozen template plus the generated ids:
+            # The stored ids are the prompt template plus the generated ids:
             # the pre-expansion sequence, so the replay of this file carries
             # exactly one image placeholder.
             consumed = [*template_ids, *output_ids]

@@ -1,9 +1,6 @@
-"""The mllm transformers deployment: Qwen3.8-27B as the first multimodal-LLM target.
+"""Transformers deployment.
 
-Serves the kot capture contract over three unit kinds - text, image, video -
-with every media-processing parameter PINNED IN THIS FILE and reported through
-/kot/info, because a candidate capture must run the identical frame sampling
-and pixel budgets or its speed and correctness numbers compare nothing.
+Serves text, images and videos. GET /info reports the media processing settings.
 
 The pinned video pipeline (the checkpoint's own defaults, from the Qwen
 cookbooks and the checkpoint's processor configs):
@@ -14,30 +11,7 @@ cookbooks and the checkpoint's processor configs):
     for images (16777216 / 65536); patch_size 16, temporal_patch_size 2,
     merge_size 2 -- all read from the checkpoint, reported, never invented
   - instruct mode: the chat template renders with enable_thinking=False
-    (the non-thinking mode; its recommended sampling lives in the store's
-    sampling yaml and arrives per request)
-
-The scoring contract follows the OCR family's frozen-inputs pattern, adapted
-to videos: the frozen inputs carry no ids (the prompt is built around the
-frames), so the deployment renders the pinned chat prompt itself - the raw
-form (one video placeholder) is what a capture stores, and a replay prefill
-re-renders it, asserts the stored head matches, and scores the stored tail
-(n_rows). The decode's rows are the raw logits generate samples from, each
-step's taken by a forward hook before any processor and moved to host at
-once; at every 256 rows the hook runs their log-softmax on the card and
-writes them into log_probs.npy, opened at max_new_tokens rows, so the host
-holds one block, never the unit. A video replay runs in calls through one
-cache: the expanded prompt with the video, then the tail in chunks of
-KOT_TF_REPLAY_CHUNK tokens, so the working memory of a call stays bounded;
-every row still sees the video, the prompt and every tail id before the one
-it predicts. The rows of each call go into the file as the call returns. The
-chunk size is part of the numerics and /kot/info reports it. The lm_head of
-a prefill runs one block of rows at a time. allow_eos
-shapes a video decode's stop as the contract states: false, the default, is exactly
-max_new_tokens ids with EOS suppressed through min_new_tokens, and the rows
-are still taken before that suppression; true stops at EOS, at most that many,
-and the EOS id stays in output_ids with its row.
-"""
+    (the non-thinking mode; sampling settings arrive in the request)"""
 
 from __future__ import annotations
 
@@ -55,9 +29,9 @@ import transformers
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
 UTF8 = "utf-8"
-INFO = "/kot/info"
-SCORE = "/kot/score"
-INFER = "/kot/infer"  # the speed surface: decode over the attachment, files named back
+INFO = "/info"
+SCORE = "/score"
+INFER = "/infer"  # the speed surface: decode over the attachment, files named back
 CHAT = "/v1/chat/completions"
 HOST = "127.0.0.1"
 BACKLOG = 64
@@ -69,16 +43,9 @@ PREFILL = "prefill"
 DECODE = "decode"
 
 # The pinned video prompt: what every video unit asks, in the checkpoint's
-# chat format. The deployment renders it; the frozen inputs carry no ids.
+# chat format, rendered by this deployment.
 VIDEO_PROMPT = "Describe what you see in the video."
 
-# The runtime media knobs this deployment pins. The pixel budgets and the
-# patch geometry come from the checkpoint's own configs; fps and frame
-# sampling are the cookbook defaults. cap_pixels_per_frame adopts the
-# reference implementation's (qwen-vl-utils) per-frame cap. At 1080p it binds
-# below 32 frames (22 frames cost 12100 tokens without it, 7920 with it); a
-# 30 s clip costs 11700 either way. A candidate deployment must report the
-# same values or its capture compares nothing.
 VIDEO_FPS = 2.0
 VIDEO_DO_SAMPLE_FRAMES = True
 CAP_PIXELS_PER_FRAME = True
@@ -86,13 +53,7 @@ CAP_PIXELS_PER_FRAME = True
 # Rows per log-softmax block. At vocabulary 248320 a block is 0.24 GiB of float32.
 BLOCK_ROWS = 256
 
-# Tokens per replay call after the prompt call. The working memory of a call
-# grows with its tokens: one call over a 12.3k-token video prompt plus an
-# 8192-token tail does not fit on card 0. The size is part of the numerics:
-# the float order changes at every call edge, so rows produced at one size
-# need not be bit-identical to rows produced at another. /kot/info reports it.
-# The env override is for experiments; captures run at the default.
-REPLAY_CHUNK = int(os.environ.get("KOT_TF_REPLAY_CHUNK", "2048"))
+REPLAY_CHUNK = int(os.environ.get("SERVE_TF_REPLAY_CHUNK", "2048"))
 
 
 def compact_rows(path: Path, rows: int) -> None:
@@ -148,9 +109,7 @@ def snapshot_identity(checkpoint: Path) -> tuple[str, str]:
 def pinned_media_params(checkpoint: Path, processor) -> dict:
     """The media processing this deployment runs, resolved from the checkpoint.
 
-    Everything here is reported through /kot/info so a capture's info.yaml
-    records the exact frame sampling and pixel budgets a candidate must
-    reproduce.
+    GET /info returns the frame sampling and pixel budgets.
     """
     image_cfg = json.loads((checkpoint / "preprocessor_config.json").read_text())
     video_cfg = json.loads((checkpoint / "video_preprocessor_config.json").read_text())
@@ -176,7 +135,7 @@ def main() -> int:
     args = parser.parse_args()
     if REPLAY_CHUNK < 2:
         # A call of one token takes the decode path, not the prefill path.
-        raise SystemExit(f"KOT_TF_REPLAY_CHUNK is {REPLAY_CHUNK}; a replay chunk needs at least 2 tokens")
+        raise SystemExit(f"SERVE_TF_REPLAY_CHUNK is {REPLAY_CHUNK}; a replay chunk needs at least 2 tokens")
 
     device = args.device
     if device.startswith("npu"):
@@ -210,7 +169,7 @@ def main() -> int:
         "media": pinned_media_params(checkpoint, processor),
         # The replay's chunk size is part of the numerics: the float order
         # changes at every call edge, so rows produced at one size need not
-        # be bit-identical to rows produced at another. Every capture carries its own.
+        # be bit-identical to rows produced at another.
         "replay_chunk_tokens": REPLAY_CHUNK,
         "started_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -242,7 +201,7 @@ def main() -> int:
                 else:
                     self._json(
                         HTTPStatus.OK,
-                        kot_infer(body) if self.path == INFER else score(body),
+                        serve_infer(body) if self.path == INFER else score(body),
                     )
             except ChatRequestError as failure:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid_request", str(failure))
@@ -310,7 +269,7 @@ def main() -> int:
             )
         ids = [int(token) for token in body["input_ids"]]
         if not ids:
-            raise RuntimeError("empty input_ids: the version's frozen ids are missing")
+            raise RuntimeError("empty input_ids: token IDs are required")
         if body["mode"] == DECODE:
             return _decode(body, ids)
         return _prefill(body, ids)
@@ -409,7 +368,7 @@ def main() -> int:
         return value
 
     def chat_completion(body: dict) -> str:
-        """The OpenAI surface uses the same video render and generate path as kot_infer."""
+        """The OpenAI surface uses the same video render and generate path as serve_infer."""
         path, text = _chat_video_and_text(body)
         _raw, expanded, media = render_video(path, text)
         torch.manual_seed(int(body.get("seed", 42)))
@@ -623,7 +582,7 @@ def main() -> int:
             "output_ids": [],
         }
 
-    def kot_infer(body: dict) -> dict:
+    def serve_infer(body: dict) -> dict:
         """The speed surface: one video decode, the description written into
         out_dir, the files named back. Only the clock reads what lands here."""
         path = (body.get("attachments") or {}).get(VIDEO)

@@ -1,4 +1,4 @@
-"""Patch SGLang so the kot contract's numerics can leave the engine.
+"""Expose full-vocabulary log probabilities for SGLang scoring requests.
 
 Imported by ``site`` in every python process this deployment starts (the
 adapter and the spawned scheduler/detokenizer processes), through the
@@ -8,7 +8,7 @@ the patches are applied when SGLang's own modules finish loading.
 Two monkeypatches plus one launch shim, all additive: the original
 computation still runs and feeds SGLang's own logprob plumbing; the patch
 writes the full-vocabulary distribution of the scored positions where
-``kot_server.py`` collects it.
+``serve.py`` collects it.
 
 * ``InputLogprobProcessor.forward`` computes the input rows through an
   injected ``get_logits_fn`` callable (the 0.5.21+ entry point; the
@@ -16,18 +16,17 @@ writes the full-vocabulary distribution of the scored positions where
   line the run book pins). The patch wraps that callable and stashes a
   float32 log-softmax of the logits it returns -- computed before the
   original's own reductions touch them, because SGLang runs its path in the
-  weights' dtype and a bfloat16 log-softmax quantises away what the
-  benchmark measures. The line chunks the input computation, so one prefill
+  weights' dtype and a bfloat16 log-softmax reduces precision. The line chunks the input computation, so one prefill
   stashes one archive per chunk, in order. For a prefill over n ids the
   concatenated matrix has n rows: rows 0..n-2 are the contract's rows
   (row t predicts input_ids[t+1]) and row n-1 is the sampling row, which
-  ``kot_server.py`` drops.
+  ``serve.py`` drops.
 
 * ``ModelRunner.sample`` is where every sampled token comes from, extend and
   decode steps alike. The patch stashes a float32 log-softmax of
   ``logits_output.next_token_logits`` at the call's entry, gated on
   ``forward_batch.return_logprob``, which only the score path's requests set,
-  so speed-harness traffic writes nothing. The entry comes before everything
+  so ordinary inference traffic writes nothing. The entry comes before everything
   that touches the logits, because the contract wants the model's own
   distribution, not the one the samples come from: ``_preprocess_logits``,
   whose penalizers write in place in the iteration order of a set of classes,
@@ -49,7 +48,7 @@ complete, because ``np.savez`` to a final name is not atomic. One score
 request is in flight at a time (the adapter's HTTP server is single-threaded),
 so "every archive newer than the ones seen when the request started" belongs
 to that request, or to a chat request in its batch: the archives carry no rid,
-so ``kot_server.py`` fails a score whose row count is off.
+so ``serve.py`` fails a score whose row count is off.
 """
 
 import json
@@ -62,8 +61,8 @@ import sys
 # file is also installed into the engine venv's site-packages, where site.py
 # finds it without any PYTHONPATH.
 STASH_DIR = (
-    os.environ.get("KOT_SGLANG_STASH_DIR")
-    or ("/scratch/kot-sglang-stash" if os.path.isdir("/scratch") else "/tmp/kot-sglang-stash")
+    os.environ.get("SERVE_SGLANG_STASH_DIR")
+    or ("/scratch/serve-sglang-stash" if os.path.isdir("/scratch") else "/tmp/serve-sglang-stash")
 )
 CAPTURE_MODE = bool(STASH_DIR)
 
@@ -166,12 +165,12 @@ class _PatchOnLoadFinder:
     def find_spec(self, fullname, path=None, target=None):
         from importlib.abc import Loader
 
-        if os.environ.get("KOT_SGLANG_DEBUG") and fullname in self.TARGETS:
+        if os.environ.get("SERVE_SGLANG_DEBUG") and fullname in self.TARGETS:
             print(f"[sitecustomize] target find_spec: {fullname} path={path}", flush=True)
         if fullname not in self.TARGETS:
             return None
         spec = self._path_finder.find_spec(fullname, path)
-        if os.environ.get("KOT_SGLANG_DEBUG") and fullname in self.TARGETS:
+        if os.environ.get("SERVE_SGLANG_DEBUG") and fullname in self.TARGETS:
             print(f"[sitecustomize] target spec: {spec is not None}", flush=True)
         spec = self._path_finder.find_spec(fullname, path)
         if spec is None or spec.loader is None:
@@ -184,7 +183,7 @@ class _PatchOnLoadFinder:
 
             def exec_module(self, module):
                 inner.exec_module(module)
-                if os.environ.get("KOT_SGLANG_DEBUG"):
+                if os.environ.get("SERVE_SGLANG_DEBUG"):
                     print(f"[sitecustomize] exec done: {fullname}", flush=True)
                 _apply_patch(fullname)
 
@@ -194,7 +193,7 @@ class _PatchOnLoadFinder:
 
 def _patch_log(message: str) -> None:
     """One line per patch event into the stash dir: the scheduler's env is
-    curated, so nothing else reaches kot_server.py from here. A second copy
+    curated, so nothing else reaches serve.py from here. A second copy
     goes to /tmp, which the adapter's stash cleaning never touches."""
     try:
         with open(os.path.join(STASH_DIR, "patched.log"), "a", encoding="utf-8") as log:
@@ -202,7 +201,7 @@ def _patch_log(message: str) -> None:
     except Exception:
         pass
     try:
-        with open("/tmp/kot_patch_trace.log", "a", encoding="utf-8") as log:
+        with open("/tmp/serve_patch_trace.log", "a", encoding="utf-8") as log:
             log.write(f"{os.getpid()} {message}\n")
     except Exception:
         pass
@@ -255,7 +254,7 @@ def _patch_input_logprob(torch, module) -> None:
     applies downstream. The processor only runs for extends that request
     input logprobs, which is exactly the score path's prefill-only requests.
     """
-    if getattr(module.InputLogprobProcessor.forward, "_kot_patched", False):
+    if getattr(module.InputLogprobProcessor.forward, "_serve_patched", False):
         return
     counter = [0]
     original = module.InputLogprobProcessor.forward
@@ -282,7 +281,7 @@ def _patch_input_logprob(torch, module) -> None:
                          get_logits_fn=capturing_get_logits,
                          logits_metadata=logits_metadata, **kwargs)
 
-    forward_with_stash._kot_patched = True
+    forward_with_stash._serve_patched = True
     module.InputLogprobProcessor.forward = forward_with_stash
 
 
@@ -297,7 +296,7 @@ def _patch_batch_invariant_matmul(torch, module) -> None:
     pipeline stages fit; the stage count is a scheduling knob and changes
     no arithmetic.
     """
-    if getattr(module.matmul_kernel_persistent, "_kot_stage_capped", False):
+    if getattr(module.matmul_kernel_persistent, "_serve_stage_capped", False):
         return
     original_kernel = module.matmul_kernel_persistent
 
@@ -318,12 +317,12 @@ def _patch_batch_invariant_matmul(torch, module) -> None:
 
             return launch
 
-    _StageCappedKernel._kot_stage_capped = True
+    _StageCappedKernel._serve_stage_capped = True
     module.matmul_kernel_persistent = _StageCappedKernel()
 
 
 def _patch_model_runner(torch, module) -> None:
-    if getattr(module.ModelRunner.sample, "_kot_patched", False):
+    if getattr(module.ModelRunner.sample, "_serve_patched", False):
         return
     counter = [0]
     original = module.ModelRunner.sample
@@ -339,7 +338,7 @@ def _patch_model_runner(torch, module) -> None:
             pass
         return original(self, logits_output, forward_batch, *args, **kwargs)
 
-    sample_with_stash._kot_patched = True
+    sample_with_stash._serve_patched = True
     module.ModelRunner.sample = sample_with_stash
 
 

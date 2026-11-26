@@ -22,11 +22,9 @@ fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# When the weights were handed over as a huggingface home (the capture mounts
-# its cache at --model), point the hub at it so the snapshot resolves offline.
 if [[ -d "$MODEL/hub" ]]; then
   export HF_HOME="$MODEL"
   export HF_HUB_OFFLINE=1
 fi
 
-exec /root/kotvenv/bin/python "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
+exec /root/serve-venv/bin/python "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

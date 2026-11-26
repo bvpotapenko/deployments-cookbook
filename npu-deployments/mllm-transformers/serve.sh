@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# mllm transformers on Ascend 910B.
-#
-# The host route wraps the CANN image; the graded route runs directly.
-#
-# The OCR stack needs transformers 5.22.1, which ships the native deepseek_ocr2
-# architecture, so the interpreter chain prefers a dedicated venv when one
-# carries both torch_npu and transformers; only such an interpreter may run
-# serve.py directly.
+# Launch the model on Ascend, using the local engine or the deployment container.
 set -euo pipefail
 
 PORT=""
@@ -29,13 +22,13 @@ fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# The harness opens thousands of connections before its first request; the
+# Clients may open many concurrent connections; the
 # docker default soft nofile (1024) makes accept() fail with EMFILE past the
 # first thousand. A process may raise its own soft limit to the hard limit.
 ulimit -n 65536 2>/dev/null || true
 
 PY=""
-for candidate in "${KOT_MLLM_PYTHON:-}" /root/kotvenv-mllm/bin/python /root/kotvenv/bin/python python3; do
+for candidate in "${SERVE_MLLM_PYTHON:-}" /root/serve-venv-mllm/bin/python /root/serve-venv/bin/python python3; do
   if command -v "$candidate" >/dev/null 2>&1 \
      && "$candidate" -c "import torch_npu, transformers, torchcodec" >/dev/null 2>&1; then
     PY="$candidate"
@@ -44,14 +37,14 @@ for candidate in "${KOT_MLLM_PYTHON:-}" /root/kotvenv-mllm/bin/python /root/kotv
 done
 if [ -n "$PY" ]; then
   source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
-  # The working directory is the model dir: the runner's out_dir resolves
+  # The working directory is the model dir: the requested out_dir resolves
   # against it when sent relative. serve.py imports its sibling builder
   # modules through its own directory on sys.path.
   cd "$MODEL"
   exec "$PY" "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
 fi
 
-IMAGE="${KOT_MLLM_IMAGE:-kot-mllm-ascend-910b:latest}"
+IMAGE="${SERVE_MLLM_IMAGE:-serve-mllm-ascend-910b:latest}"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "[serve] building $IMAGE from $HERE/Dockerfile (first run only)" >&2
   docker build -t "$IMAGE" "$HERE" >&2
@@ -68,11 +61,11 @@ else
   DOCKER_ARGS+=(-e HF_HOME=/tmp/hf -e HF_HUB_OFFLINE=1)
 fi
 
-# Every directory in KOT_OUT_MOUNTS (colon separated) is mounted rw at the same
-# path: /kot/score writes exactly where the host-side runner will read. Point
-# it at the capture tree; never at a store that holds goldens.
-for dir in ${KOT_OUT_MOUNTS:-}; do
-  [[ -d "$dir" ]] || { echo "KOT_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
+# Every directory in SERVE_OUT_MOUNTS (colon separated) is mounted rw at the same
+# path: /score writes exactly where the host-side runner will read. Point
+# it at the output directory.
+for dir in ${SERVE_OUT_MOUNTS:-}; do
+  [[ -d "$dir" ]] || { echo "SERVE_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
   DOCKER_ARGS+=(-v "${dir}:${dir}")
 done
 

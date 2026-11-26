@@ -1,48 +1,6 @@
-"""kot deployment contract adapter around a vLLM engine, in one process.
+"""Serve inference and token scores with vLLM.
 
-    kot_serve.py --port P --model /path/to/weights --device npu
-
-The vLLM OpenAI app is mounted as-is for /v1/completions and
-/v1/chat/completions (the speed harness drives it with stream: true; vLLM
-applies the model's own chat template from the tokenizer files beside the
-weights). The contract endpoints are added to the same app:
-
-  GET  /kot/info   provenance: the running engine, its dtype, the vocab width
-  POST /kot/score  writes log_probs.npy + input_ids.npy into out_dir
-
-Numerics, the whole point of this deployment:
-
-  * ids are consumed verbatim: the request carries token ids and the engine
-    sees exactly those, no BOS, no template, no truncation.
-  * the score path asks the engine for `prompt_logprobs` / `logprobs` at
-    k = vocab_size (with --max-logprobs raised accordingly). vLLM's V1
-    sampler computes those as log_softmax of the RAW logits, in float32,
-    before temperature scaling, penalties or any logit processor. That is
-    exactly the contract's pre-sampling distribution.
-  * k = vocab_size makes the "top-k" the whole vocabulary, so the returned
-    [rows, k+1] tensors are scattered back into token-id order and every row
-    covers every id exactly once. Verified per chunk; a padded-vocab engine
-    cannot sneak pad rows past that check.
-  * decode applies the request's sampling object exactly as given
-    (temperature, top_p, top_k, min_p; all four are native SamplingParams
-    knobs) with the request's seed and no penalties, and min_tokens =
-    max_new_tokens so the reply has exactly max_new_tokens rows (EOS
-    suppressed for the whole generation, raw logprobs unaffected).
-    allow_eos: true runs to EOS.
-  * prefix caching is OFF: with prompt_logprobs requested, a cache hit would
-    leave the rows of the cached prefix never computed. Off, there is no such
-    state at all.
-  * rows are written to disk AS THEY ARE PRODUCED (numpy.lib.format.open_memmap
-    at the final shape): an 8,192-row decode over a 150k vocabulary is ~5 GB
-    and never fits in memory twice. The full-vocabulary log-softmax is the
-    memory budget on and off the accelerator.
-
-The one patch: vLLM pythonizes full-vocab logprob tensors into Logprob
-objects / flat lists on the frontend. The tap below keeps the raw per-chunk
-arrays instead, writes them straight into the memmap, and leaves cheap
-placeholders in vLLM's own lists so its invariants hold and nothing else
-changes.
-"""
+    serve.py --port P --model /path/to/weights --device npu"""
 
 from __future__ import annotations
 
@@ -85,18 +43,18 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser  # noqa: E402
 from vllm.inputs import TokensPrompt  # noqa: E402
 from vllm.v1.engine.logprobs import LogprobsProcessor  # noqa: E402
 
-INFO = "/kot/info"
-SCORE = "/kot/score"
+INFO = "/info"
+SCORE = "/score"
 CONTRACT_VERSION = 1
-SCORE_PREFIX = "kot-score-"
+SCORE_PREFIX = "serve-score-"
 UTF8 = "utf-8"
 
-# request_id -> the KotSink the tap streams rows into. Only score requests
+# request_id -> the LogprobSink the tap streams rows into. Only score requests
 # (SCORE_PREFIX) are registered.
-SINKS: dict[str, "KotSink"] = {}
+SINKS: dict[str, "LogprobSink"] = {}
 
 
-class KotSink:
+class LogprobSink:
     """Streams one request's full-vocabulary logprob rows into a .npy memmap.
 
     Opened at the final shape before the engine runs; every chunk the tap
@@ -208,9 +166,9 @@ def _hand_back_ownership(out_dir: Path) -> None:
     runner writes its own files (output_ids.npy, manifests) into the same
     directories right after this response. Without this hand-back every
     directory the server created is root-owned and the runner's next write
-    dies with EPERM. No-op outside the wrap (KOT_UID unset or not root).
+    dies with EPERM. No-op outside the wrap (SERVE_UID unset or not root).
     """
-    uid = os.environ.get("KOT_UID", "")
+    uid = os.environ.get("SERVE_UID", "")
     if not uid or not hasattr(os, "geteuid") or os.geteuid() != 0:
         return
     try:
@@ -242,8 +200,8 @@ def _install_logprobs_tap() -> None:
 
     def from_new_request(cls, tokenizer, request):
         processor = original_from_new_request(cls, tokenizer, request)
-        processor.kot_prompt_chunks = []
-        processor.kot_sample_chunks = []
+        processor.serve_prompt_chunks = []
+        processor.serve_sample_chunks = []
         # The input processor copies the caller's id to external_req_id and
         # re-spells request_id with a random suffix, so the sink must be
         # looked up by the external id (exact), then by prefix.
@@ -255,14 +213,14 @@ def _install_logprobs_tap() -> None:
                     sink = registered
                     break
         if sink is not None:
-            processor.kot_sink = sink
+            processor.serve_sink = sink
         return processor
 
     def update_from_output(self, output):
-        sink = getattr(self, "kot_sink", None)
+        sink = getattr(self, "serve_sink", None)
         if output.new_prompt_logprobs_tensors is not None:
             tensors = output.new_prompt_logprobs_tensors
-            self.kot_prompt_chunks.append(tensors)
+            self.serve_prompt_chunks.append(tensors)
             rows = int(tensors.logprobs.shape[0])
             self.prompt_logprobs.extend([{} for _ in range(rows)])
             if sink is not None:
@@ -273,7 +231,7 @@ def _install_logprobs_tap() -> None:
                 )
         if output.new_logprobs is not None:
             lists = output.new_logprobs
-            self.kot_sample_chunks.append(lists)
+            self.serve_sample_chunks.append(lists)
             rows = int(lists.logprobs.shape[0])
             self.logprobs.extend([{} for _ in range(rows)])
             if sink is not None:
@@ -358,7 +316,7 @@ async def _score(engine, body: dict, vocab_size: int) -> dict:
         max_rows = int(body["max_new_tokens"])
         if max_rows <= 0:
             raise ValueError("decode requires max_new_tokens > 0")
-    sink = KotSink(out_dir / "log_probs.npy", vocab_size, max_rows)
+    sink = LogprobSink(out_dir / "log_probs.npy", vocab_size, max_rows)
     SINKS[request_id] = sink
     try:
         final = None
@@ -427,12 +385,12 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
     """(model_id, revision) as provenance, from the weights themselves.
 
     A hub snapshot's path names both. Any other directory does not name its
-    hub id; ``_name_or_path`` in config.json usually does. KOT_MODEL_ID /
-    KOT_MODEL_REVISION override both,
-    e.g. when the runner knows the id and the directory does not.
+    hub id; ``_name_or_path`` in config.json usually does. SERVE_MODEL_ID /
+    SERVE_MODEL_REVISION override both,
+    e.g. when the client knows the ID and the directory does not.
     """
-    override_id = os.environ.get("KOT_MODEL_ID", "")
-    override_revision = os.environ.get("KOT_MODEL_REVISION", "")
+    override_id = os.environ.get("SERVE_MODEL_ID", "")
+    override_revision = os.environ.get("SERVE_MODEL_REVISION", "")
     if override_id:
         return override_id, override_revision
     model_id = Path(model_dir).name
@@ -450,7 +408,7 @@ def _resolve_identity(model_dir: str) -> tuple[str, str]:
 
 def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.Namespace:
     """The vLLM server's own CLI namespace, pinned the way this contract needs."""
-    args = make_arg_parser(argparse.ArgumentParser(prog="kot_serve")).parse_args([])
+    args = make_arg_parser(argparse.ArgumentParser(prog="serve")).parse_args([])
     args.model = model
     args.device = device
     args.host = "127.0.0.1"
@@ -463,26 +421,21 @@ def _openai_args(model: str, device: str, port: int, model_id: str) -> argparse.
     # device for every scheduled token in a step; at the default 8192 that is
     # ~22GB and an over-long prompt kills the whole engine. 2048 caps the
     # transient at ~2.5GB regardless of prompt length.
-    args.max_num_batched_tokens = int(os.environ.get("KOT_VLLM_MAX_BATCHED_TOKENS", "2048"))
+    args.max_num_batched_tokens = int(os.environ.get("SERVE_VLLM_MAX_BATCHED_TOKENS", "2048"))
     # And gpu_memory_utilization=0.9 hands that whole margin to the KV cache,
-    # so the gather OOMs anyway. 0.35 keeps room for it; KOT_VLLM_NPU_MEM
+    # so the gather OOMs anyway. 0.35 keeps room for it; SERVE_VLLM_NPU_MEM
     # overrides for models whose KV cache actually needs more.
-    args.gpu_memory_utilization = float(os.environ.get("KOT_VLLM_NPU_MEM", "0.35"))
-    # KOT_VLLM_MAX_MODEL_LEN caps the context window (and the KV-cache floor
-    # the engine demands at startup); unset means the model config's own
-    # length. The capture's long prefill is ~9k tokens; 16384 covers it.
-    max_model_len = os.environ.get("KOT_VLLM_MAX_MODEL_LEN", "")
+    args.gpu_memory_utilization = float(os.environ.get("SERVE_VLLM_NPU_MEM", "0.35"))
+    max_model_len = os.environ.get("SERVE_VLLM_MAX_MODEL_LEN", "")
     if max_model_len:
         args.max_model_len = int(max_model_len)
-    # KOT_VLLM_DTYPE=float32 exists for cross-checking numerics against a
-    # float32 reference; a capture runs the engine's own default ("auto").
-    dtype_override = os.environ.get("KOT_VLLM_DTYPE", "")
+    dtype_override = os.environ.get("SERVE_VLLM_DTYPE", "")
     if dtype_override:
         args.dtype = dtype_override
     # Default is eager on the NPU: the numerics of the compiled path are
-    # unproven here, and the capture is correctness-first. KOT_VLLM_COMPILATION
+    # unproven here, and the capture is correctness-first. SERVE_VLLM_COMPILATION
     # = "default" turns compilation back on for speed runs.
-    if os.environ.get("KOT_VLLM_COMPILATION", "eager").lower() != "default":
+    if os.environ.get("SERVE_VLLM_COMPILATION", "eager").lower() != "default":
         args.enforce_eager = True
     if device.startswith("npu"):
         visible = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", os.environ.get("ASCEND_VISIBLE_DEVICES", ""))
@@ -497,9 +450,7 @@ def _register_serve_any_model(app, served: str) -> None:
     """Rewrite the `model` field of /v1/* requests to the loaded model's name.
 
     Registered before the app starts: newer Starlette refuses middleware
-    added after startup. The speed harness echoes the runner's --model-id
-    (which equals model_id) and kot's own probe sends no model at all; either
-    way the one loaded engine serves.
+    added after startup. Requests can omit the model name.
     """
     from starlette.middleware import Middleware
     from starlette.middleware.base import BaseHTTPMiddleware
@@ -524,13 +475,13 @@ def _register_serve_any_model(app, served: str) -> None:
     app.middleware_stack = None
 
 
-def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
+def _register_serve_routes(app, engine, vocab_size: int, info: dict) -> None:
     @app.get(INFO)
-    async def kot_info() -> JSONResponse:
+    async def serve_info() -> JSONResponse:
         return JSONResponse(info)
 
     @app.post(SCORE)
-    async def kot_score(request: Request) -> JSONResponse:
+    async def serve_score(request: Request) -> JSONResponse:
         try:
             body = await request.json()
             return JSONResponse(await _score(engine, body, vocab_size))
@@ -540,9 +491,12 @@ def _register_kot_routes(app, engine, vocab_size: int, info: dict) -> None:
                 status_code=500,
             )
 
+    # The engine may also register POST /score. Dispatch our score handler first.
+    app.router.routes.insert(0, app.router.routes.pop())
+
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="kot_serve.py", description=__doc__)
+    parser = argparse.ArgumentParser(prog="serve.py", description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--model", required=True, help="the weights directory, read-only")
     parser.add_argument("--device", default="npu", help="torch device string from the platform row")
@@ -573,8 +527,8 @@ def main() -> int:
                 "vocab_size": int(model_config.hf_config.vocab_size),
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
-            _register_kot_routes(app, engine, int(model_config.hf_config.vocab_size), info)
-            print(f"[kot-vllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
+            _register_serve_routes(app, engine, int(model_config.hf_config.vocab_size), info)
+            print(f"[serve-vllm] serving on 127.0.0.1:{cli.port}: {json.dumps(info)}", flush=True)
             await serve_http(app, sock=None, host=args.host, port=args.port, log_level="warning")
 
     asyncio.run(run())

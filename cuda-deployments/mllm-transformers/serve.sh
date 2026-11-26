@@ -24,9 +24,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # The interpreter: explicit override, then the provisioned venv, then PATH.
-if [ -n "${KOT_MLLM_PYTHON:-}" ]; then PY="$KOT_MLLM_PYTHON"
-elif [ -x /root/kotvenv-mllm/bin/python ]; then PY=/root/kotvenv-mllm/bin/python
-elif [ -x /root/kotvenv/bin/python ]; then PY=/root/kotvenv/bin/python
+if [ -n "${SERVE_MLLM_PYTHON:-}" ]; then PY="$SERVE_MLLM_PYTHON"
+elif [ -x /root/serve-venv-mllm/bin/python ]; then PY=/root/serve-venv-mllm/bin/python
+elif [ -x /root/serve-venv/bin/python ]; then PY=/root/serve-venv/bin/python
 else PY="$(command -v python3)"
 fi
 

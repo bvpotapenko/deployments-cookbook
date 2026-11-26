@@ -4,7 +4,7 @@
     python3 self_check.py --deployment DIR --model PATH --device cuda
 
 The check starts serve.sh, creates deterministic synthetic observations, and
-checks /kot/info, /kot/infer, decode scoring, and teacher-forced prefill.
+checks /info, /infer, decode scoring, and teacher-forced prefill.
 It intentionally uses only stdlib plus numpy so an agent can run it before
 installing model-specific tooling in the deployment environment.
 """
@@ -64,7 +64,7 @@ def wait_info(process: subprocess.Popen, port: int):
     deadline = time.monotonic() + LOAD_TIMEOUT_S
     while process.poll() is None and time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"http://{HOST}:{port}/kot/info", timeout=10) as response:
+            with urllib.request.urlopen(f"http://{HOST}:{port}/info", timeout=10) as response:
                 info = json.loads(response.read())
             return [], f"model {info.get('model_id')}, device {info.get('device')}", info
         except OSError:
@@ -85,7 +85,7 @@ def post(port: int, route: str, payload: dict) -> bytes:
 
 
 def score_answer(port: int, payload: dict):
-    body = post(port, "/kot/score", payload)
+    body = post(port, "/score", payload)
     lines = [json.loads(line) for line in body.splitlines() if line.strip()]
     results = [line for line in lines if isinstance(line, dict) and "block" not in line]
     if not results or any(not isinstance(line, dict) or "error" in line for line in lines):
@@ -132,7 +132,7 @@ def run_checks(port: int, root: Path, info: dict, observation: Path, inverted: P
         "out_dir": str(root / "infer"),
         "attachments": {"observation": str(observation)},
     }
-    reply = check("infer answer", lambda: ([], "JSON response", json.loads(post(port, "/kot/infer", infer))))
+    reply = check("infer answer", lambda: ([], "JSON response", json.loads(post(port, "/infer", infer))))
     if reply:
         action_path = root / "infer" / (reply.get("files") or ["actions.npy"])[0]
         check("infer file", lambda: ([], f"actions {np.load(action_path).shape}", _check_action(action_path)))
@@ -201,7 +201,7 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--device", required=True)
     args = parser.parse_args()
-    root, process = Path(tempfile.mkdtemp(prefix="kot-vla-self-check-")).resolve(), None
+    root, process = Path(tempfile.mkdtemp(prefix="serve-vla-self-check-")).resolve(), None
     try:
         observation, inverted = root / "observation.npz", root / "inverted.npz"
         make_observation(observation)
@@ -211,8 +211,8 @@ def main() -> int:
             port = probe.getsockname()[1]
         argv = [str(Path(args.deployment).resolve() / "serve.sh"), "--port", str(port), "--model", os.path.abspath(args.model), "--device", args.device]
         with open(root / "serve.log", "wb") as log:
-            process = check("start serve.sh", lambda: ([], " ".join(argv), subprocess.Popen(argv, cwd=args.deployment, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, env={**os.environ, "KOT_OUT_MOUNTS": str(root)})))
-        info = process and check("GET /kot/info", lambda: wait_info(process, port))
+            process = check("start serve.sh", lambda: ([], " ".join(argv), subprocess.Popen(argv, cwd=args.deployment, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, env={**os.environ, "SERVE_OUT_MOUNTS": str(root)})))
+        info = process and check("GET /info", lambda: wait_info(process, port))
         if info:
             run_checks(port, root, info, observation, inverted)
     finally:

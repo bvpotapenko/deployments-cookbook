@@ -17,7 +17,7 @@ at the deployment default. Read a model's row against the same row in the
 other engine run books. A mismatch between engines is the first suspect when
 a comparison fails.
 
-| model | revision | cards | `KOT_VLLM_NPU_MEM` | `KOT_VLLM_MAX_BATCHED_TOKENS` | `KOT_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
+| model | revision | cards | `SERVE_VLLM_NPU_MEM` | `SERVE_VLLM_MAX_BATCHED_TOKENS` | `SERVE_VLLM_MAX_MODEL_LEN` | dtype | sampling (recommended) |
 |---|---|---|---|---|---|---|---|
 | Qwen/Qwen3-0.6B | `c1899de289a04d12100db370d81485cdf75e47ca` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.6, top_p 0.95, top_k 20 |
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 1 | 0.35 | 2048 | unset | bfloat16 | temperature 0.3, top_p 0.95 |
@@ -38,7 +38,7 @@ is aarch64 cp312; the closure serves no other architecture or CPython.
 
 ```bash
 ./make_wheels.sh     # builds wheels/ from wheels-requirements.txt; wheels/ is not committed
-docker build -t kot-llm-ascend-910b:latest .
+docker build -t serve-llm-ascend-910b:latest .
 ```
 
 `make_wheels.sh` builds the pip resolution of `vllm==0.23.0` with
@@ -75,7 +75,7 @@ Pins that must not float:
 /opt/engines/llm-vllm     this directory; inside the wrap it is /deployment, read-only
 /models/<model>           weights, mounted read-only at their own path; the tokenizer
                           and its chat template are read from here
-/scratch/kot-vllm-venv    engine venv (KOT_VENV overrides); /tmp is the fallback
+/scratch/serve-vllm-venv    engine venv (SERVE_VENV overrides); /tmp is the fallback
 ```
 
 A weights path that holds an HF cache (a `hub/` directory) sets `HF_HOME` to
@@ -86,7 +86,7 @@ reads no network, and the weights directory must be complete on disk.
 ### Start
 
 ```bash
-./kot_serve.sh --port 8090 --model /models/Qwen3-0.6B --device npu
+./serve.sh --port 8090 --model /models/Qwen3-0.6B --device npu
 ```
 
 The script picks its launch path from what the ambient python imports. No
@@ -122,17 +122,17 @@ failed.
 |---|---|---|
 | `ASCEND_RT_VISIBLE_DEVICES` | `0` | Card ordinals, comma separated. The tensor-parallel size equals the count of listed cards. |
 | `ASCEND_VISIBLE_DEVICES` | `0` | The fallback when the RT variable is unset. |
-| `KOT_PYTHON` | ambient python3 | Interpreter that has vllm and `torch_npu`. Set it when a provisioned interpreter sits outside the default paths. |
-| `KOT_VENV` | `/scratch/kot-vllm-venv` | Engine venv location, inside and outside the wrap. `/tmp` is the fallback when `/scratch` is not writable. |
-| `KOT_VLLM_NPU_MEM` | `0.35` | NPU memory fraction. The log-probability pass needs device headroom; at 0.9 the margin goes to the KV cache and the pass fails. |
-| `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | Caps the per-step transient of the log-probability pass, about 16 bytes per vocabulary entry per scheduled token. The engine default 8192 makes about 22 GB on a 150k vocabulary and kills the engine. |
-| `KOT_VLLM_MAX_MODEL_LEN` | model config | Caps `max_model_len`, and with it the KV-cache floor the engine demands at startup. |
-| `KOT_VLLM_DTYPE` | engine auto | Compute dtype, for example `float32` for a cross-check. |
-| `KOT_VLLM_COMPILATION` | `eager` | `default` turns compilation on; the two paths are bit-identical. |
-| `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived | Override the reported identity. |
-| `KOT_NPU_IMAGE` | `kot-llm-ascend-910b:latest` | The image the wrap builds and runs. |
-| `KOT_OUT_MOUNTS` | unset | Output directories, mounted read-write at the same path inside the wrap. An output directory must be one of them. |
-| `KOT_UID` | unset | The invoking uid. The server hands the written output directories back to this uid. |
+| `SERVE_PYTHON` | ambient python3 | Interpreter that has vllm and `torch_npu`. Set it when a provisioned interpreter sits outside the default paths. |
+| `SERVE_VENV` | `/scratch/serve-vllm-venv` | Engine venv location, inside and outside the wrap. `/tmp` is the fallback when `/scratch` is not writable. |
+| `SERVE_VLLM_NPU_MEM` | `0.35` | NPU memory fraction. The log-probability pass needs device headroom; at 0.9 the margin goes to the KV cache and the pass fails. |
+| `SERVE_VLLM_MAX_BATCHED_TOKENS` | `2048` | Caps the per-step transient of the log-probability pass, about 16 bytes per vocabulary entry per scheduled token. The engine default 8192 makes about 22 GB on a 150k vocabulary and kills the engine. |
+| `SERVE_VLLM_MAX_MODEL_LEN` | model config | Caps `max_model_len`, and with it the KV-cache floor the engine demands at startup. |
+| `SERVE_VLLM_DTYPE` | engine auto | Compute dtype, for example `float32` for a cross-check. |
+| `SERVE_VLLM_COMPILATION` | `eager` | `default` turns compilation on; the two paths are bit-identical. |
+| `SERVE_MODEL_ID` / `SERVE_MODEL_REVISION` | derived | Override the reported identity. |
+| `SERVE_NPU_IMAGE` | `serve-llm-ascend-910b:latest` | The image the wrap builds and runs. |
+| `SERVE_OUT_MOUNTS` | unset | Output directories, mounted read-write at the same path inside the wrap. An output directory must be one of them. |
+| `SERVE_UID` | unset | The invoking uid. The server hands the written output directories back to this uid. |
 | `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value. |
 
 ## Models

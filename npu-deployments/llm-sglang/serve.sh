@@ -1,20 +1,5 @@
 #!/usr/bin/env bash
-# kot_serve.sh -- port, model, device: the whole contract surface this script takes.
-#
-# Two ways this script is started:
-#
-# * inside the graded container (gather built it from the CANN base image with
-#   torch_npu): provision the engine stack offline from ./wheels into the
-#   container's site-packages and run kot_server.py directly. A container
-#   cannot start another one.
-# * on a bare Ascend host (a golden capture with --no-container, or a human):
-#   the host interpreter has no torch_npu, so wrap docker run with the Ascend
-#   driver mounts and device nodes, mirroring kot.platforms' ascend-910b row,
-#   and re-enter this script inside the container.
-#
-# The image carries no serving engine (the contract): sglang and its NPU
-# kernels ride in ./wheels and are installed at start, offline, into the
-# writable container. Startup budget is 900 s; install + engine load fit.
+# Launch the model on Ascend, using the local engine or the deployment container.
 set -euo pipefail
 
 PORT=""
@@ -31,7 +16,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$PORT" || -z "$MODEL" || -z "$DEVICE" ]]; then
-  echo "usage: kot_serve.sh --port P --model PATH --device DEVICE" >&2
+  echo "usage: serve.sh --port P --model PATH --device DEVICE" >&2
   exit 2
 fi
 if [[ ! -d "$MODEL" ]]; then
@@ -46,16 +31,16 @@ if [[ ! -d "$WHEELS" ]]; then
   exit 1
 fi
 
-# The speed harness's warmup opens thousands of pooled connections in one
+# The load-test client's warmup opens thousands of pooled connections in one
 # burst; the docker default soft nofile (1024) makes accept() fail with
 # EMFILE past the first thousand. A process may raise its own soft limit.
 ulimit -n 65536 2>/dev/null || true
 
 if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
   # ---------------------------------------------------------------- host mode
-  IMAGE="${KOT_NPU_IMAGE:-kot-llm-ascend-910b:latest}"
+  IMAGE="${SERVE_NPU_IMAGE:-serve-llm-ascend-910b:latest}"
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    echo "[kot_serve] building $IMAGE from $HERE/Dockerfile (first run only)" >&2
+    echo "[serve] building $IMAGE from $HERE/Dockerfile (first run only)" >&2
     docker build -t "$IMAGE" "$HERE" >&2
   fi
 
@@ -70,10 +55,10 @@ if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
     DOCKER_ARGS+=(-e HF_HOME=/tmp/hf -e HF_HUB_OFFLINE=1)
   fi
 
-  # Every directory in KOT_OUT_MOUNTS (colon separated) is mounted rw at the
-  # same path: /kot/score writes exactly where the host-side runner reads.
-  for dir in ${KOT_OUT_MOUNTS:-}; do
-    [[ -d "$dir" ]] || { echo "KOT_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
+  # Every directory in SERVE_OUT_MOUNTS (colon separated) is mounted rw at the
+  # same path: /score writes exactly where the host-side runner reads.
+  for dir in ${SERVE_OUT_MOUNTS:-}; do
+    [[ -d "$dir" ]] || { echo "SERVE_OUT_MOUNTS entry is not a directory: $dir" >&2; exit 2; }
     DOCKER_ARGS+=(-v "${dir}:${dir}")
   done
 
@@ -98,21 +83,15 @@ if ! python3 -c "import torch_npu" >/dev/null 2>&1; then
     fi
   done
 
-  # The deployment dir rides along read-only at the path kot's own capture
-  # uses; the inner run re-enters this script, which now finds torch_npu and
-  # takes the direct path below. Host network: the server binds 127.0.0.1
-  # inside the container and the host runner reaches the same loopback -- a
-  # published port would forward to the container's ethernet address, where
-  # nothing listens. bash execs the inner bash, so SIGTERM reaches the server.
   DOCKER_ARGS+=(-v "${HERE}:/deployment:ro" -w /deployment)
 
   exec docker run "${DOCKER_ARGS[@]}" "$IMAGE" bash -c '
     source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
-    exec bash /deployment/kot_serve.sh --port '"$PORT"' --model '"$MODEL"' --device '"$DEVICE"'
+    exec bash /deployment/serve.sh --port '"$PORT"' --model '"$MODEL"' --device '"$DEVICE"'
   '
 fi
 
-# ----------------------------------------------------------- graded / direct
+# ----------------------------------------------------------- direct
 source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 
 # The engine stack is installed offline from ./wheels into the container's
@@ -123,12 +102,12 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 # process, whatever the environment says.
 SITE_PACKAGES="$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")"
 # Beside what it proves, NOT in /tmp: host mode mounts the host's /tmp into
-# the container (KOT_OUT_MOUNTS), where a marker would outlive the container
+# the container (SERVE_OUT_MOUNTS), where a marker would outlive the container
 # and make a fresh container skip its install.
-MARKER="$SITE_PACKAGES/kot-sglang-provisioned"
+MARKER="$SITE_PACKAGES/serve-sglang-provisioned"
 
 if [[ ! -f "$MARKER" ]]; then
-  echo "[kot_serve] installing engine stack from $WHEELS (offline)" >&2
+  echo "[serve] installing engine stack from $WHEELS (offline)" >&2
   # The sglang wheel matching the recorded commit (a rerun of fetch_wheels.sh
   # after main moved can leave two behind); fall back to the newest wheel.
   # triton-ascend is deliberately NOT installed: the ascend attention backend
@@ -182,21 +161,21 @@ patched = re.sub(
     flags=re.MULTILINE,
 )
 path.write_text(patched, encoding="utf-8")
-print("[kot_serve] sgl_kernel_npu .so load made non-fatal", flush=True)
+print("[serve] sgl_kernel_npu .so load made non-fatal", flush=True)
 PYEOF
   fi
   # The CANN custom operators are .run self-installers, not wheels; they
   # register kernels in the toolkit's opp directory (writable container FS).
   # Names inside the release zips: CANN-custom_ops-none-linux.<arch>.run and
   # cann-ops-transformer_custom_linux-<arch>.run. The deployment dir mounts
-  # read-only at grading: the files arrive executable and must not be
+  # read-only in the container: the files arrive executable and must not be
   # chmod'd in place; run them through bash instead.
   OPP_DIR="/usr/local/Ascend/ascend-toolkit/latest/opp"
   if compgen -G "$WHEELS/*custom_ops*.run" >/dev/null; then
     for installer in "$WHEELS"/*custom_ops*.run "$WHEELS"/*ops-transformer*.run; do
       [[ -e "$installer" ]] || continue
       bash "$installer" --install-path="$OPP_DIR" >&2 || {
-        echo "[kot_serve] WARNING: $(basename "$installer") install failed; continuing" >&2
+        echo "[serve] WARNING: $(basename "$installer") install failed; continuing" >&2
       }
     done
   fi
@@ -211,14 +190,14 @@ fi
 # the installed copy would otherwise outlive the deployment's sitecustomize.py
 # across warm restarts (the marker gate skips all provisioning). The guard
 # stays: a foreign sitecustomize.py is refused, ours is overwritten.
-if [[ -f "$SITE_PACKAGES/sitecustomize.py" ]] && ! grep -q "_kot_patched" "$SITE_PACKAGES/sitecustomize.py" 2>/dev/null; then
+if [[ -f "$SITE_PACKAGES/sitecustomize.py" ]] && ! grep -q "_serve_patched" "$SITE_PACKAGES/sitecustomize.py" 2>/dev/null; then
   echo "sitecustomize.py already exists in $SITE_PACKAGES and is not ours" >&2
   exit 1
 fi
 cp "$HERE/sitecustomize.py" "$SITE_PACKAGES/sitecustomize.py"
-echo "[kot_serve] patch layer installed into $SITE_PACKAGES"
+echo "[serve] patch layer installed into $SITE_PACKAGES"
 
-# The weights are local and the graded container has no network; the engine
+# The weights are local and the container has no network; the engine
 # must never reach for the hub either.
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -232,15 +211,15 @@ export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
 # patch layer resolves the same default inside the scheduler processes, whose
 # environment sglang replaces.
 if [[ -d /scratch && -w /scratch ]]; then
-  export KOT_SGLANG_STASH_DIR="/scratch/kot-sglang-stash"
+  export SERVE_SGLANG_STASH_DIR="/scratch/serve-sglang-stash"
 else
-  export KOT_SGLANG_STASH_DIR="/tmp/kot-sglang-stash"
+  export SERVE_SGLANG_STASH_DIR="/tmp/serve-sglang-stash"
 fi
-mkdir -p "$KOT_SGLANG_STASH_DIR"
-echo "[kot_serve] stash dir: $KOT_SGLANG_STASH_DIR"
+mkdir -p "$SERVE_SGLANG_STASH_DIR"
+echo "[serve] stash dir: $SERVE_SGLANG_STASH_DIR"
 
 # Pre-sampling rows come out of the engine in float32 whatever the weights run
 # in; the patch recompute is documented in sitecustomize.py.
-export KOT_SGLANG_FULL_LOGPROBS=1
+export SERVE_SGLANG_FULL_LOGPROBS=1
 
-exec python3 "$HERE/kot_server.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"
+exec python3 "$HERE/serve.py" --port "$PORT" --model "$MODEL" --device "$DEVICE"

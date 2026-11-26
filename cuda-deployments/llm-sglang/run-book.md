@@ -13,7 +13,7 @@ The table holds the launch parameters per model. Read a model's row against
 the same row in the other engine run books. A mismatch between engines is the
 first suspect when a comparison fails.
 
-| model | revision | cards | `KOT_SGLANG_MEM_FRACTION` | `KOT_SGLANG_MAX_PREFILL_TOKENS` | sampling (recommended) |
+| model | revision | cards | `SERVE_SGLANG_MEM_FRACTION` | `SERVE_SGLANG_MAX_PREFILL_TOKENS` | sampling (recommended) |
 |---|---|---|---|---|---|
 | Qwen/Qwen3-0.6B | `c1899de289a04d12100db370d81485cdf75e47ca` | 1 | 0.45 | 8192 | temperature 0.6, top_p 0.95, top_k 20 |
 | deepseek-ai/DeepSeek-V2-Lite | `604d5664dddd88a0433dbae533b7fe9472482de0` | 2 | 0.70 | 12288 | temperature 0.3, top_p 0.95 |
@@ -29,14 +29,14 @@ lines the sglang 0.5.23 resolver pairs. The seed arrives with the request.
 ### Environment
 
 The interpreter is CPython 3.12. Both sglang deployments share one venv,
-/root/kotvenv-sglang-ocr.
+/root/serve-venv-sglang-ocr.
 
 ```bash
-uv venv /root/kotvenv-sglang-ocr --python 3.12
-uv pip install --python /root/kotvenv-sglang-ocr/bin/python "sglang==0.5.23" "flash-attn-4>=4.0.0b18"
+uv venv /root/serve-venv-sglang-ocr --python 3.12
+uv pip install --python /root/serve-venv-sglang-ocr/bin/python "sglang==0.5.23" "flash-attn-4>=4.0.0b18"
 ```
 
-Verify: `/root/kotvenv-sglang-ocr/bin/python -c "import sglang; print(sglang.__version__)"` prints `0.5.23`.
+Verify: `/root/serve-venv-sglang-ocr/bin/python -c "import sglang; print(sglang.__version__)"` prints `0.5.23`.
 
 Run long installs inside tmux; an ssh drop then costs nothing. Export
 `UV_CACHE_DIR=/workspace/uvcache` and `UV_HTTP_TIMEOUT=600` in the same
@@ -59,7 +59,7 @@ the server keeps running.
 ```text
 /opt/engines/llm-sglang       this directory
 /models/<model>               weights; the engine reads the tokenizer from here
-/root/kotvenv-sglang-ocr      the engine venv, shared with ocr-sglang
+/root/serve-venv-sglang-ocr      the engine venv, shared with ocr-sglang
 <venv>/site-packages          the launcher refreshes the patch layer here on every start
 ```
 
@@ -98,14 +98,14 @@ matches the source.
 ### Start
 
 ```bash
-KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
+SERVE_SGLANG_PYTHON=/root/serve-venv-sglang-ocr/bin/python \
   ./serve.sh --port 8090 --model /models/Qwen3-0.6B --device cuda
 ```
 
 The patch layer must load in every engine process. The launcher ships it into
 the venv's site-packages on every start: `sitecustomize.py` as itself, a copy
-as `kot_sglang_patch.py`, and `kot_sglang_patch.pth` whose single line is
-`import kot_sglang_patch`. A `.pth` file runs in every process the venv
+as `serve_sglang_patch.py`, and `serve_sglang_patch.pth` whose single line is
+`import serve_sglang_patch`. A `.pth` file runs in every process the venv
 starts, whatever the environment says, and that route reaches the scheduler
 workers, whose environment the engine curates. A distribution-level
 `sitecustomize.py` in the stdlib directory precedes any venv's site-packages
@@ -136,11 +136,11 @@ request pays no compile and graph costs.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang. The launcher tries it first, then a PATH python3. |
-| `KOT_SGLANG_DTYPE` | engine auto | compute dtype. `auto` maps a float32 checkpoint to float16; set `bfloat16` to match a bfloat16 reference. |
-| `KOT_SGLANG_MEM_FRACTION` | `0.45` | engine `mem_fraction_static`. Set it explicitly. The engine's own heuristic can go negative with chunked prefill off, and the fraction must cover the per-card weights. |
-| `KOT_SGLANG_MAX_PREFILL_TOKENS` | `8192` | engine `max_prefill_tokens`. The engine rejects a prompt longer than the window. |
-| `KOT_SGLANG_STASH_DIR` | `/scratch/kot-sglang-stash`, else `/tmp/kot-sglang-stash` | where the patch layer writes the full-vocabulary float32 rows. The server collects and deletes them per request. |
+| `SERVE_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang. The launcher tries it first, then a PATH python3. |
+| `SERVE_SGLANG_DTYPE` | engine auto | compute dtype. `auto` maps a float32 checkpoint to float16; set `bfloat16` to match a bfloat16 reference. |
+| `SERVE_SGLANG_MEM_FRACTION` | `0.45` | engine `mem_fraction_static`. Set it explicitly. The engine's own heuristic can go negative with chunked prefill off, and the fraction must cover the per-card weights. |
+| `SERVE_SGLANG_MAX_PREFILL_TOKENS` | `8192` | engine `max_prefill_tokens`. The engine rejects a prompt longer than the window. |
+| `SERVE_SGLANG_STASH_DIR` | `/scratch/serve-sglang-stash`, else `/tmp/serve-sglang-stash` | where the patch layer writes the full-vocabulary float32 rows. The server collects and deletes them per request. |
 
 ## Models
 
@@ -156,7 +156,7 @@ The weights are bf16, 29.3 GB in total. The model needs both cards, and the
 engine opens tensor parallel over every visible card.
 
 ```bash
-KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
+SERVE_SGLANG_MEM_FRACTION=0.70 SERVE_SGLANG_MAX_PREFILL_TOKENS=12288 \
   ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 
@@ -166,7 +166,7 @@ smaller prefill window rejects the longest workload prompt, about 8.5k ids.
 The same variables serve every launch of this model:
 
 ```bash
-KOT_SGLANG_MEM_FRACTION=0.70 KOT_SGLANG_MAX_PREFILL_TOKENS=12288 \
+SERVE_SGLANG_MEM_FRACTION=0.70 SERVE_SGLANG_MAX_PREFILL_TOKENS=12288 \
   ./serve.sh --port 8090 --model /models/DeepSeek-V2-Lite --device cuda
 ```
 

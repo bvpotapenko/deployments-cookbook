@@ -4,7 +4,7 @@ This deployment serves Qwen/Qwen3.8-27B with SGLang 0.5.23. The model runs
 the native `qwen3_5` architecture (the multimodal path inherits Qwen3-VL);
 the units are short videos. One process serves the full-vocabulary
 log-probability surface over both cards, one request at a time, and the chat
-surface beside it, concurrently and batched. The runner must not overlap the
+surface beside it, concurrently and batched. Clients must serialize the
 two: a score that shares a batch with chat traffic stashes their rows too, and
 its row count then fails the score.
 
@@ -14,7 +14,7 @@ its row count then fails the score.
 |---|---|---|---|---|
 | Qwen/Qwen3.8-27B | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | 2 (TP=2) | bfloat16 | temperature 1.0, top_p 0.95, top_k 20 |
 
-The model needs `KOT_SGLANG_MEM_FRACTION=0.89` on 2x RTX 5090: the weights
+The model needs `SERVE_SGLANG_MEM_FRACTION=0.89` on 2x RTX 5090: the weights
 hold 25.64 GiB per card and the fraction must cover them, the hybrid state
 cache and the 24,576-token KV window. At 0.89 the engine sizes
 `max_mamba_cache_size=7` and `max_total_num_tokens=25626`; at the 0.45
@@ -26,14 +26,14 @@ seed arrives with the request; 42 is the convention.
 ## Environment
 
 The stack runs on CPython 3.12. An existing venv with these pins works;
-point `KOT_SGLANG_PYTHON` at it.
+point `SERVE_SGLANG_PYTHON` at it.
 
 ```bash
-uv venv /root/kotvenv-sglang-ocr --python 3.12
-uv pip install --python /root/kotvenv-sglang-ocr/bin/python "sglang==0.5.23" "flash-attn-4>=4.0.0b18"
-uv pip install --python /root/kotvenv-sglang-ocr/bin/python --no-deps \
+uv venv /root/serve-venv-sglang-ocr --python 3.12
+uv pip install --python /root/serve-venv-sglang-ocr/bin/python "sglang==0.5.23" "flash-attn-4>=4.0.0b18"
+uv pip install --python /root/serve-venv-sglang-ocr/bin/python --no-deps \
   "torchvision==0.29.1" --index-url https://download.pytorch.org/whl/cu130
-uv pip install --python /root/kotvenv-sglang-ocr/bin/python --no-deps \
+uv pip install --python /root/serve-venv-sglang-ocr/bin/python --no-deps \
   torchcodec einops "flash-linear-attention==0.2.2"
 ```
 
@@ -66,7 +66,7 @@ ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-sglang/*.sh'
 ### Start
 
 ```bash
-KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
+SERVE_SGLANG_PYTHON=/root/serve-venv-sglang-ocr/bin/python \
   ./serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
 ```
 
@@ -78,16 +78,16 @@ The launcher installs the patch layer into the venv's site-packages (module
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_SGLANG_PYTHON` | unset | the interpreter carrying sglang; set it on a provisioned host |
-| `KOT_SGLANG_MEM_FRACTION` | `0.45` | `mem_fraction_static`; must cover the weights per card, the hybrid state cache and the KV window (0.89 for Qwen3.8-27B on 2x RTX 5090) |
-| `KOT_SGLANG_STASH_DIR` | set by the launcher | the patch layer's stash root |
-| `KOT_SGLANG_DEBUG` | unset | logs every patch event to a /tmp trace |
+| `SERVE_SGLANG_PYTHON` | unset | the interpreter carrying sglang; set it on a provisioned host |
+| `SERVE_SGLANG_MEM_FRACTION` | `0.45` | `mem_fraction_static`; must cover the weights per card, the hybrid state cache and the KV window (0.89 for Qwen3.8-27B on 2x RTX 5090) |
+| `SERVE_SGLANG_STASH_DIR` | set by the launcher | the patch layer's stash root |
+| `SERVE_SGLANG_DEBUG` | unset | logs every patch event to a /tmp trace |
 | `SGLANG_LOGPROB_CHUNK_SIZE` | `512` (set by the launcher) | rows per input-logprob chunk of a prefill (SGLang's default is 2048); a smaller chunk lowers the peak on the card and the size of each stash archive in host memory |
 
-Engine pins in kot_server.py: `chunked_prefill_size=-1` (a chunked extend
+Engine pins in serve.py: `chunked_prefill_size=-1` (a chunked extend
 samples a token per chunk and desynchronises the stash), `disable_overlap_
 schedule=True` (the overlap scheduler's phantom decode row),
-`mem_fraction_static` through `KOT_SGLANG_MEM_FRACTION` (the full-vocab
+`mem_fraction_static` through `SERVE_SGLANG_MEM_FRACTION` (the full-vocab
 transient beside the weights; the default 0.45 suits models whose weights
 fit under it),
 `max_prefill_tokens=16384`, `context_length=24576` (a ~12.4k-token prompt
@@ -98,7 +98,7 @@ plus an 8,192-token decode; a shorter window cuts the decode),
 
 ## Video contract
 
-The frozen video inputs carry no ids. The deployment renders the pinned chat
+Video requests may omit input IDs. The deployment renders the pinned chat
 prompt (the checkpoint's chat template, `enable_thinking` false, the prompt
 text "Describe what you see in the video.") and consumes ids verbatim from
 that render: the raw form (one video placeholder) on a decode, the raw form
@@ -137,18 +137,18 @@ distributions: the log-softmax of the raw logits, float32, over the full
 The identity surface answers with the engine's own facts:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+curl -s http://127.0.0.1:8090/info | python3 -m json.tool
 ```
 
 The generation surface takes a video and writes its answer to `out_dir`:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/infer \
+curl -s http://127.0.0.1:8090/infer \
   -H 'Content-Type: application/json' \
-  -d '{"prompt_id": "probe", "out_dir": "/tmp/kot-probe",
+  -d '{"prompt_id": "probe", "out_dir": "/tmp/serve-probe",
        "attachments": {"video": "/path/to/video.mp4"}}' \
   | python3 -m json.tool
-cat /tmp/kot-probe/text.txt
+cat /tmp/serve-probe/text.txt
 ```
 
 The chat surface takes one user message, a video part and a text part, in
@@ -165,6 +165,6 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-On 2x RTX 5090 the boot needs `KOT_SGLANG_MEM_FRACTION=0.89` (issue #26):
+On 2x RTX 5090 the boot needs `SERVE_SGLANG_MEM_FRACTION=0.89` (issue #26):
 the engine then sizes `max_mamba_cache_size=7` and
 `max_total_num_tokens=25626`.

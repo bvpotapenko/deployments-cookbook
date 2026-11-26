@@ -2,9 +2,9 @@
 # Rebuild the offline wheel closure for this deployment (wheels/).
 #
 # The closure is the pip resolution of the engine pair (vllm 0.23.0 +
-# vllm-ascend==0.23.0) inside the graded image's python 3.12 against its
+# vllm-ascend==0.23.0) inside the deployment image's python 3.12 against its
 # system site packages, verified on the ascend-910b box; plus the three
-# platform wheels the Dockerfile bakes in. kot_serve.sh installs the engine
+# platform wheels the Dockerfile bakes in. serve.sh installs the engine
 # offline from wheels/ into /scratch at first start; the Dockerfile COPYs
 # the same directory for the image build.
 #

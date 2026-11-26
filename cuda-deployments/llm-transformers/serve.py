@@ -1,35 +1,5 @@
 #!/usr/bin/env python3
-"""Stock-transformers serving of DEPLOYMENT_CONTRACT.md, one flat file, no kot imports.
-
-    ./serve.sh --port P --model /path/to/weights --device cpu|cuda
-
-Numerics contract, implemented exactly:
-
-* the ids sent to /kot/score are consumed verbatim: no BOS, no chat template,
-  no truncation, no re-tokenization. Row t of a prefill is the prediction for
-  input_ids[t+1], so a prefill over n ids writes n - 1 rows, streamed to disk
-  chunk by chunk: the ~8,600-id replay's distribution never sits whole in
-  memory;
-* the log-softmax is computed in float32 over the model's configured
-  vocabulary, whatever dtype the weights run in, so every row's logsumexp is 0
-  and arrays align by token id;
-* decode applies the request's sampling object exactly as given
-  (temperature, top_p, top_k, min_p, repetition_penalty; generate() takes all
-  five natively), seed planted immediately before the call, and the stored
-  logits are the raw ones before any warper (output_logits=True gives those).
-  allow_eos false, the default, is exactly max_new_tokens ids with EOS
-  suppressed through min_new_tokens; true stops at EOS, at most that many, and
-  the EOS id stays in output_ids with its row.
-  presence_penalty is an OpenAI-surface knob with no generate() equivalent,
-  so a request that sets it above 0 is refused naming the field rather than
-  silently ignoring it;
-* dtype: the weights run in bfloat16 on cuda and float32 on cpu; the dtype
-  the log-probs were produced in is reported in /kot/info and kot casts to
-  float32 on its side;
-* serving: one asyncio event loop; heavy endpoints run one at a time on a
-  single executor thread, so a pooled idle connection costs one file
-  descriptor and model calls stay strictly serialized.
-"""
+"""Serve the model with Transformers."""
 
 from __future__ import annotations
 
@@ -53,9 +23,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer, set_seed
 
 HOST = "127.0.0.1"
-INFO = "/kot/info"
-SCORE = "/kot/score"
-INFER = "/kot/infer"
+INFO = "/info"
+SCORE = "/score"
+INFER = "/infer"
 COMPLETIONS = "/v1/completions"
 CHAT_COMPLETIONS = "/v1/chat/completions"
 PREFILL = "prefill"
@@ -182,10 +152,7 @@ def route(path):
 def resolve_weights(model: str) -> tuple[Path, str]:
     """The checkpoint to load: the directory itself, or the one snapshot in an HF home.
 
-    The capture mounts the weights at --model. A handed --model-dir capture
-    mounts a checkpoint whose root has config.json; a capture without one
-    mounts the huggingface home, where the model id is not passed to this
-    script at all, so exactly one repository is expected under hub/.
+    Pass a checkpoint directory or a Hugging Face home containing one repository.
     """
     root = Path(model)
     if (root / CONFIG_NAME).is_file():
@@ -482,7 +449,7 @@ def main():
         max_tokens = int(
             body.get("max_tokens") or body.get("max_completion_tokens") or DEFAULT_MAX_TOKENS
         )
-        # The harness sends temperature/top_p/top_k beside the seed; generate()
+        # The request supplies temperature/top_p/top_k and the seed; generate()
         # implements all of them (min_p too), and anything else is ignored,
         # never a rejection. min_tokens applies only when the request carries
         # it, like every other deployment's chat surface.

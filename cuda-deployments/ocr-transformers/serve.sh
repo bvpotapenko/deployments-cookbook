@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# serve.sh -- port, model, device: the whole contract surface this script takes.
+# Launch the model on Ascend, using the local engine or the deployment container.
 set -euo pipefail
 
 PORT=""
@@ -25,14 +25,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # The interpreter is named explicitly, with PATH only as a late fallback: the
 # process that starts us may run inside an environment that is not ours, and
 # the stack needs the pinned transformers 5.22.1 venv on a provisioned host.
-# In the graded container the image carries the family stack and PATH
+# In the container the image carries the family stack and PATH
 # resolves to it.
-if [ -n "${KOT_OCR_PY:-}" ]; then
-  PY="$KOT_OCR_PY"
-elif [ -x /root/kotvenv-ocr/bin/python ]; then
-  PY=/root/kotvenv-ocr/bin/python
-elif [ -x /root/kotvenv/bin/python ]; then
-  PY=/root/kotvenv/bin/python
+if [ -n "${SERVE_OCR_PY:-}" ]; then
+  PY="$SERVE_OCR_PY"
+elif [ -x /root/serve-venv-ocr/bin/python ]; then
+  PY=/root/serve-venv-ocr/bin/python
+elif [ -x /root/serve-venv/bin/python ]; then
+  PY=/root/serve-venv/bin/python
 elif command -v python3 >/dev/null 2>&1; then
   PY="$(command -v python3)"
 else

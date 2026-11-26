@@ -17,20 +17,20 @@ seed arrives with the request; 42 is the convention.
 ## Environment
 
 The stack runs on CPython 3.12. An existing venv with these pins works;
-point `KOT_PYTHON` at it.
+point `SERVE_PYTHON` at it.
 
 ```bash
 # networked host
-uv venv /scratch/kot-vllm-venv --python 3.12
-uv pip install --python /scratch/kot-vllm-venv/bin/python "vllm==0.33.0"
-uv pip install --python /scratch/kot-vllm-venv/bin/python --no-deps \
+uv venv /scratch/serve-vllm-venv --python 3.12
+uv pip install --python /scratch/serve-vllm-venv/bin/python "vllm==0.33.0"
+uv pip install --python /scratch/serve-vllm-venv/bin/python --no-deps \
   "torchvision==0.29.0" --index-url https://download.pytorch.org/whl/cu130
-uv pip install --python /scratch/kot-vllm-venv/bin/python --no-deps torchcodec
+uv pip install --python /scratch/serve-vllm-venv/bin/python --no-deps torchcodec
 
 # offline host: build the closure, then install from it
 ./make_wheels.sh
-uv venv --seed /scratch/kot-vllm-venv --python 3.12
-/scratch/kot-vllm-venv/bin/pip install --no-index --no-cache-dir \
+uv venv --seed /scratch/serve-vllm-venv --python 3.12
+/scratch/serve-vllm-venv/bin/pip install --no-index --no-cache-dir \
   --find-links ./wheels "vllm==0.33.0" "torchvision==0.29.0+cu130" "torchcodec==0.17.0"
 ```
 
@@ -47,8 +47,8 @@ eight in parallel, each with `--no-deps`. Files already present are skipped,
 so a rerun resumes. Rerun the script until the two counts it prints match. The
 repository does not carry `wheels/`.
 
-Without `KOT_PYTHON`, and with no ambient vllm, the launcher runs the offline
-install itself, into `KOT_VENV`.
+Without `SERVE_PYTHON`, and with no ambient vllm, the launcher runs the offline
+install itself, into `SERVE_VENV`.
 
 ### Layout
 
@@ -69,7 +69,7 @@ ssh -p $PORT root@$HOST 'chmod +x /opt/engines/mllm-vllm/*.sh'
 ### Start
 
 ```bash
-KOT_PYTHON=/scratch/kot-vllm-venv/bin/python \
+SERVE_PYTHON=/scratch/serve-vllm-venv/bin/python \
   ./serve.sh --port 8090 --model /models/Qwen/Qwen3.8-27B --device cuda
 ```
 
@@ -86,25 +86,24 @@ the 4,096-row segmented replay in ~118 s wall, byte-identical across runs.
 The chunk size is part of the numerics: a chunked prefill splits the
 attention and GatedDeltaNet state passes at chunk boundaries, so rows
 produced at one size need not be bit-identical to rows produced at another.
-`/kot/info` reports `max_num_batched_tokens` and `replay_segment_rows`, so
-every capture carries its own.
+`/info` reports `max_num_batched_tokens` and `replay_segment_rows`.
 
 ### Parameters
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
-| `KOT_VENV` | `/scratch/kot-vllm-venv` | where the launcher builds the offline venv; it falls back to `/tmp/kot-vllm-venv` |
-| `KOT_VLLM_GPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under even a 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
-| `KOT_VLLM_MAX_MODEL_LEN` | `24576` | the window: a video prompt up to the pixel budget (12,288 video tokens plus the template) plus the 8192-token decode. vLLM checks only the prompt against it and caps the output at the window without an error; the server then refuses a decode with `allow_eos` false that is short of `max_new_tokens` |
-| `KOT_VLLM_MAX_BATCHED_TOKENS` | `2048` | the chunk size of every prefill, shared by capture and speed. The size is part of the numerics and is reported in `/kot/info` |
-| `KOT_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (an 8,192-row tail is 32 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/kot/info` |
-| `KOT_VLLM_MAX_NUM_SEQS` | `4` | the CUDA-graph profiling KV and the capture sizes scale with the concurrent-request count; the 256 API-server default on 32G cards OOMs boot |
-| `KOT_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
-| `KOT_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
-| `KOT_VLLM_DTYPE` | unset | numeric cross-check override |
-| `KOT_VLLM_COMPILATION` | unset | `eager` disables CUDA graphs |
-| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It fails a 1080p clip longer than about 57 s on chat only, not on `/kot/score`, so the launcher turns it off and both routes take the same clips |
+| `SERVE_PYTHON` | unset | the interpreter carrying vllm; set it on a provisioned host |
+| `SERVE_VENV` | `/scratch/serve-vllm-venv` | where the launcher builds the offline venv; it falls back to `/tmp/serve-vllm-venv` |
+| `SERVE_VLLM_GPU_MEM` | `0.91` | `gpu_memory_utilization`; the weights take 82% of each card and the V2 runner's accounting is tighter than V1's - 0.89 leaves the KV 20 MiB under even a 20,480-token window and the engine refuses to boot. 0.91 sizes 38,229 KV tokens with ~2.4 GiB still free beside the pool |
+| `SERVE_VLLM_MAX_MODEL_LEN` | `24576` | the window: a video prompt up to the pixel budget (12,288 video tokens plus the template) plus the 8192-token decode. vLLM checks only the prompt against it and caps the output at the window without an error; the server then refuses a decode with `allow_eos` false that is short of `max_new_tokens` |
+| `SERVE_VLLM_MAX_BATCHED_TOKENS` | `2048` | the chunk size of every prefill, shared by capture and speed. The size is part of the numerics and is reported in `/info` |
+| `SERVE_VLLM_REPLAY_SEGMENT_ROWS` | `256` | the rows per replay segment; a long tail arrives as several requests (an 8,192-row tail is 32 segments). Fixed, not derived: segment boundaries change the last chunk's shapes, so rows are reproducible only at a fixed size. Reported in `/info` |
+| `SERVE_VLLM_MAX_NUM_SEQS` | `4` | the CUDA-graph profiling KV and the capture sizes scale with the concurrent-request count; the 256 API-server default on 32G cards OOMs boot |
+| `SERVE_VLLM_REQUEST_TIMEOUT` | `1800` | a prefill the engine does not answer within this many seconds: every thread's stack is dumped to the log and the process exits - a dead server with a named culprit beats a hung one |
+| `SERVE_VLLM_MOE_BACKEND` | `triton` | flashinfer's cutlass MoE dies on sm_120 without nvcc |
+| `SERVE_VLLM_DTYPE` | unset | numeric cross-check override |
+| `SERVE_VLLM_COMPILATION` | unset | `eager` disables CUDA graphs |
+| `VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES` | `0`, set by the launcher | vLLM's limit on the media one request may decode. It fails a 1080p clip longer than about 57 s on chat only, not on `/score`, so the launcher turns it off and both routes take the same clips |
 | `VLLM_NO_USAGE_STATS` | `1`, set by the server | vLLM's usage report to its developers, and its local copy in `~/.config/vllm/usage_stats.json`. `1` turns both off. The server replaces any other value |
 
 ### Host memory
@@ -123,15 +122,14 @@ The launcher pins `VLLM_USE_V2_MODEL_RUNNER=1`. The replay scores only the
 tail rows against fixed token ids (`prompt_logprob_token_ids` +
 `prompt_logprob_start`): the engine keeps `[rows, vocab]` ids, mask and
 scores on the GPU at ~3.08 MiB per row from the first chunk to the last,
-so a long tail arrives as segments of at most `KOT_VLLM_REPLAY_SEGMENT_ROWS`
+so a long tail arrives as segments of at most `SERVE_VLLM_REPLAY_SEGMENT_ROWS`
 (default 256: the measured 2,431 MiB free with a request in flight shrinks
 by ~3.08 MiB per tail row, and the video encoder asks up to ~1.2 GiB more
 during the prefill - 640 rows OOMs it, measured; a 4,096-row tail is 16
 segments). Each segment re-feeds the prompt and the video, cut off right after its last scored token -
 causality makes the cut exact. Segment boundaries change the last chunk's
 shapes, so replay rows are reproducible only at a fixed segment size;
-`/kot/info` reports both the chunk size and the segment size, and every
-capture carries its own. The 64-row probe replay completes in ~6 s end to
+`/info` reports both the chunk size and the segment size. The 64-row probe replay completes in ~6 s end to
 end. The deployment computes the expanded prompt length through the
 checkpoint's own HF processor (cached per video, the same pins including
 the per-frame pixel cap) and verifies the engine's expansion against it,
@@ -142,7 +140,7 @@ bits from the V1 mechanism.
 
 ## Video contract
 
-The frozen video inputs carry no ids. The deployment renders the pinned chat
+Video requests may omit input IDs. The deployment renders the pinned chat
 prompt (the checkpoint's chat template, `enable_thinking` false, the prompt
 text "Describe what you see in the video.") and consumes ids verbatim from
 that render: the raw form (one video placeholder) on a decode, the raw form
@@ -172,18 +170,18 @@ distributions: the log-softmax of the raw logits, float32, over the full
 The identity surface answers with the engine's own facts:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+curl -s http://127.0.0.1:8090/info | python3 -m json.tool
 ```
 
 The generation surface takes a video and writes its answer to `out_dir`:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/infer \
+curl -s http://127.0.0.1:8090/infer \
   -H 'Content-Type: application/json' \
-  -d '{"prompt_id": "probe", "out_dir": "/tmp/kot-probe",
+  -d '{"prompt_id": "probe", "out_dir": "/tmp/serve-probe",
        "attachments": {"video": "/inputs/video.mp4"}}' \
   | python3 -m json.tool
-cat /tmp/kot-probe/text.txt
+cat /tmp/serve-probe/text.txt
 ```
 
 The answer's text lands in `out_dir` and describes the video.
@@ -201,7 +199,7 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
   | python3 -m json.tool
 ```
 
-A video request has the harness's shape: the video, then the text part.
+A video request has two parts: the video, then the text part.
 `data:video/mp4;base64,...` works as the `url` too.
 
 ```bash
@@ -220,16 +218,16 @@ The answer describes the video, and `usage.prompt_tokens` equals the count the
 score path computes for the same clip:
 
 ```bash
-cd /opt/engines/mllm-vllm && /scratch/kot-vllm-venv/bin/python -c '
-import kot_serve
-kot_serve._MODEL_DIR = "/models/Qwen/Qwen3.8-27B"
-print(len(kot_serve._expanded_template_ids("/inputs/video.mp4")))'
+cd /opt/engines/mllm-vllm && /scratch/serve-vllm-venv/bin/python -c '
+import serve
+serve._MODEL_DIR = "/models/Qwen/Qwen3.8-27B"
+print(len(serve._expanded_template_ids("/inputs/video.mp4")))'
 ```
 
 The default boot OOMed engine init on 2x RTX 5090 until the
-`KOT_VLLM_MAX_NUM_SEQS` pin landed (issue #24): the temporary KV of the
+`SERVE_VLLM_MAX_NUM_SEQS` pin landed (issue #24): the temporary KV of the
 CUDA-graph profiling scales with the concurrent-request count, not with the
 window, and the 256 API-server default asked for 6.12 GiB beside the weights.
-The engine boots without `eager`. `/kot/info` reads the vocab size through
+The engine boots without `eager`. `/info` reads the vocab size through
 the engine's own resolver (issue #25): the multimodal wrapper configs nest it
 in their text config, and the flat read crashed the boot after init.

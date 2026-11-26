@@ -23,18 +23,18 @@ with the request; 42 is the convention.
 
 ### Environment
 
-The venv runs CPython 3.12. Build it at `/root/kotvenv-mllm`; the launcher
+The venv runs CPython 3.12. Build it at `/root/serve-venv-mllm`; the launcher
 checks that path.
 
 ```bash
-uv venv /root/kotvenv-mllm --python 3.12
-uv pip install --python /root/kotvenv-mllm/bin/python \
+uv venv /root/serve-venv-mllm --python 3.12
+uv pip install --python /root/serve-venv-mllm/bin/python \
   torch==2.14.1 --index-url https://download.pytorch.org/whl/cu130
-uv pip install --python /root/kotvenv-mllm/bin/python --no-deps \
+uv pip install --python /root/serve-venv-mllm/bin/python --no-deps \
   torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cu130
-uv pip install --python /root/kotvenv-mllm/bin/python --no-deps \
+uv pip install --python /root/serve-venv-mllm/bin/python --no-deps \
   torchcodec==0.17
-uv pip install --python /root/kotvenv-mllm/bin/python \
+uv pip install --python /root/serve-venv-mllm/bin/python \
   transformers==5.22.1 accelerate numpy pydantic pyyaml pillow \
   einops flash-linear-attention==0.2.2
 ```
@@ -48,7 +48,7 @@ needs the host's FFmpeg 6 libraries. accelerate is required by
 `device_map="auto"`. flash-linear-attention 0.2.2 and einops run the
 hybrid GatedDeltaNet layers as kernels; the reference PyTorch fallback
 OOMs a 32 GB card on a ~12.4k-token video prefill. The launcher falls
-through to `/root/kotvenv/bin/python` only if that venv carries the same
+through to `/root/serve-venv/bin/python` only if that venv carries the same
 stack.
 
 ### Layout
@@ -100,9 +100,9 @@ The model needs both cards. Leave ASCEND_RT_VISIBLE_DEVICES unset;
 `device_map="auto"` spreads the layers over every visible card. The server
 binds every interface and answers one request at a time.
 
-The launcher checks `KOT_MLLM_PYTHON`, then
-`/root/kotvenv-mllm/bin/python`, then `/root/kotvenv/bin/python`, then the
-PATH. `KOT_PYTHON` does not reach this launcher. The mllm venv carries
+The launcher checks `SERVE_MLLM_PYTHON`, then
+`/root/serve-venv-mllm/bin/python`, then `/root/serve-venv/bin/python`, then the
+PATH. `SERVE_PYTHON` does not reach this launcher. The mllm venv carries
 torchvision. The shared llm venv does not; a fall-through load dies at the
 processor import.
 
@@ -115,8 +115,8 @@ carries the sampling parameters.
 
 | variable | effect |
 |---|---|
-| `KOT_MLLM_PYTHON` | the interpreter the launcher execs |
-| `KOT_TF_REPLAY_CHUNK` | the tokens per replay call after the prompt call; default 2048, minimum 2. The size is part of the numerics and is reported in `/kot/info`. Captures run at the default |
+| `SERVE_MLLM_PYTHON` | the interpreter the launcher execs |
+| `SERVE_TF_REPLAY_CHUNK` | the tokens per replay call after the prompt call; default 2048, minimum 2. The size is part of the numerics and is reported in `/info`. Captures run at the default |
 
 | argument | effect |
 |---|---|
@@ -179,7 +179,7 @@ the stored ids' head matches, and scores the stored tail (`n_rows` rows).
 One call over the prompt and an 8192-token tail does not fit on card 0, so
 the replay runs in calls through one cache. The first call is the expanded
 prompt with the video, the same as the first call of the decode. Then the
-tail goes in chunks of `KOT_TF_REPLAY_CHUNK` tokens. A chunk call gets only
+tail goes in chunks of `SERVE_TF_REPLAY_CHUNK` tokens. A chunk call gets only
 its ids and the cache: no attention mask, no pixels. So each row sees the
 video, the prompt and all tail ids before the one it predicts. The lm_head
 runs on 256 rows at a time, and the rows of each call go into
@@ -187,17 +187,15 @@ runs on 256 rows at a time, and the rows of each call go into
 
 The chunk size is part of the numerics: the float order changes at each call
 edge, so rows produced at one size need not be bit-identical to rows
-produced at another. `/kot/info` reports `replay_chunk_tokens`, so every
-capture carries its own.
+produced at another. `/info` reports `replay_chunk_tokens`.
 
-`POST /kot/infer` runs one video decode, the description written as `text.txt`
-into the request's `out_dir`, the file names returned. The benchmark's speed
-harness drives the chat route below.
+`POST /infer` runs one video decode, the description written as `text.txt`
+into the request's `out_dir`, the file names returned.
 
 `POST /v1/chat/completions` accepts the OpenAI video message shape. The user
 message content must contain one `video_url` part and one or more text parts.
 The video URL must be a local absolute path or a `file://` URL. The server uses
-the same `render_video()` and `model.generate()` path as `/kot/infer`, with
+the same `render_video()` and `model.generate()` path as `/infer`, with
 fps 2.0, the per-frame pixel cap, `enable_thinking=false`, the request seed,
 and temperature 1.0, top_p 0.95, and top_k 20. `max_completion_tokens` is
 preferred, with `max_tokens` as an alias and 512 as the default. The response
@@ -217,24 +215,24 @@ python3 self_check.py --deployment . \
   --video /inputs/video_10014.mp4
 ```
 
-It checks `/kot/info`, video decode, replay prefill, and both chat modes.
+It checks `/info`, video decode, replay prefill, and both chat modes.
 Stop an existing server first.
 
 The identity surface answers with the engine's own facts:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+curl -s http://127.0.0.1:8090/info | python3 -m json.tool
 ```
 
 The generation surface takes a video and writes its answer to `out_dir`:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/infer \
+curl -s http://127.0.0.1:8090/infer \
   -H 'Content-Type: application/json' \
-  -d '{"prompt_id": "probe", "out_dir": "/tmp/kot-probe",
+  -d '{"prompt_id": "probe", "out_dir": "/tmp/serve-probe",
        "attachments": {"video": "/path/to/video.mp4"}}' \
   | python3 -m json.tool
-cat /tmp/kot-probe/text.txt
+cat /tmp/serve-probe/text.txt
 ```
 
 The OpenAI video chat check uses a local video path. Add `-N` for SSE output:

@@ -8,12 +8,12 @@ llm-sglang's. The patch layer is llm-sglang's. It stashes the
 full-vocabulary float32 log-softmax rows of the raw logits at engine-internal
 entry points, so the reported rows are pre-sampler. It also pins the
 per-image token count, and the no-repeat ngram rule travels with it as
-`kot_ocr_ngram.py`.
+`ocr_ngram.py`.
 
 ## Model parameters
 
 The table holds the launch parameters per model. The memory fraction and the
-prefill window are fixed in `kot_server.py`, and this deployment has no
+prefill window are fixed in `serve.py`, and this deployment has no
 override for them.
 
 | model | cards | memory fraction | prefill window | sampling (recommended) |
@@ -25,7 +25,7 @@ override for them.
 ### Environment
 
 The environment is llm-sglang's. Both deployments share one venv,
-/root/kotvenv-sglang-ocr, on CPython 3.12 with sglang 0.5.23, torch 2.14.1,
+/root/serve-venv-sglang-ocr, on CPython 3.12 with sglang 0.5.23, torch 2.14.1,
 transformers 5.19.0 and flashinfer-python 0.7.2. The llm-sglang run book holds
 the install.
 
@@ -34,8 +34,8 @@ the install.
 ```text
 /opt/engines/ocr-sglang       this directory
 /models/<model>               weights; the engine reads the tokenizer and the processor from here
-/root/kotvenv-sglang-ocr      the engine venv, shared with llm-sglang
-<venv>/site-packages          the launcher refreshes the patch layer and kot_ocr_ngram.py here on every start
+/root/serve-venv-sglang-ocr      the engine venv, shared with llm-sglang
+<venv>/site-packages          the launcher refreshes the patch layer and ocr_ngram.py here on every start
 ```
 
 ### Transfer
@@ -74,7 +74,7 @@ same push.
 ### Start
 
 ```bash
-KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
+SERVE_SGLANG_PYTHON=/root/serve-venv-sglang-ocr/bin/python \
   CUDA_VISIBLE_DEVICES=0 \
   ./serve.sh --port 8798 --model /models/DeepSeek-OCR-2 --device cuda
 ```
@@ -82,7 +82,7 @@ KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python \
 The launcher behaves like llm-sglang's. It installs the patch layer into the
 venv's site-packages as a module plus a `.pth` import line, sets the DeepGEMM,
 offline and file-descriptor variables, and picks the stash dir. The
-llm-sglang run book holds the details. It also copies `kot_ocr_ngram.py`
+llm-sglang run book holds the details. It also copies `ocr_ngram.py`
 into site-packages. The scheduler deserializes the per-request custom logits
 processor by name, in workers whose environment carries no PYTHONPATH.
 
@@ -109,9 +109,9 @@ compile and graph costs.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang. The launcher tries it first, then a PATH python3. |
-| `KOT_SGLANG_STASH_DIR` | `/scratch/kot-sglang-ocr-stash`, else `/tmp/kot-sglang-ocr-stash` | where the patch layer writes the full-vocabulary float32 rows. The name differs from llm-sglang's, so both servers can share one host. |
-| `KOT_MODEL_ID` / `KOT_MODEL_REVISION` | derived from the weights | override the reported identity. A flat weights directory reports its basename. |
+| `SERVE_SGLANG_PYTHON` | ambient python3 | interpreter that has sglang. The launcher tries it first, then a PATH python3. |
+| `SERVE_SGLANG_STASH_DIR` | `/scratch/serve-sglang-ocr-stash`, else `/tmp/serve-sglang-ocr-stash` | where the patch layer writes the full-vocabulary float32 rows. The name differs from llm-sglang's, so both servers can share one host. |
+| `SERVE_MODEL_ID` / `SERVE_MODEL_REVISION` | derived from the weights | override the reported identity. A flat weights directory reports its basename. |
 
 ## Models
 
@@ -132,7 +132,7 @@ placeholder into 257 tokens for a 620x620 image. A larger image adds crop tiles,
 and the block grows.
 
 Generation applies a no-repeat ngram rule through a per-request custom logits
-processor, `kot_ocr_ngram.py`. The rule bans a token that would complete a
+processor, `ocr_ngram.py`. The rule bans a token that would complete a
 30-gram already seen within a 90-token window. The table tokens `<td>` and
 `</td>` stay allowed. The rule changes which token the sampler picks. It
 never changes the reported log-probability rows.
@@ -166,5 +166,5 @@ URLs. The text part is the instruction alone, and the server adds BOS, the
 image placeholder and the newline itself.
 
 The serve launcher's interpreter candidate list omits the box venv; export
-`KOT_SGLANG_PYTHON=/root/kotvenv-sglang-ocr/bin/python` when launching by
+`SERVE_SGLANG_PYTHON=/root/serve-venv-sglang-ocr/bin/python` when launching by
 hand.

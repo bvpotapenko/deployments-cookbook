@@ -1,23 +1,22 @@
-"""Patch SGLang so the kot contract's numerics can leave the engine.
+"""Expose full-vocabulary log probabilities for SGLang scoring requests.
 
 Imported by ``site`` in every python process this deployment starts (the
 adapter and the spawned scheduler/detokenizer processes), through the
-site-packages copy ``kot_serve.sh`` installs. It imports nothing heavy at
+site-packages copy ``serve.sh`` installs. It imports nothing heavy at
 startup; the patches are applied when SGLang's own modules finish loading.
 
 Two monkeypatches, both additive: the original computation still runs and
 feeds SGLang's own logprob plumbing; the patch writes the full-vocabulary
-distribution of the scored positions where ``kot_server.py`` collects it.
+distribution of the scored positions where ``serve.py`` collects it.
 
 * ``LogitsProcessor._get_logits`` is where the lm head turns hidden states
   into logits. In the extend-with-logprob path (a prefill scored with
   ``logprob_start_len=0``) it is called once per logprob chunk with the full
   sequence's hidden states, so each call carries ``[chunk, vocab]`` rows in
   row order. The patch stashes a float32 log-softmax of those rows: SGLang
-  computes them in the weights' dtype, and a bfloat16 log-softmax quantises
-  away what the benchmark measures. For a prefill over n ids this produces n
+  computes them in the weights' dtype, and a bfloat16 log-softmax reduces precision. For a prefill over n ids this produces n
   rows: rows 0..n-2 are the contract's rows (row t predicts input_ids[t+1])
-  and row n-1 is the sampling row, which ``kot_server.py`` drops.
+  and row n-1 is the sampling row, which ``serve.py`` drops.
 
 * ``SamplingBatchInfo._apply_pre_grammar_logits_transforms`` is the one
   trunk every sampling call routes through: the runner picks between the
@@ -26,7 +25,7 @@ distribution of the scored positions where ``kot_server.py`` collects it.
   overlap scheduler's accumulated penalties are added and before the
   non-overlap orchestrator applies them in place. The patch stashes those
   logits there, gated on penalties being active (only the score path's
-  decodes set min_new_tokens > 0, so speed-harness traffic writes nothing),
+  decodes set min_new_tokens > 0, so ordinary inference traffic writes nothing),
   and ``_stash`` turns them into the float32 log-softmax the contract
   wants: the model's own distribution, not the banned one the samples come
   from. One stashed row per penalized sampling call; for a decode of g
@@ -37,8 +36,7 @@ distribution of the scored positions where ``kot_server.py`` collects it.
   calls it on logits that accumulator was already added to -- never on the
   raw logits. Proven the hard way: a decode probe stashed uniform rows
   (log(1/vocab) everywhere; shape, logsumexp and byte-identity checks all
-  pass on those), and a real capture stashed the model's rows carrying the
-  ban's exact -inf at the EOS columns. Hooking one public wrapper is not
+  pass on those), and mixed requests need separate output directories. Hooking one public wrapper is not
   enough either: the runner's observer path calls the other one, and the
   capture fails loudly with no decode rows.
 
@@ -56,7 +54,7 @@ distribution of the scored positions where ``kot_server.py`` collects it.
 Files are named ``<kind>_<counter>.npz`` by a per-process counter, so write
 order is the row order. A ``.done.json`` beside each archive marks it
 complete, because ``np.savez`` to a final name is not atomic. One score
-request is in flight at a time (the adapter serialises /kot/score), so
+request is in flight at a time (the adapter serialises /score), so
 "every archive newer than the ones seen when the request started" belongs to
 that request -- no rid needs to travel into the scheduler.
 
@@ -74,17 +72,17 @@ import sys
 
 # The scheduler subprocesses get a curated environment from sglang (no
 # PYTHONPATH, no custom vars), so the stash directory cannot be passed by env
-# alone. The deterministic default matches kot_serve.sh's own choice, and
+# alone. The deterministic default matches serve.sh's own choice, and
 # this file is installed into site-packages, where site.py finds it in every
 # spawned process, whatever the environment says.
 STASH_DIR = (
-    os.environ.get("KOT_SGLANG_STASH_DIR")
-    or ("/scratch/kot-sglang-stash" if os.path.isdir("/scratch") else "/tmp/kot-sglang-stash")
+    os.environ.get("SERVE_SGLANG_STASH_DIR")
+    or ("/scratch/serve-sglang-stash" if os.path.isdir("/scratch") else "/tmp/serve-sglang-stash")
 )
 # Only an explicitly set environment means capture mode: a stray import of
 # this file (pip runs python with the deployment dir on sys.path) must never
 # install patches into a process that is not the engine.
-CAPTURE_MODE = bool(os.environ.get("KOT_SGLANG_STASH_DIR"))
+CAPTURE_MODE = bool(os.environ.get("SERVE_SGLANG_STASH_DIR"))
 SUB_BLOCK_ROWS = 512
 
 
@@ -188,7 +186,7 @@ def _patch_log(message: str) -> None:
             log.write(message + "\n")
     except Exception:
         pass
-    print(f"[kot-patch] {message}", file=sys.stderr, flush=True)
+    print(f"[serve-patch] {message}", file=sys.stderr, flush=True)
 
 
 def _stash(kind: str, rows, counter: list) -> None:
@@ -229,7 +227,7 @@ def _apply_patch(fullname: str) -> None:
 
 def _patch_logits_processor(torch, module) -> None:
     processor = module.LogitsProcessor
-    if getattr(processor._get_logits, "_kot_patched", False):
+    if getattr(processor._get_logits, "_serve_patched", False):
         return
     counter = [0]
     original = processor._get_logits
@@ -250,7 +248,7 @@ def _patch_logits_processor(torch, module) -> None:
             _patch_log(f"prefill stash error: {type(failure).__name__}: {failure}")
         return out
 
-    get_logits_with_stash._kot_patched = True
+    get_logits_with_stash._serve_patched = True
     processor._get_logits = get_logits_with_stash
 
 
@@ -266,13 +264,12 @@ def _patch_sampling_batch_info(torch, module) -> None:
     fresh zeros tensor, in the scheduler's overlap prep) or on logits that
     accumulator was already added to -- never on the raw logits -- so the
     stash must not live there: a decode probe stashed uniform rows
-    (log(1/vocab) everywhere), and a real capture stashed the model's rows
-    carrying the ban's exact -inf at the EOS columns. A batch with penalties
+    (log(1/vocab) everywhere). A batch with penalties
     active is a scored decode -- only the score path sets min_new_tokens --
-    so speed-harness traffic writes nothing.
+    so ordinary inference traffic writes nothing.
     """
     info = module.SamplingBatchInfo
-    if getattr(info._apply_pre_grammar_logits_transforms, "_kot_patched", False):
+    if getattr(info._apply_pre_grammar_logits_transforms, "_serve_patched", False):
         return
     stash_counter = [0]
     transforms_original = info._apply_pre_grammar_logits_transforms
@@ -291,10 +288,10 @@ def _patch_sampling_batch_info(torch, module) -> None:
             _patch_log(f"decode stash error: {type(failure).__name__}: {failure}")
         return transforms_original(self, logits)
 
-    transforms_with_stash._kot_patched = True
+    transforms_with_stash._serve_patched = True
     info._apply_pre_grammar_logits_transforms = transforms_with_stash
 
-    if getattr(info.from_schedule_batch, "_kot_patched", False):
+    if getattr(info.from_schedule_batch, "_serve_patched", False):
         return
     original = info.from_schedule_batch.__func__
 
@@ -312,7 +309,7 @@ def _patch_sampling_batch_info(torch, module) -> None:
             ).to(batch.device)
         return batch_info
 
-    from_schedule_batch_with_seed._kot_patched = True
+    from_schedule_batch_with_seed._serve_patched = True
     info.from_schedule_batch = classmethod(from_schedule_batch_with_seed)
 
 

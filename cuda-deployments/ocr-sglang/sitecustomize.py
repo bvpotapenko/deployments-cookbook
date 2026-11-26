@@ -1,4 +1,4 @@
-"""Patch SGLang so the kot contract's numerics can leave the engine.
+"""Expose full-vocabulary log probabilities for SGLang scoring requests.
 
 Imported by ``site`` in every python process this deployment starts (the
 adapter and the spawned scheduler/detokenizer processes): ``serve.sh``
@@ -8,16 +8,16 @@ applied when SGLang's own modules finish loading.
 
 Two monkeypatches, both additive: the original computation still runs and
 feeds SGLang's own logprob plumbing; the patch writes the full-vocabulary
-distribution of the scored positions where ``kot_server.py`` collects it.
+distribution of the scored positions where ``serve.py`` collects it.
 
 * ``LogitsProcessor.compute_temp_top_p_normalized_logprobs`` is where the
   log-softmax over the whole vocabulary exists for prefill positions. It is
   called once per extend forward for the input-logprob rows. The patch
   recomputes it in float32 -- SGLang runs it in the weights' dtype, and a
-  bfloat16 log-softmax quantises away what the benchmark measures -- and
+  bfloat16 log-softmax reduces precision -- and
   stashes the rows of prefill-only requests (``logits_metadata.is_prefill_only``).
   For a prefill over an expanded prompt of N positions the stashed matrix has
-  N rows; ``kot_server.py`` keeps the transcript's rows and drops the rest.
+  N rows; ``serve.py`` keeps the transcript's rows and drops the rest.
 
 * ``ModelRunner.sample`` is where every sampled token comes from, extend and
   decode steps alike. The patch stashes a float32 log-softmax of
@@ -40,9 +40,9 @@ on the tensor parallel rank so exactly one rank stashes. Files are named
 impossible, the per-process counter preserves write order -- and a
 ``.done.json`` beside each archive marks it complete, because ``np.savez``
 to a final name is not atomic. One score request is in flight at a time
-(the adapter serialises /kot/score), so every archive newer than the ones
+(the adapter serialises /score), so every archive newer than the ones
 seen when the request started belongs to that request, or to a chat request
-in its batch: the archives carry no request id, so ``kot_server.py`` fails a
+in its batch: the archives carry no request id, so ``serve.py`` fails a
 score whose row count is off.
 """
 
@@ -54,8 +54,8 @@ import sys
 # PYTHONPATH, no custom vars), so the stash directory cannot be passed by env
 # alone. The deterministic default matches serve.sh's own choice.
 STASH_DIR = (
-    os.environ.get("KOT_SGLANG_STASH_DIR")
-    or ("/scratch/kot-sglang-stash" if os.path.isdir("/scratch") else "/tmp/kot-sglang-stash")
+    os.environ.get("SERVE_SGLANG_STASH_DIR")
+    or ("/scratch/serve-sglang-stash" if os.path.isdir("/scratch") else "/tmp/serve-sglang-stash")
 )
 CAPTURE_MODE = bool(STASH_DIR)
 
@@ -67,7 +67,7 @@ _STASH_RANK: list[int | None] = [None]
 def _already_patched(module) -> bool:
     return getattr(
         module.LogitsProcessor.compute_temp_top_p_normalized_logprobs,
-        "_kot_patched",
+        "_serve_patched",
         False,
     )
 
@@ -170,7 +170,7 @@ class _PatchOnLoadFinder:
     def find_spec(self, fullname, path=None, target=None):
         from importlib.abc import Loader
 
-        if os.environ.get("KOT_SGLANG_DEBUG") and fullname in self.TARGETS:
+        if os.environ.get("SERVE_SGLANG_DEBUG") and fullname in self.TARGETS:
             print(f"[sitecustomize] target find_spec: {fullname} path={path}", flush=True)
         if fullname not in self.TARGETS:
             return None
@@ -185,7 +185,7 @@ class _PatchOnLoadFinder:
 
             def exec_module(self, module):
                 inner.exec_module(module)
-                if os.environ.get("KOT_SGLANG_DEBUG"):
+                if os.environ.get("SERVE_SGLANG_DEBUG"):
                     print(f"[sitecustomize] exec done: {fullname}", flush=True)
                 _apply_patch(fullname)
 
@@ -195,7 +195,7 @@ class _PatchOnLoadFinder:
 
 def _patch_log(message: str) -> None:
     """One line per patch event into the stash dir: the scheduler's env is
-    curated, so nothing else reaches kot_server.py from here."""
+    curated, so nothing else reaches serve.py from here."""
     try:
         with open(os.path.join(STASH_DIR, "patched.log"), "a", encoding="utf-8") as log:
             log.write(message + "\n")
@@ -262,7 +262,7 @@ def _patch_logits_processor(torch, module) -> None:
             pass
         return original(last_logits, logits_metadata, top_p, temperature)
 
-    compute_with_stash._kot_patched = True
+    compute_with_stash._serve_patched = True
     module.LogitsProcessor.compute_temp_top_p_normalized_logprobs = staticmethod(
         compute_with_stash
     )
@@ -277,7 +277,7 @@ def _patch_input_logprob(torch, module) -> None:
     extends that request input logprobs, which is exactly the score path's
     prefill-only requests.
     """
-    if getattr(module.InputLogprobProcessor.forward, "_kot_patched", False):
+    if getattr(module.InputLogprobProcessor.forward, "_serve_patched", False):
         return
     counter = [0]
     original = module.InputLogprobProcessor.forward
@@ -304,12 +304,12 @@ def _patch_input_logprob(torch, module) -> None:
                          get_logits_fn=capturing_get_logits,
                          logits_metadata=logits_metadata, **kwargs)
 
-    forward_with_stash._kot_patched = True
+    forward_with_stash._serve_patched = True
     module.InputLogprobProcessor.forward = forward_with_stash
 
 
 def _patch_model_runner(torch, module) -> None:
-    if getattr(module.ModelRunner.sample, "_kot_patched", False):
+    if getattr(module.ModelRunner.sample, "_serve_patched", False):
         return
     counter = [0]
     original = module.ModelRunner.sample
@@ -325,7 +325,7 @@ def _patch_model_runner(torch, module) -> None:
             pass
         return original(self, logits_output, forward_batch, *args, **kwargs)
 
-    sample_with_stash._kot_patched = True
+    sample_with_stash._serve_patched = True
     module.ModelRunner.sample = sample_with_stash
 
 
@@ -333,7 +333,7 @@ def _trace(message: str) -> None:
     """Forensics for the count path: /tmp, because the stash dir does not
     exist while modules load and the patch log swallows write errors."""
     try:
-        with open("/tmp/kot_patch_trace.log", "a", encoding="utf-8") as trace:
+        with open("/tmp/serve_patch_trace.log", "a", encoding="utf-8") as trace:
             trace.write(message + "\n")
     except Exception:
         pass
@@ -405,7 +405,7 @@ def _patch_ocr_processor(module) -> None:
     holds, built from the processor's own pixel path; the engine then takes
     the id-preserving path and the request's ids stay verbatim.
     """
-    if getattr(module.DeepseekOCRProcessor.__init__, "_kot_count_patched", False):
+    if getattr(module.DeepseekOCRProcessor.__init__, "_serve_count_patched", False):
         return
     original_init = module.DeepseekOCRProcessor.__init__
 
@@ -417,7 +417,7 @@ def _patch_ocr_processor(module) -> None:
         except Exception as failure:
             _trace(f"count method FAILED at init: {type(failure).__name__}: {failure}")
 
-    init_with_count._kot_count_patched = True
+    init_with_count._serve_count_patched = True
     module.DeepseekOCRProcessor.__init__ = init_with_count
 
 

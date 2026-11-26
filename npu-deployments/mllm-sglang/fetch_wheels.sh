@@ -18,7 +18,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WHEELS="$HERE/wheels"
-IMAGE="${KOT_NPU_IMAGE:-kot-mllm-ascend-910b:latest}"
+IMAGE="${SERVE_NPU_IMAGE:-serve-mllm-ascend-910b:latest}"
 KERNEL_TAG="${KERNEL_TAG:-2026.9.0.post1}"
 
 # Pin sglang at fetch time: reuse the recorded commit on reruns (main moves
@@ -89,7 +89,7 @@ echo "== wheels/ contents"
 # once and two wheels would both match the install glob. The torch/torch-
 # vision/torchaudio wheels the resolver pulled are the image's own stack
 # (pip download ignores installed dists); at install time the requirement is
-# satisfied by the image, so they only dead-weight the handed-back directory.
+# satisfied by the image, so they only dead-weight the deployment directory.
 cd "$WHEELS"
 ls sglang-*.whl | grep -v "g${SGLANG_COMMIT:0:9}" | xargs -r rm -f || true
 rm -f torch-*.whl torchvision-*.whl torchaudio-*.whl

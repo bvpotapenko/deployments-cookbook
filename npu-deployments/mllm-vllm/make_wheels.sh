@@ -2,7 +2,7 @@
 # Rebuild the offline wheel closure for this deployment (wheels/).
 #
 # The closure is the pip resolution of the engine pair (vllm==0.30.0 +
-# vllm-ascend==0.30.0) inside the graded image's python 3.12 against its
+# vllm-ascend==0.30.0) inside the deployment image's python 3.12 against its
 # system site packages, verified on the ascend-910b box; plus the six
 # platform wheels the Dockerfile bakes in. serve.sh installs the engine
 # offline from wheels/ into /scratch at first start; the Dockerfile COPYs

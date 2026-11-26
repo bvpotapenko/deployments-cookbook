@@ -28,9 +28,9 @@ the request; 42 is the convention.
 The stack runs on CPython 3.12.
 
 ```bash
-uv venv /root/kotvenv-ocr --python 3.12
-uv pip install --python /root/kotvenv-ocr/bin/python torch==2.14.1
-uv pip install --python /root/kotvenv-ocr/bin/python \
+uv venv /root/serve-venv-ocr --python 3.12
+uv pip install --python /root/serve-venv-ocr/bin/python torch==2.14.1
+uv pip install --python /root/serve-venv-ocr/bin/python \
   transformers==5.22.1 numpy safetensors pillow huggingface_hub pydantic pyyaml
 ```
 
@@ -64,7 +64,7 @@ deepseek_ocr2 conversion in memory, renames and stacks only) and checks
 tensor against the loaded model; build_processor reproduces the reference
 image path (257 global tokens, 144 per 768x768 tile). An image decodes by the
 checkpoint's own recipe: EXIF rotation, then `.convert("RGB")`, which drops
-alpha. The gates' report is stamped into /kot/info.
+alpha. The gates' report is stamped into /info.
 
 ### Transfer
 
@@ -106,8 +106,8 @@ same push.
 ```
 
 The process listens on 127.0.0.1 only. The launcher resolves its interpreter
-itself. It picks `KOT_OCR_PY`, else `/root/kotvenv-ocr/bin/python`, else
-`/root/kotvenv/bin/python`, else the ambient python3. The server loads one
+itself. It picks `SERVE_OCR_PY`, else `/root/serve-venv-ocr/bin/python`, else
+`/root/serve-venv/bin/python`, else the ambient python3. The server loads one
 checkpoint directory. The model path must hold `config.json`. A hub cache
 layout does not load here.
 
@@ -115,7 +115,7 @@ layout does not load here.
 
 | variable | default | effect |
 |---|---|---|
-| `KOT_OCR_PY` | unset | interpreter that carries the pinned stack. Set it when the venv is not at `/root/kotvenv-ocr`. |
+| `SERVE_OCR_PY` | unset | interpreter that carries the pinned stack. Set it when the venv is not at `/root/serve-venv-ocr`. |
 
 The script takes `--port`, `--model` and `--device`. `cuda` runs bfloat16
 under sdpa. `cpu` runs float32 under eager.
@@ -178,7 +178,7 @@ and without streaming. Stop an existing server before starting the check.
 `POST /v1/chat/completions` accepts one user message with one `image_url` part
 and text. The URL must use `data:image/...;base64,...`. The server uses the
 same image views, image-token expansion and seeded generation path as
-`/kot/score`. `max_completion_tokens` is preferred, with `max_tokens` as an
+`/score`. `max_completion_tokens` is preferred, with `max_tokens` as an
 alias. Streaming returns assistant role, text delta, stop, and `[DONE]` SSE
 chunks.
 
@@ -195,10 +195,10 @@ curl -s http://127.0.0.1:8090/v1/chat/completions \
 The identity surface answers with the engine's own facts:
 
 ```bash
-curl -s http://127.0.0.1:8090/kot/info | python3 -m json.tool
+curl -s http://127.0.0.1:8090/info | python3 -m json.tool
 ```
 
-The score surface takes the frozen template ids and an image; `/kot/score`
+The score surface takes the prompt template ids and an image; `/score`
 is the whole contract. Any image serves. An image with one side above 768 px
 exercises the crop path. The model reads a grid of 768x768 tiles beside the
 padded global view. The image block grows by 144 tokens per tile.
